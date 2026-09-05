@@ -80,8 +80,8 @@ resolve_port() {
     fi
 }
 
-# 解析命令行参数
-RUN_MODE="foreground"
+# 解析命令行参数 (默认后台守护进程，避免 Ctrl+C 退出)
+RUN_MODE="daemon"
 CUSTOM_PORT=""
 SKIP_SKILLS=false
 
@@ -89,6 +89,10 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --daemon|-d)
             RUN_MODE="daemon"
+            shift
+            ;;
+        --foreground|--fg|-f)
+            RUN_MODE="foreground"
             shift
             ;;
         --stop)
@@ -109,8 +113,9 @@ while [[ $# -gt 0 ]]; do
             ;;
         --help|-h)
             echo "TrainPilot Web 服务启动脚本使用说明:"
-            echo "  ./start.sh                 前台交互式启动控制面网关 (默认，自动同步全局 skills)"
-            echo "  ./start.sh --daemon, -d    后台守护进程模式启动"
+            echo "  ./start.sh                 后台守护进程模式启动 (默认，Ctrl+C 不退出，自动同步全局 skills)"
+            echo "  ./start.sh --foreground, -f  前台交互式启动控制面网关 (按 Ctrl+C 退出)"
+            echo "  ./start.sh --daemon, -d    后台守护进程模式启动 (同默认，保持兼容)"
             echo "  ./start.sh --stop          停止后台运行的网关进程"
             echo "  ./start.sh --status        查看网关运行状态及健康检查"
             echo "  ./start.sh --skip-skills   启动时跳过自动执行 ./setup_skills.sh"
