@@ -1,0 +1,119 @@
+"""Simulation script of a PyTorch training task encountering Loss NaN and recovering via TrainPilot HITL."""
+
+import math
+import os
+import sys
+import threading
+import time
+import requests
+
+# Ensure src is on python path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
+
+from trainpilot.agent import TrainPilotClient, TrainingGuardian
+
+
+def run_mock_training(gateway_url: str = "http://localhost:8000", task_id: str = "demo-llm-pretrain"):
+    print(f"\n==========================================")
+    print(f"🚀 Starting Simulated Training for Task: {task_id}")
+    print(f"🔗 Gateway: {gateway_url}")
+    print(f"==========================================\n")
+
+    client = TrainPilotClient(gateway_url=gateway_url, task_id=task_id)
+    guardian = TrainingGuardian(client=client, poll_interval=1.0, poll_timeout=60.0)
+
+    # Simulated training state
+    training_state = {
+        "lr": 1e-4,
+        "step": 0,
+        "loss": 2.5,
+        "checkpoint_step": 0,
+    }
+
+    # Register recovery handler for 'reduce_lr_rollback'
+    def handle_reduce_lr_rollback(payload):
+        print(f"\n[Guardian Callback] 📉 Executing Recovery: reduce_lr_rollback")
+        old_lr = training_state["lr"]
+        training_state["lr"] = old_lr * 0.5
+        recovered_step = training_state["checkpoint_step"]
+        training_state["step"] = recovered_step
+        training_state["loss"] = 1.2
+        print(f"[Guardian Callback] 🔄 Rolled back to step {recovered_step}, LR reduced from {old_lr} to {training_state['lr']}\n")
+        return {"recovered_step": recovered_step, "new_lr": training_state["lr"]}
+
+    guardian.register_action_handler("reduce_lr_rollback", handle_reduce_lr_rollback)
+
+    # Simulate steps
+    total_steps = 10
+    simulated_human_triggered = False
+
+    while training_state["step"] < total_steps:
+        training_state["step"] += 1
+        current_step = training_state["step"]
+
+        # Simulate checkpoint at step 4
+        if current_step == 4:
+            training_state["checkpoint_step"] = 4
+            client.notify_milestone(
+                message="Checkpoint saved at step 4",
+                step=current_step,
+                epoch=1,
+                metrics={"loss": 1.18, "lr": training_state["lr"]},
+            )
+
+        # Simulate Loss NaN anomaly at step 6
+        if current_step == 6 and not simulated_human_triggered:
+            simulated_human_triggered = True
+            current_loss = float("nan")
+            print(f"[Step {current_step}] ⚠️ Triggering anomaly: Loss is NaN!")
+
+            # Start a background timer to simulate human engineer clicking "reduce_lr_rollback" on Feishu after 3 seconds
+            def simulate_human_click():
+                time.sleep(3.0)
+                print("\n[Human Simulator] 👨‍💻 Engineer clicked 'reduce_lr_rollback' on Feishu interactive card!")
+                try:
+                    res = requests.post(
+                        f"{gateway_url}/api/tasks/{task_id}/decision",
+                        json={
+                            "task_id": task_id,
+                            "action": "reduce_lr_rollback",
+                            "operator": "Senior ML Engineer (Feishu)",
+                        },
+                        timeout=5,
+                    )
+                    res.raise_for_status()
+                except Exception as err:
+                    print(f"[Human Simulator Error] {err}")
+
+            t = threading.Thread(target=simulate_human_click, daemon=True)
+            t.start()
+        else:
+            # Normal descent
+            current_loss = max(0.2, training_state["loss"] - 0.1 * current_step)
+
+        # Check loss with guardian (will pause and block if NaN until human decides!)
+        guardian.check_and_handle_loss(
+            loss_val=current_loss,
+            step=current_step,
+            epoch=1,
+            extra_metrics={"lr": training_state["lr"]},
+        )
+
+        print(f"[Step {training_state['step']}] Normal iteration completed. Loss: {current_loss:.4f}, LR: {training_state['lr']:.2e}")
+        time.sleep(0.3)
+
+    # Training completed
+    client.notify_event(
+        event_type="completed",
+        message="Simulated training completed successfully!",
+        step=training_state["step"],
+        epoch=1,
+        metrics={"final_loss": 0.25},
+    )
+    print("\n🎉 Training run successfully concluded!\n")
+
+
+if __name__ == "__main__":
+    url = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8000"
+    task = sys.argv[2] if len(sys.argv) > 2 else "demo-llm-pretrain"
+    run_mock_training(url, task)
