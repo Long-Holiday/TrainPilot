@@ -81,6 +81,8 @@ class FeishuCardClient:
         step: Optional[int] = None,
         epoch: Optional[int] = None,
         metrics: Optional[Dict[str, Any]] = None,
+        agent_note: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Send a milestone notification card to the configured receiver."""
         card_content = build_milestone_card(
@@ -89,6 +91,8 @@ class FeishuCardClient:
             step=step,
             epoch=epoch,
             metrics=metrics,
+            agent_note=agent_note,
+            extra=extra,
         )
         return self._send_card(
             task_id=task_id,

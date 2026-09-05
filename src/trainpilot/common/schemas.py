@@ -22,6 +22,11 @@ class EventNotifyRequest(BaseModel):
     epoch: Optional[int] = Field(None, description="Current epoch counter")
     metrics: Optional[Dict[str, Any]] = Field(default=None, description="Loss, LR, accuracy, memory, etc.")
     extra: Optional[Dict[str, Any]] = Field(default=None, description="Arbitrary additional context")
+    agent_note: Optional[str] = Field(
+        default=None,
+        description="外部 AI 智能体 (agy/opencode/claude-code) 针对当前实际情况自主生成的阶段点评, "
+        "将渲染到飞书里程碑卡片的 🤖 Agent 智能点评 区块",
+    )
     timestamp: str = Field(default_factory=utc_now_iso, description="ISO timestamp of event occurrence")
 
 

@@ -49,6 +49,8 @@ def _dispatch_feishu(req: EventNotifyRequest) -> None:
                 step=req.step,
                 epoch=req.epoch,
                 metrics=req.metrics,
+                agent_note=req.agent_note,
+                extra=req.extra,
             )
     except Exception as exc:
         logger.error("Failed to forward event %s to Feishu: %s", req.event_type, exc)

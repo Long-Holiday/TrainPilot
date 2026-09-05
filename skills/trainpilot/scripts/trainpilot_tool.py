@@ -119,6 +119,7 @@ def cmd_report_milestone(args) -> int:
         "step": args.step,
         "epoch": args.epoch,
         "metrics": metrics,
+        "agent_note": getattr(args, "agent_note", None),
     }
     try:
         resp = requests.post(url, json=payload, timeout=args.timeout, headers=_auth_headers(args))
@@ -141,6 +142,7 @@ def cmd_report_alert(args) -> int:
         "step": args.step,
         "epoch": args.epoch,
         "metrics": metrics,
+        "agent_note": getattr(args, "agent_note", None),
     }
     try:
         resp = requests.post(url, json=payload, timeout=args.timeout, headers=_auth_headers(args))
@@ -275,6 +277,11 @@ def main():
     p_milestone.add_argument("--step", type=int, default=None, help="Training step counter")
     p_milestone.add_argument("--epoch", type=int, default=None, help="Training epoch counter")
     p_milestone.add_argument("--metrics", default=None, help='Metrics JSON or "loss=0.2,acc=0.9"')
+    p_milestone.add_argument(
+        "--agent-note",
+        default=None,
+        help="外部 AI 智能体针对当前实际情况自主生成的 1-3 句点评, 将渲染到飞书卡片 🤖 Agent 智能点评 区块",
+    )
     p_milestone.set_defaults(func=cmd_report_milestone)
 
     # report-alert
@@ -283,6 +290,11 @@ def main():
     p_alert.add_argument("--step", type=int, default=None, help="Training step counter")
     p_alert.add_argument("--epoch", type=int, default=None, help="Training epoch counter")
     p_alert.add_argument("--metrics", default=None, help='Metrics JSON or "loss=NaN"')
+    p_alert.add_argument(
+        "--agent-note",
+        default=None,
+        help="可选: AI 智能体对异常的初步研判 (里程碑卡片会独立展示, 告警卡片暂透传存储)",
+    )
     p_alert.set_defaults(func=cmd_report_alert)
 
     # poll-instruction

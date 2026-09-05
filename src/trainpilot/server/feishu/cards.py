@@ -16,6 +16,26 @@ def _format_metrics(metrics: Optional[Dict[str, Any]]) -> str:
     return "  |  ".join(items)
 
 
+def _resolve_agent_note(
+    agent_note: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """统一解析 Agent 自主点评。
+
+    优先级: 显式 ``agent_note`` 参数 > ``extra`` 中的
+    ``agent_note`` / ``agent_analysis`` / ``agent_comment``。
+    空字符串视为未提供, 返回 None 以保持向后兼容。
+    """
+    if agent_note is not None and str(agent_note).strip():
+        return str(agent_note).strip()
+    if extra:
+        for key in ("agent_note", "agent_analysis", "agent_comment"):
+            val = extra.get(key)
+            if val is not None and str(val).strip():
+                return str(val).strip()
+    return None
+
+
 def build_alert_card(
     task_id: str,
     message: str,
@@ -103,9 +123,19 @@ def build_milestone_card(
     step: Optional[int] = None,
     epoch: Optional[int] = None,
     metrics: Optional[Dict[str, Any]] = None,
+    agent_note: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Construct an informative milestone card (read-only) without buttons."""
+    """Construct an informative milestone card (read-only) without buttons.
+
+    ``agent_note`` 为外部 AI 智能体 (agy / opencode / claude-code) 针对当前
+    实际情况自主生成的 1-3 句点评 (如收敛趋势、指标解读、风险提示、下一步建议),
+    渲染为独立的 ``🤖 Agent 智能点评`` 区块, 与原始 ``📝 阶段描述`` 分开展示。
+    为向后兼容, 未提供时也会尝试从 ``extra`` 中解析
+    ``agent_note`` / ``agent_analysis`` / ``agent_comment``。
+    """
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    resolved_note = _resolve_agent_note(agent_note, extra)
 
     markdown_lines = [
         f"**🎯 任务标识**: `{task_id}`",
@@ -113,6 +143,10 @@ def build_milestone_card(
         f"**📊 关键指标**: {_format_metrics(metrics)}",
         f"**📝 阶段描述**: \n> {message}",
     ]
+    if resolved_note:
+        markdown_lines.extend([
+            f"**🤖 Agent 智能点评**: \n> {resolved_note}",
+        ])
 
     elements: List[Dict[str, Any]] = [
         {

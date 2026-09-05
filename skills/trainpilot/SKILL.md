@@ -33,13 +33,22 @@ The skill provides an executable script `scripts/trainpilot_tool.py` runnable di
 
 | Goal | CLI Command |
 |---|---|
-| **Report Milestone** | `python3 skills/trainpilot/scripts/trainpilot_tool.py report-milestone --task-id <ID> --step <N> --message "Epoch 1 done" --metrics "loss=0.35,val_loss=0.42"` |
+| **Report Milestone** | `python3 skills/trainpilot/scripts/trainpilot_tool.py report-milestone --task-id <ID> --step <N> --message "Epoch 1 done" --metrics "loss=0.35,val_loss=0.42" --agent-note "Loss 连续下降，收敛平稳，建议保持 lr"` |
 | **Report Anomaly & Alert** | `python3 skills/trainpilot/scripts/trainpilot_tool.py report-alert --task-id <ID> --step <N> --message "Loss NaN at step 1450" --metrics "loss=NaN"` |
 | **Poll Human Decision** | `python3 skills/trainpilot/scripts/trainpilot_tool.py poll-instruction --task-id <ID> --wait --wait-timeout 300` |
 | **Acknowledge Recovery** | `python3 skills/trainpilot/scripts/trainpilot_tool.py ack-instruction --task-id <ID> --action self_resolve --status success` |
 | **Send Heartbeat** | `python3 skills/trainpilot/scripts/trainpilot_tool.py send-heartbeat --task-id <ID> --step <N> --metrics "gpu_mem=85%"` |
 | **Query Task Status** | `python3 skills/trainpilot/scripts/trainpilot_tool.py get-status --task-id <ID>` |
 | **Mock Decision (Dev/Test)** | `python3 skills/trainpilot/scripts/trainpilot_tool.py mock-decision --task-id <ID> --action self_resolve` |
+
+> [!IMPORTANT]
+> **上报里程碑务必附带 `--agent-note` (AI Agent 自主点评)**：由外部 AI 智能体
+> （agy / opencode / claude-code）**针对当前实际情况自主撰写 1-3 句点评**并随里程碑
+> 一并上报，最终以 ``🤖 Agent 智能点评`` 区块呈现在飞书里程碑卡片中（紧随
+> ``📝 阶段描述`` 之后）。点评应基于真实的训练日志与指标，涵盖：当前收敛/震荡趋势、
+> 关键指标解读、存在的风险点（如 val 过拟合、梯度范数偏大）、以及给工程师的下一步建议。
+> 不要逐字复述 `--message`，不要编造指标。示例：
+> `--agent-note "val_loss 降至 0.42 为当前新低，train/val 差距约 0.08 未见明显过拟合；lr 按 schedule 衰减中，建议本 epoch 后做一次 eval 存档。"`
 
 > [!NOTE]
 > 网关地址解析 (GPU 侧): `--gateway` 参数 > 环境变量 `TRAINPILOT_GATEWAY_URL` (完整 URL)
@@ -62,8 +71,13 @@ python3 skills/trainpilot/scripts/trainpilot_tool.py report-milestone \
   --step 1000 \
   --epoch 1 \
   --message "Epoch 1 finished, validation loss reached new minimum" \
-  --metrics '{"loss": 0.421, "val_loss": 0.450, "learning_rate": 0.0001}'
+  --metrics '{"loss": 0.421, "val_loss": 0.450, "learning_rate": 0.0001}' \
+  --agent-note "val_loss 0.450 为当前新低，train/val 差距稳定未见过拟合；loss 曲线平滑，建议保持当前超参并在下一里程碑前做一次完整 eval + checkpoint 存档。"
 ```
+> **`--agent-note` 由你自主撰写**：请作为执行上报的 AI 智能体，根据此刻掌握的
+> 训练日志、loss 曲线、显存、数据批次等实际情况，写出 1-3 句**独立于 `--message`**
+> 的阶段点评（趋势判断 / 指标解读 / 风险提示 / 建议动作），不要逐字复述 message。
+> 飞书卡片将把 message 显示在 `📝 阶段描述`，把 agent-note 显示在 `🤖 Agent 智能点评`。
 
 ### 2. Anomaly Alert & Freezing
 When NaN or sudden loss spike is intercepted:
@@ -155,12 +169,19 @@ hook = TrainPilotPyTorchHook(
     task_id="qwen2-7b-sft-0905",
     gateway_url="http://control-plane.example.com:28780",
     milestone_step_interval=100,
+    auto_agent_note=True,  # 未显式提供 agent_note 时基于指标自动生成兜底点评
 )
 hook.register_recovery_callback("self_resolve", my_continue_fn)
 
 # In loop:
-hook.on_step_end(step=step, loss=loss_val, lr=current_lr)
+hook.on_step_end(step=step, loss=loss_val, lr=current_lr, agent_note="收敛平稳，建议继续")
 ```
+
+> [!NOTE]
+> **Python SDK 上报 Agent 点评**：`client.notify_milestone(..., agent_note="...")` /
+> `client.notify_alert(..., agent_note="...")` 同样支持该字段。外部 AI 智能体若通过
+> SDK 上报，应自行撰写并传入 `agent_note`；传入 `hook.on_step_end(...)` / `on_epoch_end(...)`
+> 亦同。
 
 ---
 
@@ -187,3 +208,5 @@ hook.on_step_end(step=step, loss=loss_val, lr=current_lr)
 1. **Do NOT poll without pop consideration**: Default polling pops the pending instruction and transitions status to `RECOVERING`. If you only want to inspect status, use `--no-pop` or `get-status`.
 2. **Always ACK after recovery**: If an agent fails to ACK the instruction, the gateway state will remain in `RECOVERING` rather than transitioning back to `RUNNING`.
 3. **No Feishu credentials needed on GPU machines**: The GPU agent only connects to the control plane via standard HTTP requests.
+4. **Milestone 上报尽量附 agent-note**: 它是飞书里程碑卡片中 `🤖 Agent 智能点评` 的内容来源, 由上报的 AI 智能体根据真实情况自主撰写; 请勿编造指标, 也勿逐字复刻 `--message`。
+5. **向后兼容**: `agent_note` 为可选字段。不传时卡片只显示 `📝 阶段描述`, 行为与旧版本完全一致。

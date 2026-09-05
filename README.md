@@ -151,13 +151,16 @@ uv run pytest tests/test_e2e_simulation.py -v -s
 
 ```bash
 # 1. 上报训练阶段里程碑 (静默记录，推送飞书只读绿色卡片)
+#    --agent-note: 由外部 AI 智能体 (agy/opencode/claude-code) 针对实际训练情况自主生成的
+#    1-3 句点评，将呈现在飞书卡片 "🤖 Agent 智能点评" 区块
 python3 skills/trainpilot/scripts/trainpilot_tool.py report-milestone \
   --gateway "http://127.0.0.1:28780" \
   --task-id "qwen2-7b-sft-0905" \
   --step 1000 \
   --epoch 1 \
   --message "Epoch 1 finished successfully" \
-  --metrics "loss=0.41,val_loss=0.43"
+  --metrics "loss=0.41,val_loss=0.43" \
+  --agent-note "val_loss 0.43 为本轮新低，train/val 差距约 0.08 未见明显过拟合；loss 曲线平滑，建议保持当前 lr 继续观察并在下一里程碑做 eval 存档。"
 
 # 2. 上报训练异常并挂起现场 (推送飞书红色告警卡片，等待工程师决策)
 python3 skills/trainpilot/scripts/trainpilot_tool.py report-alert \
@@ -230,6 +233,15 @@ for step, batch in enumerate(dataloader):
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
+
+# 上报里程碑并附带 AI Agent 自主点评（可选，会渲染为飞书卡片 🤖 Agent 智能点评）
+client.notify_milestone(
+    message="Epoch 1 finished",
+    step=1000,
+    epoch=1,
+    metrics={"loss": 0.41, "val_loss": 0.43},
+    agent_note="收敛平稳，train/val 未见过拟合，建议保持当前超参。",
+)
 ```
 
 或者使用通用训练 Hook：

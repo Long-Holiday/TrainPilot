@@ -104,6 +104,7 @@ class TaskMailboxManager:
                 "metrics": req.metrics,
                 "timestamp": req.timestamp,
                 "extra": req.extra,
+                "agent_note": req.agent_note,
             }
             task.events.append(event_entry)
             # Ring-buffer cap: drop oldest to bound memory on long trainings.

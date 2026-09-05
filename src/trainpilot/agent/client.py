@@ -146,6 +146,7 @@ class TrainPilotClient:
         epoch: Optional[int] = None,
         metrics: Optional[Dict[str, Any]] = None,
         extra: Optional[Dict[str, Any]] = None,
+        agent_note: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Report any event (alert, milestone, completed, failed) to the gateway."""
         url = f"{self.gateway_url}/api/tasks/notify"
@@ -157,6 +158,7 @@ class TrainPilotClient:
             "epoch": epoch,
             "metrics": metrics,
             "extra": extra,
+            "agent_note": agent_note,
         }
         payload = _sanitize_for_json(raw_payload)
         try:
@@ -175,14 +177,23 @@ class TrainPilotClient:
         step: Optional[int] = None,
         epoch: Optional[int] = None,
         metrics: Optional[Dict[str, Any]] = None,
+        agent_note: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Report a cruising milestone (e.g., epoch finished, checkpoint saved)."""
+        """Report a cruising milestone (e.g., epoch finished, checkpoint saved).
+
+        ``agent_note``: 外部 AI 智能体针对当前实际情况自主生成的 1-3 句点评,
+        将展示在飞书卡片 ``🤖 Agent 智能点评`` 区块。如不提供则仅展示 message
+        (向后兼容)。
+        """
         return self.notify_event(
             event_type="milestone",
             message=message,
             step=step,
             epoch=epoch,
             metrics=metrics,
+            extra=extra,
+            agent_note=agent_note,
         )
 
     def notify_alert(
@@ -192,6 +203,7 @@ class TrainPilotClient:
         epoch: Optional[int] = None,
         metrics: Optional[Dict[str, Any]] = None,
         extra: Optional[Dict[str, Any]] = None,
+        agent_note: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Report a high-priority alert (Loss NaN, OOM, loss explosion) and request HITL intervention."""
         return self.notify_event(
@@ -201,6 +213,7 @@ class TrainPilotClient:
             epoch=epoch,
             metrics=metrics,
             extra=extra,
+            agent_note=agent_note,
         )
 
     def poll_instruction(
