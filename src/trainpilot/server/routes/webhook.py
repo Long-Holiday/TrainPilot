@@ -3,7 +3,7 @@
 import json
 import logging
 from typing import Any, Dict
-from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response, status
 
 from trainpilot.server.config import settings
 from trainpilot.server.feishu.cards import build_resolved_card
@@ -16,7 +16,7 @@ router = APIRouter(prefix="/webhook", tags=["Feishu Webhook"])
 
 
 @router.post("/feishu")
-async def feishu_webhook(request: Request) -> Any:
+async def feishu_webhook(request: Request, background_tasks: BackgroundTasks) -> Any:
     """Handle Feishu URL verification challenge and interactive card button clicks."""
     try:
         raw_body = await request.body()
@@ -92,8 +92,9 @@ async def feishu_webhook(request: Request) -> Any:
         resolved_at=instruction.decided_at,
     )
 
-    # Also notify client tracker
-    default_feishu_client.update_card_to_resolved(
+    # Also notify client tracker asynchronously (run in background task so response returns in <50ms)
+    background_tasks.add_task(
+        default_feishu_client.update_card_to_resolved,
         task_id=task_id,
         action=action,
         operator=operator_name,

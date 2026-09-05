@@ -185,6 +185,21 @@ def run_real_gpu_training(
             # 如果配置了 feishu_wait_seconds > 0，先等待用户在真实飞书中点击卡片按钮；
             # 若在设定等待时间内用户未点击，则自动通过网关决策接口注入决策，确保测试顺畅闭环。
             def decision_watcher():
+                # 1. 首先等待告警上报完成且网关进入 WAITING 状态，避免误读之前的 RUNNING 状态
+                wait_alert_start = time.time()
+                while time.time() - wait_alert_start < 8.0:
+                    try:
+                        resp = requests.get(
+                            f"{gateway_url}/api/tasks/{task_id}/status",
+                            headers=_auth_headers(api_token),
+                            timeout=3,
+                        )
+                        if resp.status_code == 200 and resp.json().get("state") == "WAITING":
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(0.5)
+
                 if feishu_wait_seconds > 0:
                     print(f"\n[飞书交互提醒] 📲 告警卡片已推送到飞书群！")
                     print(f"[飞书交互提醒] 您可以在飞书群中点击卡片上的【停止训练 / 自行解决】按钮进行真实决策。")
@@ -308,7 +323,23 @@ def run_real_gpu_training(
             print(f"  {idx}. [{ev_type.upper()}] Step {ev_step}: {ev_msg} (Metrics: {ev_metrics})")
 
 
+def _load_env_fallback():
+    """若当前未设置环境变量，优先尝试从项目根目录 .env 加载配置。"""
+    env_file = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
+    if os.path.isfile(env_file):
+        with open(env_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip("'\"")
+                    if k not in os.environ:
+                        os.environ[k] = v
+
+
 if __name__ == "__main__":
+    _load_env_fallback()
     from trainpilot.common.gateway import resolve_gateway_url
 
     parser = argparse.ArgumentParser(description="TrainPilot Real GPU Training Test")
@@ -330,7 +361,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--feishu-wait",
         type=float,
-        default=15.0,
+        default=25.0,
         help="Seconds to wait for Feishu card manual click before auto-fallback",
     )
     parser.add_argument(
@@ -341,12 +372,19 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    run_real_gpu_training(
-        gateway_url=args.gateway,
-        api_token=args.token,
-        task_id=args.task_id,
-        total_steps=args.steps,
-        checkpoint_step=3,
-        anomaly_step=5,
-        feishu_wait_seconds=args.feishu_wait,
-    )
+    from trainpilot.agent import StopTrainingException
+    try:
+        run_real_gpu_training(
+            gateway_url=args.gateway,
+            api_token=args.token,
+            task_id=args.task_id,
+            total_steps=args.steps,
+            checkpoint_step=3,
+            anomaly_step=5,
+            feishu_wait_seconds=args.feishu_wait,
+        )
+    except StopTrainingException:
+        print("\n" + "=" * 60)
+        print("🛑 收到飞书操作人员人工决策【停止训练】，GPU 训练已安全优雅终止！")
+        print("=" * 60)
+
