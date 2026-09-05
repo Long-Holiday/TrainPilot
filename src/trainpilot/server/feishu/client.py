@@ -51,8 +51,14 @@ class FeishuCardClient:
         epoch: Optional[int] = None,
         metrics: Optional[Dict[str, Any]] = None,
         extra: Optional[Dict[str, Any]] = None,
+        timeout_seconds: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Send an interactive alert card to the configured receiver."""
+        if timeout_seconds is None:
+            try:
+                timeout_seconds = int(self.settings.alert_decision_timeout_seconds)
+            except Exception:
+                timeout_seconds = 30
         card_content = build_alert_card(
             task_id=task_id,
             message=message,
@@ -60,6 +66,7 @@ class FeishuCardClient:
             epoch=epoch,
             metrics=metrics,
             extra=extra,
+            timeout_seconds=timeout_seconds,
         )
         return self._send_card(
             task_id=task_id,

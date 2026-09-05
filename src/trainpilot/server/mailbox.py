@@ -60,6 +60,7 @@ class TaskRecord:
     pending_instruction: Optional[InstructionResponse] = None
     latest_instruction: Optional[Dict[str, Any]] = None
     last_alert_fingerprint: Optional[str] = None
+    last_alert_at: Optional[str] = None
 
 
 class TaskMailboxManager:
@@ -114,6 +115,7 @@ class TaskMailboxManager:
                 fp = _alert_fingerprint(req)
                 is_retry = fp == task.last_alert_fingerprint
                 task.last_alert_fingerprint = fp
+                task.last_alert_at = task.updated_at
                 task.state = TaskState.WAITING
                 if is_retry:
                     # Network retry of identical alert: preserve pending human decision.
@@ -181,6 +183,57 @@ class TaskMailboxManager:
             task.updated_at = now_iso
             logger.info("Decision submitted for task %s by %s: action=%s, id=%s",
                         task_id, operator, action, inst_id)
+            return instruction
+
+    def try_auto_resolve(
+        self,
+        task_id: str,
+        action: str = "self_resolve",
+        operator: str = "system_auto_resolve (30s timeout)",
+        timeout_seconds: float = 30,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Optional[InstructionResponse]:
+        """Conditionally auto-resolve an alert that received no human decision in time.
+
+        仅当任务仍处于 WAITING 且无待消费指令、且距离上次告警已超过
+        timeout_seconds 时才写入自动“自行解决”决策。人工已决策时为 no-op，
+        因此定时器与人工点击竞态时人工优先。
+        """
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                return None
+            if task.state != TaskState.WAITING:
+                return None
+            if task.pending_instruction is not None:
+                return None
+            base_ts = task.last_alert_at or task.updated_at
+            base_dt = _parse_iso(base_ts)
+            if base_dt is None:
+                return None
+            now = datetime.now(timezone.utc)
+            if (now - base_dt).total_seconds() < timeout_seconds:
+                # 期间产生了更新鲜的告警，等待新一轮超时。
+                return None
+            inst_id = f"inst_{uuid.uuid4().hex[:12]}"
+            now_iso = utc_now_iso()
+            auto_payload = dict(payload or {})
+            auto_payload.setdefault("auto_resolved", True)
+            auto_payload.setdefault("timeout_seconds", timeout_seconds)
+            instruction = InstructionResponse(
+                ready=True,
+                status=TaskState.RESOLVED,
+                instruction_id=inst_id,
+                action=action,
+                payload=auto_payload,
+                decision_by=operator,
+                decided_at=now_iso,
+            )
+            task.pending_instruction = instruction
+            task.state = TaskState.RESOLVED
+            task.updated_at = now_iso
+            logger.warning("Task %s auto-resolved to '%s' after %.1fs without human decision",
+                           task_id, action, timeout_seconds)
             return instruction
 
     def get_instruction(self, task_id: str, pop: bool = True) -> InstructionResponse:

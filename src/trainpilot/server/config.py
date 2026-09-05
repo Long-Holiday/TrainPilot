@@ -61,6 +61,12 @@ class ServerSettings(BaseSettings):
         description="Seconds without heartbeat before marking task as potentially stalled",
     )
 
+    # HITL alert decision timeout: seconds without human click before auto self-resolve.
+    alert_decision_timeout_seconds: int = Field(
+        default=30,
+        description="Seconds an alert card waits for human decision before auto self-resolve",
+    )
+
     # API Authentication (optional, but strongly recommended for public gateways)
     # When set, GPU Agents must send `Authorization: Bearer <token>` or `X-API-Token: <token>`.
     # Webhook uses Feishu verification token separately and is not affected.

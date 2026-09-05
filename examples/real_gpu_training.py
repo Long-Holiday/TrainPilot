@@ -3,11 +3,10 @@
 Demonstrates:
 1. Real CUDA tensor operations and neural network training on NVIDIA GPU.
 2. Real-time GPU VRAM telemetry reporting to TrainPilot Gateway.
-3. Checkpoint snapshotting on GPU.
-4. Loss NaN anomaly detection & live freezing.
-5. Feishu interactive card dispatch to real Feishu chat.
-6. HITL human decision polling, state rollback, LR decay, and ACK recovery.
-7. Post-recovery training continuation to successful completion.
+3. Loss NaN anomaly detection & live freezing.
+4. Feishu interactive card dispatch (停止训练 / 自行解决) to real Feishu chat.
+5. HITL human decision polling and ACK recovery.
+6. Post-recovery training continuation to successful completion.
 """
 
 import argparse
@@ -120,10 +119,11 @@ def run_real_gpu_training(
     guardian = TrainingGuardian(
         client=client,
         poll_interval=1.5,
-        poll_timeout=120.0,
+        poll_timeout=30.0,
+        timeout_fallback_action="self_resolve",
     )
 
-    # 保存 Checkpoint 状态字典
+    # 保存 Checkpoint 状态字典（仅用于里程碑记录，自行解决时不回滚）
     saved_checkpoint = {
         "step": 0,
         "model_state": None,
@@ -131,32 +131,8 @@ def run_real_gpu_training(
         "lr": initial_lr,
     }
 
-    # 注册恢复动作回调
-    def handle_reduce_lr_rollback(payload):
-        print(f"\n[Guardian Callback] 📉 执行恢复策略: reduce_lr_rollback")
-        if saved_checkpoint["model_state"] is not None:
-            model.load_state_dict(saved_checkpoint["model_state"])
-            optimizer.load_state_dict(saved_checkpoint["opt_state"])
-            old_lr = saved_checkpoint["lr"]
-            new_lr = old_lr * 0.5
-            for param_group in optimizer.param_groups:
-                param_group["lr"] = new_lr
-            saved_checkpoint["lr"] = new_lr
-            current_step = saved_checkpoint["step"]
-            print(f"[Guardian Callback] 🔄 已将模型与优化器回滚至 Step {current_step} 权重")
-            print(f"[Guardian Callback] 📉 学习率从 {old_lr:.2e} 下调至 {new_lr:.2e}\n")
-            return {
-                "rollback_step": current_step,
-                "new_lr": new_lr,
-                "recovered_gpu_vram_mb": get_gpu_vram_mb(device),
-            }
-        else:
-            print("[Guardian Callback] ⚠️ 未找到保存的 Checkpoint，保持当前模型并下调 LR")
-            for param_group in optimizer.param_groups:
-                param_group["lr"] *= 0.5
-            return {"fallback": "reduced_lr_only"}
-
-    guardian.register_action_handler("reduce_lr_rollback", handle_reduce_lr_rollback)
+    # 自行解决：默认继续训练，无须自定义恢复逻辑。
+    # 停止训练：默认抛 StopTrainingException 优雅退出。
 
     # 4. 开始训练循环
     step = 0
@@ -211,8 +187,8 @@ def run_real_gpu_training(
             def decision_watcher():
                 if feishu_wait_seconds > 0:
                     print(f"\n[飞书交互提醒] 📲 告警卡片已推送到飞书群！")
-                    print(f"[飞书交互提醒] 您可以在飞书群中点击卡片上的【回滚Checkpoint并降LR】按钮进行真实决策。")
-                    print(f"[飞书交互提醒] 将等待 {feishu_wait_seconds:.0f} 秒... 如未点击将自动兜底注入决策。\n")
+                    print(f"[飞书交互提醒] 您可以在飞书群中点击卡片上的【停止训练 / 自行解决】按钮进行真实决策。")
+                    print(f"[飞书交互提醒] 将等待 {feishu_wait_seconds:.0f} 秒... 如未点击将自动视为自行解决。\n")
 
                 start_wait = time.time()
                 while time.time() - start_wait < feishu_wait_seconds:
@@ -232,15 +208,15 @@ def run_real_gpu_training(
                         pass
                     time.sleep(2.0)
 
-                # 超时后自动兜底提交决策
-                print("\n[自动兜底决策] 🤖 等待超时，自动向网关注入 'reduce_lr_rollback' 决策以闭环恢复...")
+                # 超时后自动兜底提交决策（与服务端 30s 自动自行解决语义一致）
+                print("\n[自动兜底决策] 🤖 等待超时，自动向网关注入 'self_resolve' 决策以闭环恢复...")
                 try:
                     res = requests.post(
                         f"{gateway_url}/api/tasks/{task_id}/decision",
                         headers=_auth_headers(api_token),
                         json={
                             "task_id": task_id,
-                            "action": "reduce_lr_rollback",
+                            "action": "self_resolve",
                             "operator": "Auto-Test-Fallback (or Feishu Timeout)",
                         },
                         timeout=5,
@@ -272,12 +248,7 @@ def run_real_gpu_training(
             },
         )
 
-        # 若发生了异常回滚，将当前 step 重置为回滚的目标 step
-        if anomaly_triggered and step == anomaly_step:
-            print(f"🔄 [Step {step}] 异常恢复完毕，将 step 从 {step} 重置为 Checkpoint 步骤 {saved_checkpoint['step']}")
-            step = saved_checkpoint["step"]
-            # 恢复后继续训练，跳过该步的正常打印
-            continue
+        # 若发生异常并自行解决，直接继续训练，不回滚 step。
 
         # 正常训练步
         print(f"📊 [Step {step}/{total_steps}] 正常训练步完成 - Loss: {loss_val:.4f}, LR: {current_lr:.2e}, GPU显存: {vram_mb} MB")

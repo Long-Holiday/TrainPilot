@@ -94,12 +94,12 @@ def test_skills_cli_full_flow(live_server):
     res = run_cli_cmd(
         "--task-id", task_id,
         "mock-decision",
-        "--action", "reduce_lr_rollback",
+        "--action", "self_resolve",
         "--operator", "Agent-Tester",
     )
     assert res.returncode == 0, res.stderr
     out = json.loads(res.stdout)
-    assert out["action"] == "reduce_lr_rollback"
+    assert out["action"] == "self_resolve"
     inst_id = out["instruction_id"]
 
     # 5. Poll with pop -> ready: true
@@ -110,13 +110,13 @@ def test_skills_cli_full_flow(live_server):
     assert res.returncode == 0, res.stderr
     out = json.loads(res.stdout)
     assert out["ready"] is True
-    assert out["action"] == "reduce_lr_rollback"
+    assert out["action"] == "self_resolve"
 
     # 6. Ack instruction via CLI
     res = run_cli_cmd(
         "--task-id", task_id,
         "ack-instruction",
-        "--action", "reduce_lr_rollback",
+        "--action", "self_resolve",
         "--instruction-id", inst_id,
         "--status", "success",
     )

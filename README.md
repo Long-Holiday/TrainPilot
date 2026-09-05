@@ -41,7 +41,7 @@ TrainPilot 专为大规模深度学习分布式训练（PyTorch / DeepSpeed / Sl
    │        ▼          │                                  │                                            │
    │   GPU Agent 进程  │─── 1. POST /api/tasks/notify ───►│                                            │
    │ (纯原生 requests)  │    (上报异常或阶段里程碑)        │─── 2. lark_oapi 发送富文本卡片 ──────────►│
-   │                   │                                  │       (带 [降LR] [跳过] [终止] 按钮)        │ (卡片展示异常与按钮)
+    │                   │                                  │       (带 [停止训练] [自行解决] 按钮，30s超时自动自行解决) │ (卡片展示异常与按钮)
    │                   │                                  │                                            │
    │                   │                                  │◄── 3. 点击按钮: card.action.trigger ───────│ (工程师点击方案)
    │                   │                                  │    (写入任务信箱，并就地将卡片置为“已处理”) │
@@ -73,7 +73,7 @@ TrainPilot 专为大规模深度学习分布式训练（PyTorch / DeepSpeed / Sl
         │ GPU Agent 轮询读取到 action (pop=true)
         ▼
  ┌──────────────┐
- │  RECOVERING  ├───► (回滚上一 Checkpoint、缩减 LR、跳过 Batch)
+  │  RECOVERING  ├───► (自行解决继续训练 / 停止训练优雅退出)
  └──────┬───────┘
         │ Agent 执行完成，POST /api/tasks/{task_id}/ack
         ▼
@@ -174,14 +174,14 @@ python3 skills/trainpilot/scripts/trainpilot_tool.py poll-instruction \
   --wait \
   --wait-timeout 600
 
-# 4. 执行本地修复后，向网关确认 ACK，将任务状态重置为 RUNNING
+# 4. 执行本地确认后，向网关确认 ACK，将任务状态重置为 RUNNING
 python3 skills/trainpilot/scripts/trainpilot_tool.py ack-instruction \
   --gateway "http://127.0.0.1:28780" \
   --task-id "qwen2-7b-sft-0905" \
   --instruction-id "inst_b12fa09c" \
-  --action "reduce_lr_rollback" \
+  --action "self_resolve" \
   --status "success" \
-  --message "Rolled back to checkpoint step 1400 and halved learning rate"
+  --message "Self-resolved and continued training"
 
 # 5. 上报运行时心跳
 python3 skills/trainpilot/scripts/trainpilot_tool.py send-heartbeat \
@@ -213,13 +213,11 @@ client = TrainPilotClient(
 
 guardian = TrainingGuardian(client=client)
 
-# 注册针对飞书卡片决策的回调函数
-def on_reduce_lr_rollback(payload):
-    print("加载上一可用 Checkpoint，并将学习率下调 50%...")
-    # model.load_state_dict(...)
-    # optimizer.param_groups[0]['lr'] *= 0.5
+# 注册针对飞书卡片决策的回调函数（仅 stop_training / self_resolve）
+def on_self_resolve(payload):
+    print("自行解决：继续训练，无须干预...")
 
-guardian.register_action_handler("reduce_lr_rollback", on_reduce_lr_rollback)
+guardian.register_action_handler("self_resolve", on_self_resolve)
 
 # 在训练主循环中调用：
 for step, batch in enumerate(dataloader):
@@ -244,7 +242,7 @@ hook = TrainPilotPyTorchHook(
     milestone_step_interval=500, # 每 500 步自动上报里程碑
     heartbeat_step_interval=50,  # 每 50 步上报心跳
 )
-hook.register_recovery_callback("reduce_lr_rollback", my_rollback_logic)
+hook.register_recovery_callback("self_resolve", my_continue_logic)
 
 # 训练步结束时：
 hook.on_step_end(step=step, loss=loss_val, lr=current_lr)
@@ -289,4 +287,4 @@ uv run pytest -v
 - `tests/test_server_api.py`：FastAPI 核心端点与飞书 Webhook 交互测试
 - `tests/test_agent_client.py`：Agent 客户端、NaN/Inf 安全清洗、PyTorch Hook 与异常处理测试
 - `tests/test_skills_cli.py`：项目级 Agent Skill CLI 命令行工具端到端调用测试
-- `tests/test_e2e_simulation.py`：完整模拟训练遇 NaN、冻结、飞书决策、回滚、恢复至完成的端到端闭环测试
+- `tests/test_e2e_simulation.py`：完整模拟训练遇 NaN、冻结、飞书决策、恢复至完成的端到端闭环测试

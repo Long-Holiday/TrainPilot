@@ -46,11 +46,11 @@ def test_mailbox_lifecycle_state_machine(mailbox: TaskMailboxManager):
     # 4. Human submits decision -> RESOLVED
     inst_submitted = mailbox.submit_decision(
         task_id=task_id,
-        action="reduce_lr_rollback",
+        action="self_resolve",
         operator="lead_researcher",
     )
     assert inst_submitted.ready is True
-    assert inst_submitted.action == "reduce_lr_rollback"
+    assert inst_submitted.action == "self_resolve"
 
     task = mailbox.get_task(task_id)
     assert task.state == TaskState.RESOLVED
@@ -58,7 +58,7 @@ def test_mailbox_lifecycle_state_machine(mailbox: TaskMailboxManager):
     # 5. Agent polls with pop=True -> RECOVERING
     inst_polled = mailbox.get_instruction(task_id, pop=True)
     assert inst_polled.ready is True
-    assert inst_polled.action == "reduce_lr_rollback"
+    assert inst_polled.action == "self_resolve"
 
     task_after_pop = mailbox.get_task(task_id)
     assert task_after_pop.state == TaskState.RECOVERING
@@ -71,9 +71,9 @@ def test_mailbox_lifecycle_state_machine(mailbox: TaskMailboxManager):
     st_after_ack = mailbox.ack_instruction(
         task_id=task_id,
         instruction_id=inst_polled.instruction_id,
-        action="reduce_lr_rollback",
+        action="self_resolve",
         status="success",
-        message="Restored step 40",
+        message="Self-resolved and continued",
     )
     assert st_after_ack == TaskState.RUNNING
 

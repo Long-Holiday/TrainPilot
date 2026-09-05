@@ -102,10 +102,15 @@ async def feishu_webhook(request: Request) -> Any:
 
     # Feishu Interactive Card response format to update card on the fly:
     # Returning `card` updates the message in place.
+    _toast_labels = {
+        "stop_training": "停止训练",
+        "self_resolve": "自行解决",
+    }
+    toast_label = _toast_labels.get(action, action)
     return {
         "toast": {
             "type": "success",
-            "content": f"策略 [{action}] 已下发，训练将自动恢复",
+            "content": f"策略 [{toast_label}] 已下发，训练将自动恢复",
         },
         "card": resolved_card,
     }

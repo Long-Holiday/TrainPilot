@@ -27,8 +27,6 @@ class EventType(str, Enum):
 class ActionType(str, Enum):
     """Preset actions available for human-in-the-loop decisions."""
 
-    REDUCE_LR_ROLLBACK = "reduce_lr_rollback"  # Cut LR and reload previous checkpoint
-    SKIP_BATCH = "skip_batch"  # Drop current batch/step and resume
     STOP_TRAINING = "stop_training"  # Terminate training safely and retain artifacts
-    RESUME = "resume"  # Continue as-is without modification
+    SELF_RESOLVE = "self_resolve"  # Agent resolves by itself, continue training without intervention
     CUSTOM = "custom"  # Custom user-defined action with payload

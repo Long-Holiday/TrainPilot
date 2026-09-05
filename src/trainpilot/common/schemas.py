@@ -41,7 +41,7 @@ class InstructionResponse(BaseModel):
     ready: bool = Field(..., description="True if human has made a decision, False if still waiting")
     status: TaskState = Field(..., description="Current task status in mailbox")
     instruction_id: Optional[str] = Field(None, description="Unique ID for the instruction to acknowledge")
-    action: Optional[str] = Field(None, description="Action selected by human (e.g. reduce_lr_rollback)")
+    action: Optional[str] = Field(None, description="Action selected by human (e.g. self_resolve)")
     payload: Optional[Dict[str, Any]] = Field(default=None, description="Optional action parameters")
     decision_by: Optional[str] = Field(None, description="Operator identity who clicked the decision")
     decided_at: Optional[str] = Field(None, description="Timestamp of when decision was made")

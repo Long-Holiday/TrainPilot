@@ -1,6 +1,7 @@
 """FastAPI router for Agent-facing task APIs."""
 
 import logging
+import threading
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 
@@ -15,6 +16,7 @@ from trainpilot.common.schemas import (
 )
 from trainpilot.common.states import EventType, TaskState
 from trainpilot.server.auth import verify_api_token
+from trainpilot.server.config import settings
 from trainpilot.server.feishu.client import default_feishu_client
 from trainpilot.server.mailbox import default_mailbox
 
@@ -38,6 +40,7 @@ def _dispatch_feishu(req: EventNotifyRequest) -> None:
                 epoch=req.epoch,
                 metrics=req.metrics,
                 extra=req.extra,
+                timeout_seconds=settings.alert_decision_timeout_seconds,
             )
         elif req.event_type == EventType.MILESTONE:
             default_feishu_client.send_milestone(
@@ -51,6 +54,49 @@ def _dispatch_feishu(req: EventNotifyRequest) -> None:
         logger.error("Failed to forward event %s to Feishu: %s", req.event_type, exc)
 
 
+def _auto_self_resolve_callback(task_id: str, timeout_seconds: int) -> None:
+    """Timer callback: auto self-resolve if no human decision arrived in time."""
+    try:
+        instruction = default_mailbox.try_auto_resolve(
+            task_id=task_id,
+            action="self_resolve",
+            operator=f"系统自动决策（{timeout_seconds}s超时未决策）",
+            timeout_seconds=timeout_seconds,
+            payload={"timeout_seconds": timeout_seconds},
+        )
+        if instruction is None:
+            return
+        try:
+            default_feishu_client.update_card_to_resolved(
+                task_id=task_id,
+                action="self_resolve",
+                operator=instruction.decision_by or "系统自动决策",
+                resolved_at=instruction.decided_at,
+            )
+        except Exception as exc:
+            logger.warning("Failed to patch card after auto self-resolve for %s: %s", task_id, exc)
+    except Exception as exc:
+        logger.error("Auto self-resolve callback failed for task %s: %s", task_id, exc)
+
+
+def _schedule_auto_self_resolve(task_id: str) -> None:
+    """Schedule a daemon timer that auto self-resolves the alert after timeout."""
+    try:
+        timeout_seconds = int(settings.alert_decision_timeout_seconds)
+    except Exception:
+        timeout_seconds = 30
+    if timeout_seconds <= 0:
+        return
+    timer = threading.Timer(
+        timeout_seconds,
+        _auto_self_resolve_callback,
+        args=(task_id, timeout_seconds),
+    )
+    timer.daemon = True
+    timer.start()
+    logger.info("Scheduled auto self-resolve for task %s in %ss", task_id, timeout_seconds)
+
+
 @router.post("/notify", response_model=EventNotifyResponse, status_code=status.HTTP_200_OK)
 def notify_event(req: EventNotifyRequest, background_tasks: BackgroundTasks) -> EventNotifyResponse:
     """Receive training events (alerts, milestones, completion) from GPU Agent."""
@@ -58,6 +104,10 @@ def notify_event(req: EventNotifyRequest, background_tasks: BackgroundTasks) -> 
 
     # Async dispatch: do not block the training loop on Feishu latency.
     background_tasks.add_task(_dispatch_feishu, req)
+
+    # 告警卡片：超过阈值无人工点击则服务端自动视为“自行解决”。
+    if req.event_type == EventType.ALERT:
+        _schedule_auto_self_resolve(req.task_id)
 
     return EventNotifyResponse(
         success=True,

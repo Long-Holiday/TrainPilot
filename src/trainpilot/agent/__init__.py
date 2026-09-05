@@ -3,7 +3,6 @@
 from trainpilot.agent.client import TrainPilotClient
 from trainpilot.agent.hooks.pytorch import TrainPilotPyTorchHook
 from trainpilot.agent.monitor import (
-    SkipBatchException,
     StopTrainingException,
     TrainingGuardian,
 )
@@ -13,5 +12,4 @@ __all__ = [
     "TrainingGuardian",
     "TrainPilotPyTorchHook",
     "StopTrainingException",
-    "SkipBatchException",
 ]

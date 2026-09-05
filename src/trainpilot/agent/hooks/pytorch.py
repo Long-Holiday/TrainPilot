@@ -5,7 +5,6 @@ from typing import Any, Callable, Dict, Optional
 
 from trainpilot.agent.client import TrainPilotClient
 from trainpilot.agent.monitor import (
-    SkipBatchException,
     StopTrainingException,
     TrainingGuardian,
 )
@@ -37,7 +36,7 @@ class TrainPilotPyTorchHook:
         action: str,
         callback: Callable[[Optional[Dict[str, Any]]], Any],
     ) -> None:
-        """Register specific recovery logic for human actions like reduce_lr_rollback."""
+        """Register specific recovery logic for human actions like self_resolve."""
         self.guardian.register_action_handler(action, callback)
 
     def on_step_end(

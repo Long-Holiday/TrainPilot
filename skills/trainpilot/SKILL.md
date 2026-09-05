@@ -12,7 +12,7 @@ description: Use when running, supervising, or recovering deep learning training
 The GPU Agent maintains a goal-driven state machine:
 - **RUNNING**: Silently cruises, periodically reporting milestone metrics.
 - **WAITING**: On anomalies (Loss NaN, OOM, loss explosion), freezes training, reports alerts to the gateway, and enters polling mode.
-- **RESOLVED -> RECOVERING**: Fetches human decisions made via Feishu interactive cards or Webhook/API, executes hot-recovery (e.g. `reduce_lr_rollback`, `skip_batch`), and ACKs back to resume `RUNNING`.
+- **RESOLVED -> RECOVERING**: Fetches human decisions made via Feishu interactive cards or Webhook/API (`stop_training` / `self_resolve`, 30s timeout auto `self_resolve`), and ACKs back to `RUNNING`.
 
 ## When to Use
 
@@ -36,10 +36,10 @@ The skill provides an executable script `scripts/trainpilot_tool.py` runnable di
 | **Report Milestone** | `python3 skills/trainpilot/scripts/trainpilot_tool.py report-milestone --task-id <ID> --step <N> --message "Epoch 1 done" --metrics "loss=0.35,val_loss=0.42"` |
 | **Report Anomaly & Alert** | `python3 skills/trainpilot/scripts/trainpilot_tool.py report-alert --task-id <ID> --step <N> --message "Loss NaN at step 1450" --metrics "loss=NaN"` |
 | **Poll Human Decision** | `python3 skills/trainpilot/scripts/trainpilot_tool.py poll-instruction --task-id <ID> --wait --wait-timeout 300` |
-| **Acknowledge Recovery** | `python3 skills/trainpilot/scripts/trainpilot_tool.py ack-instruction --task-id <ID> --action reduce_lr_rollback --status success` |
+| **Acknowledge Recovery** | `python3 skills/trainpilot/scripts/trainpilot_tool.py ack-instruction --task-id <ID> --action self_resolve --status success` |
 | **Send Heartbeat** | `python3 skills/trainpilot/scripts/trainpilot_tool.py send-heartbeat --task-id <ID> --step <N> --metrics "gpu_mem=85%"` |
 | **Query Task Status** | `python3 skills/trainpilot/scripts/trainpilot_tool.py get-status --task-id <ID>` |
-| **Mock Decision (Dev/Test)** | `python3 skills/trainpilot/scripts/trainpilot_tool.py mock-decision --task-id <ID> --action reduce_lr_rollback` |
+| **Mock Decision (Dev/Test)** | `python3 skills/trainpilot/scripts/trainpilot_tool.py mock-decision --task-id <ID> --action self_resolve` |
 
 > [!NOTE]
 > 网关地址解析 (GPU 侧): `--gateway` 参数 > 环境变量 `TRAINPILOT_GATEWAY_URL` (完整 URL)
@@ -92,22 +92,22 @@ Output JSON will indicate the selected strategy:
   "ready": true,
   "status": "RECOVERING",
   "instruction_id": "inst_b12fa09c",
-  "action": "reduce_lr_rollback",
+  "action": "self_resolve",
   "decision_by": "ou_3429810a",
   "decided_at": "2026-09-05T09:45:00Z"
 }
 ```
 
 ### 4. Acknowledging Recovery
-Once the recovery procedure finishes (e.g. reload checkpoint, reduce learning rate by 50%):
+Once the self-resolve continuation is confirmed:
 ```bash
 python3 skills/trainpilot/scripts/trainpilot_tool.py ack-instruction \
   --gateway "http://control-plane.example.com:28780" \
   --task-id "qwen2-7b-sft-0905" \
   --instruction-id "inst_b12fa09c" \
-  --action "reduce_lr_rollback" \
+  --action "self_resolve" \
   --status "success" \
-  --message "Reloaded checkpoint_step_1400.pt and reduced LR to 5e-5"
+  --message "Self-resolved and continued training"
 ```
 
 ---
@@ -125,15 +125,13 @@ client = TrainPilotClient(
     task_id="qwen2-7b-sft-0905",
 )
 
-# 2. Setup guardian and register recovery handlers
+# 2. Setup guardian (defaults: 30s timeout auto self_resolve)
 guardian = TrainingGuardian(client=client)
 
-def on_reduce_lr_rollback(payload):
-    print("Reloading previous checkpoint and scaling down LR...")
-    # your_model.load_state_dict(...)
-    # optimizer.param_groups[0]['lr'] *= 0.5
+def on_self_resolve(payload):
+    print("Self-resolved: continuing training without modification...")
 
-guardian.register_action_handler("reduce_lr_rollback", on_reduce_lr_rollback)
+guardian.register_action_handler("self_resolve", on_self_resolve)
 
 # 3. In your training step loop:
 for step, (inputs, targets) in enumerate(dataloader):
@@ -158,7 +156,7 @@ hook = TrainPilotPyTorchHook(
     gateway_url="http://control-plane.example.com:28780",
     milestone_step_interval=100,
 )
-hook.register_recovery_callback("reduce_lr_rollback", my_rollback_fn)
+hook.register_recovery_callback("self_resolve", my_continue_fn)
 
 # In loop:
 hook.on_step_end(step=step, loss=loss_val, lr=current_lr)

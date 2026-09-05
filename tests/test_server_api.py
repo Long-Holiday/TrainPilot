@@ -58,17 +58,17 @@ def test_notify_alert_and_decision_flow(client: TestClient):
     # 3. Simulate human decision via API
     dec_resp = client.post(
         f"/api/tasks/{task_id}/decision",
-        json={"task_id": task_id, "action": "reduce_lr_rollback", "operator": "Dr. Wang"},
+        json={"task_id": task_id, "action": "self_resolve", "operator": "Dr. Wang"},
     )
     assert dec_resp.status_code == 200
-    assert dec_resp.json()["action"] == "reduce_lr_rollback"
+    assert dec_resp.json()["action"] == "self_resolve"
 
     # 4. Poll after decision -> ready: true, pops into RECOVERING
     poll_resp2 = client.get(f"/api/tasks/{task_id}/instruction")
     assert poll_resp2.status_code == 200
     data2 = poll_resp2.json()
     assert data2["ready"] is True
-    assert data2["action"] == "reduce_lr_rollback"
+    assert data2["action"] == "self_resolve"
     assert data2["instruction_id"] is not None
 
     # Verify task state is now RECOVERING
@@ -82,9 +82,9 @@ def test_notify_alert_and_decision_flow(client: TestClient):
         json={
             "task_id": task_id,
             "instruction_id": data2["instruction_id"],
-            "action": "reduce_lr_rollback",
+            "action": "self_resolve",
             "status": "success",
-            "message": "Restored checkpoint and halved LR",
+            "message": "Self-resolved and continued training",
         },
     )
     assert ack_resp.status_code == 200
@@ -118,7 +118,7 @@ def test_feishu_webhook_flow(client: TestClient):
             "tag": "button",
             "value": {
                 "task_id": task_id,
-                "action": "skip_batch",
+                "action": "stop_training",
             },
         },
     }
@@ -131,5 +131,5 @@ def test_feishu_webhook_flow(client: TestClient):
     # Check that mailbox received the decision
     inst = client.get(f"/api/tasks/{task_id}/instruction").json()
     assert inst["ready"] is True
-    assert inst["action"] == "skip_batch"
+    assert inst["action"] == "stop_training"
     assert inst["decision_by"] == "ou_feishu_engineer"

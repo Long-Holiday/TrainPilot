@@ -314,7 +314,7 @@ def main():
 
     # mock-decision
     p_dec = subparsers.add_parser("mock-decision", help="Directly submit a human decision (testing/debug)")
-    p_dec.add_argument("--action", required=True, help="Action (e.g. reduce_lr_rollback, skip_batch)")
+    p_dec.add_argument("--action", required=True, help="Action (stop_training, self_resolve)")
     p_dec.add_argument("--operator", default="test_operator", help="Operator name")
     p_dec.add_argument("--payload", default=None, help="Optional payload JSON")
     p_dec.set_defaults(func=cmd_mock_decision)

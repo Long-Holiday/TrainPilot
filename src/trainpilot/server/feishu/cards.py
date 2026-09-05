@@ -23,8 +23,13 @@ def build_alert_card(
     epoch: Optional[int] = None,
     metrics: Optional[Dict[str, Any]] = None,
     extra: Optional[Dict[str, Any]] = None,
+    timeout_seconds: int = 30,
 ) -> Dict[str, Any]:
-    """Construct a high-priority interactive alert card for Feishu with HITL action buttons."""
+    """Construct a high-priority interactive alert card for Feishu with HITL action buttons.
+
+    仅保留两个决策按钮：停止训练 (stop_training) 与自行解决 (self_resolve)。
+    超过 timeout_seconds 未点击则视为“自行解决”。
+    """
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     markdown_lines = [
@@ -34,7 +39,7 @@ def build_alert_card(
         f"**⚠️ 异常详情**: \n> {message}",
         "",
         "---",
-        "**请在下方选择恢复策略（点击后将立即下发至 GPU 节点并冻结重复操作）：**",
+        f"**请在下方选择（{timeout_seconds} 秒内未决策将自动视为“自行解决”，训练自行继续）：**",
     ]
 
     elements: List[Dict[str, Any]] = [
@@ -50,38 +55,20 @@ def build_alert_card(
             "actions": [
                 {
                     "tag": "button",
-                    "text": {"tag": "plain_text", "content": "📉 降LR并回滚"},
-                    "type": "danger",
-                    "value": {
-                        "task_id": task_id,
-                        "action": "reduce_lr_rollback",
-                    },
-                },
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "⏭ 跳过Batch"},
-                    "type": "primary",
-                    "value": {
-                        "task_id": task_id,
-                        "action": "skip_batch",
-                    },
-                },
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "▶ 忽略并继续"},
-                    "type": "default",
-                    "value": {
-                        "task_id": task_id,
-                        "action": "resume",
-                    },
-                },
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "🛑 终止训练"},
+                    "text": {"tag": "plain_text", "content": "🛑 停止训练"},
                     "type": "danger",
                     "value": {
                         "task_id": task_id,
                         "action": "stop_training",
+                    },
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "✅ 自行解决"},
+                    "type": "primary",
+                    "value": {
+                        "task_id": task_id,
+                        "action": "self_resolve",
                     },
                 },
             ],
@@ -91,7 +78,7 @@ def build_alert_card(
             "elements": [
                 {
                     "tag": "plain_text",
-                    "content": f"TrainPilot Control Plane • 上报时间: {now_str}",
+                    "content": f"TrainPilot Control Plane • 上报时间: {now_str} • {timeout_seconds}s无决策自动视为自行解决",
                 }
             ],
         },
@@ -170,12 +157,12 @@ def build_resolved_card(
     time_str = resolved_at or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     action_label_map = {
-        "reduce_lr_rollback": "📉 降低学习率并回滚上一检查点",
-        "skip_batch": "⏭ 跳过当前异常 Batch 并继续",
-        "resume": "▶ 忽略告警继续迭代",
         "stop_training": "🛑 立即终止训练并安全存档",
+        "self_resolve": "✅ 自行解决（训练自行继续，无须干预）",
     }
     action_desc = action_label_map.get(action_name, f"⚙️ 自定义动作: `{action_name}`")
+
+    is_auto = "auto" in operator.lower() or "timeout" in operator.lower() or "系统" in operator
 
     markdown_lines = [
         f"**🎯 任务标识**: `{task_id}`",
@@ -183,6 +170,8 @@ def build_resolved_card(
         f"**⚡️ 选定策略**: **{action_desc}**",
         f"**🕒 闭环时间**: `{time_str}`",
     ]
+    if is_auto:
+        markdown_lines.append("**⏳ 触发原因**: 超过 30 秒无人工决策，系统自动视为“自行解决”")
     if original_message:
         markdown_lines.extend([
             "",

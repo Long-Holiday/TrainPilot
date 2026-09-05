@@ -25,28 +25,17 @@ def run_mock_training(gateway_url: Optional[str] = None, task_id: str = "demo-ll
     print(f"==========================================\n")
 
     client = TrainPilotClient(gateway_url=gateway_url, task_id=task_id)
-    guardian = TrainingGuardian(client=client, poll_interval=1.0, poll_timeout=60.0)
+    guardian = TrainingGuardian(client=client, poll_interval=1.0, poll_timeout=30.0,
+                                timeout_fallback_action="self_resolve")
 
     # Simulated training state
     training_state = {
         "lr": 1e-4,
         "step": 0,
         "loss": 2.5,
-        "checkpoint_step": 0,
     }
 
-    # Register recovery handler for 'reduce_lr_rollback'
-    def handle_reduce_lr_rollback(payload):
-        print(f"\n[Guardian Callback] 📉 Executing Recovery: reduce_lr_rollback")
-        old_lr = training_state["lr"]
-        training_state["lr"] = old_lr * 0.5
-        recovered_step = training_state["checkpoint_step"]
-        training_state["step"] = recovered_step
-        training_state["loss"] = 1.2
-        print(f"[Guardian Callback] 🔄 Rolled back to step {recovered_step}, LR reduced from {old_lr} to {training_state['lr']}\n")
-        return {"recovered_step": recovered_step, "new_lr": training_state["lr"]}
-
-    guardian.register_action_handler("reduce_lr_rollback", handle_reduce_lr_rollback)
+    # 自行解决：无需自定义恢复逻辑，默认 handler 直接继续训练。
 
     # Simulate steps
     total_steps = 10
@@ -58,7 +47,6 @@ def run_mock_training(gateway_url: Optional[str] = None, task_id: str = "demo-ll
 
         # Simulate checkpoint at step 4
         if current_step == 4:
-            training_state["checkpoint_step"] = 4
             client.notify_milestone(
                 message="Checkpoint saved at step 4",
                 step=current_step,
@@ -72,16 +60,16 @@ def run_mock_training(gateway_url: Optional[str] = None, task_id: str = "demo-ll
             current_loss = float("nan")
             print(f"[Step {current_step}] ⚠️ Triggering anomaly: Loss is NaN!")
 
-            # Start a background timer to simulate human engineer clicking "reduce_lr_rollback" on Feishu after 3 seconds
+            # Start a background timer to simulate human engineer clicking "self_resolve" on Feishu after 3 seconds
             def simulate_human_click():
                 time.sleep(3.0)
-                print("\n[Human Simulator] 👨‍💻 Engineer clicked 'reduce_lr_rollback' on Feishu interactive card!")
+                print("\n[Human Simulator] 👨‍💻 Engineer clicked 'self_resolve' on Feishu interactive card!")
                 try:
                     res = requests.post(
                         f"{gateway_url}/api/tasks/{task_id}/decision",
                         json={
                             "task_id": task_id,
-                            "action": "reduce_lr_rollback",
+                            "action": "self_resolve",
                             "operator": "Senior ML Engineer (Feishu)",
                         },
                         timeout=5,

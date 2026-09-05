@@ -13,10 +13,6 @@ class StopTrainingException(Exception):
     """Raised when human operator selects 'stop_training' action."""
 
 
-class SkipBatchException(Exception):
-    """Raised when human operator selects 'skip_batch' action."""
-
-
 class TrainingGuardian:
     """Monitors training iterations, intercepts anomalies, pauses training,
 
@@ -27,16 +23,16 @@ class TrainingGuardian:
         self,
         client: TrainPilotClient,
         poll_interval: float = 2.0,
-        poll_timeout: Optional[float] = 600.0,
+        poll_timeout: Optional[float] = 30.0,
         loss_spike_threshold: Optional[float] = 1e4,
-        timeout_fallback_action: Optional[str] = None,
+        timeout_fallback_action: Optional[str] = "self_resolve",
     ):
         self.client = client
         self.poll_interval = poll_interval
         self.poll_timeout = poll_timeout
         self.loss_spike_threshold = loss_spike_threshold
-        # When polling times out, auto-execute this action instead of crashing.
-        # e.g. timeout_fallback_action="resume" keeps training alive; None re-raises.
+        # 30 秒无人工决策则视为“自行解决”，训练自行继续；None 则超时抛异常。
+        # e.g. timeout_fallback_action="self_resolve" keeps training alive; None re-raises.
         self.timeout_fallback_action = timeout_fallback_action
         self._action_handlers: Dict[str, Callable[[Optional[Dict[str, Any]]], Any]] = {}
 
@@ -48,33 +44,27 @@ class TrainingGuardian:
         action: str,
         handler: Callable[[Optional[Dict[str, Any]]], Any],
     ) -> None:
-        """Register a callback for a specific human action (e.g. reduce_lr_rollback)."""
+        """Register a callback for a specific human action (e.g. self_resolve)."""
         self._action_handlers[action] = handler
         logger.info("Registered custom action handler for: %s", action)
 
     def _register_default_handlers(self) -> None:
         """Register basic default implementations."""
         self._action_handlers["stop_training"] = self._default_stop_handler
-        self._action_handlers["skip_batch"] = self._default_skip_handler
-        self._action_handlers["resume"] = lambda payload: logger.info("Resuming training without modification")
-        # Most-clicked card button needs a safe default so ACK is not 'failed'
-        # when users forget to register their own checkpoint logic.
-        self._action_handlers.setdefault("reduce_lr_rollback", self._default_rollback_handler)
+        self._action_handlers["self_resolve"] = self._default_self_resolve_handler
 
     def _default_stop_handler(self, payload: Optional[Dict[str, Any]] = None):
         logger.warning("Stop action triggered by human operator. Aborting training gracefully.")
         raise StopTrainingException("Training stopped by human operator decision")
 
-    def _default_skip_handler(self, payload: Optional[Dict[str, Any]] = None):
-        logger.info("Skip batch action triggered by human operator.")
-        raise SkipBatchException("Current batch skipped by human operator decision")
-
-    def _default_rollback_handler(self, payload: Optional[Dict[str, Any]] = None):
-        logger.warning(
-            "reduce_lr_rollback requested but no custom handler registered. "
-            "Override via register_action_handler() with checkpoint reload + LR decay. Resuming as-is."
-        )
-        return {"fallback": "resume_without_checkpoint", "payload": payload}
+    def _default_self_resolve_handler(self, payload: Optional[Dict[str, Any]] = None):
+        if payload and payload.get("timeout_fallback"):
+            logger.warning("No human decision within 30s; auto self-resolve: continuing training as-is.")
+        elif payload and payload.get("auto_resolved"):
+            logger.warning("Server auto self-resolve after timeout; continuing training as-is.")
+        else:
+            logger.info("Self-resolve action: continuing training without modification.")
+        return {"self_resolved": True, "payload": payload}
 
     def check_and_handle_loss(
         self,
@@ -171,7 +161,7 @@ class TrainingGuardian:
                 )
             raise
 
-        action = instruction.get("action") or "resume"
+        action = instruction.get("action") or "self_resolve"
         instruction_id = instruction.get("instruction_id")
         payload = instruction.get("payload")
 
@@ -187,7 +177,7 @@ class TrainingGuardian:
         # 3. Dispatch to handler
         handler = self._action_handlers.get(action)
         if not handler:
-            err_msg = f"No handler registered for action '{action}'. Defaulting to resume."
+            err_msg = f"No handler registered for action '{action}'. Defaulting to self-resolve."
             logger.warning(err_msg)
             self.client.ack_instruction(
                 action=action,
@@ -207,7 +197,7 @@ class TrainingGuardian:
                 message=f"Action '{action}' executed successfully",
             )
             return result
-        except (StopTrainingException, SkipBatchException):
+        except StopTrainingException:
             # Acknowledge before re-raising control flow exceptions
             self.client.ack_instruction(
                 action=action,

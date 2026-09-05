@@ -18,7 +18,7 @@ def test_build_alert_card():
     assert card["header"]["template"] == "red"
     assert "llm-task-1" in card["header"]["title"]["content"]
 
-    # Verify action buttons
+    # Verify action buttons: only 停止训练 & 自行解决
     action_elem = None
     for elem in card["elements"]:
         if elem.get("tag") == "action":
@@ -27,13 +27,28 @@ def test_build_alert_card():
 
     assert action_elem is not None
     actions = [btn["value"]["action"] for btn in action_elem["actions"]]
-    assert "reduce_lr_rollback" in actions
-    assert "skip_batch" in actions
-    assert "stop_training" in actions
-    assert "resume" in actions
+    assert actions == ["stop_training", "self_resolve"]
 
     for btn in action_elem["actions"]:
         assert btn["value"]["task_id"] == "llm-task-1"
+
+    # 30s 超时提示必须出现在卡片文案中
+    contents = " ".join(
+        elem.get("text", {}).get("content", "")
+        for elem in card["elements"]
+        if elem.get("tag") == "div"
+    )
+    assert "30" in contents and "自行解决" in contents
+
+
+def test_build_alert_card_custom_timeout():
+    card = build_alert_card(task_id="t1", message="boom", timeout_seconds=60)
+    contents = " ".join(
+        elem.get("text", {}).get("content", "")
+        for elem in card["elements"]
+        if elem.get("tag") == "div"
+    )
+    assert "60" in contents
 
 
 def test_build_milestone_card():
@@ -53,7 +68,7 @@ def test_build_milestone_card():
 def test_build_resolved_card():
     card = build_resolved_card(
         task_id="llm-task-1",
-        action_name="reduce_lr_rollback",
+        action_name="self_resolve",
         operator="Alice",
     )
     assert card["header"]["template"] == "turquoise"
@@ -61,3 +76,18 @@ def test_build_resolved_card():
     # Buttons must be stripped for anti-duplicate click protection
     tags = [elem.get("tag") for elem in card["elements"]]
     assert "action" not in tags
+
+
+def test_build_resolved_card_auto_timeout():
+    card = build_resolved_card(
+        task_id="llm-task-1",
+        action_name="self_resolve",
+        operator="系统自动决策（30s超时未决策）",
+    )
+    contents = " ".join(
+        elem.get("text", {}).get("content", "")
+        for elem in card["elements"]
+        if elem.get("tag") == "div"
+    )
+    assert "自行解决" in contents
+    assert "30" in contents

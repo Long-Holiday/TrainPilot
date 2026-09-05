@@ -22,7 +22,8 @@ def test_task_states_and_events():
 
     assert EventType.ALERT == "alert"
     assert EventType.MILESTONE == "milestone"
-    assert ActionType.REDUCE_LR_ROLLBACK == "reduce_lr_rollback"
+    assert ActionType.STOP_TRAINING == "stop_training"
+    assert ActionType.SELF_RESOLVE == "self_resolve"
 
 
 def test_event_notify_serialization():
@@ -44,10 +45,10 @@ def test_instruction_response_serialization():
         ready=True,
         status=TaskState.RESOLVED,
         instruction_id="inst_123",
-        action="reduce_lr_rollback",
-        payload={"factor": 0.5},
+        action="self_resolve",
+        payload={"timeout_seconds": 30},
         decision_by="engineer_a",
     )
     assert resp.ready is True
-    assert resp.action == "reduce_lr_rollback"
-    assert resp.payload["factor"] == 0.5
+    assert resp.action == "self_resolve"
+    assert resp.payload["timeout_seconds"] == 30

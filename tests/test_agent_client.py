@@ -7,7 +7,6 @@ import pytest
 from trainpilot.agent.client import TrainPilotClient
 from trainpilot.agent.hooks.pytorch import TrainPilotPyTorchHook
 from trainpilot.agent.monitor import (
-    SkipBatchException,
     StopTrainingException,
     TrainingGuardian,
 )
@@ -25,16 +24,16 @@ def test_guardian_loss_anomaly_trigger(mock_client):
 
     recovered = False
 
-    def on_reduce_lr(payload):
+    def on_self_resolve(payload):
         nonlocal recovered
         recovered = True
 
-    guardian.register_action_handler("reduce_lr_rollback", on_reduce_lr)
+    guardian.register_action_handler("self_resolve", on_self_resolve)
 
-    # Configure mock poll_instruction to return reduce_lr_rollback
+    # Configure mock poll_instruction to return self_resolve
     mock_client.poll_instruction.return_value = {
         "ready": True,
-        "action": "reduce_lr_rollback",
+        "action": "self_resolve",
         "instruction_id": "inst_xyz",
     }
 
@@ -55,10 +54,10 @@ def test_guardian_loss_anomaly_trigger(mock_client):
 
     # Verify ack sent
     mock_client.ack_instruction.assert_called_once_with(
-        action="reduce_lr_rollback",
+        action="self_resolve",
         instruction_id="inst_xyz",
         status="success",
-        message="Action 'reduce_lr_rollback' executed successfully",
+        message="Action 'self_resolve' executed successfully",
     )
 
 
