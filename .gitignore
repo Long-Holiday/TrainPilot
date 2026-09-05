@@ -20,4 +20,6 @@ wheels/
 
 # Legacy project-level generated Agent Skills (now installed globally via ./setup_skills.sh)
 .opencode/skills/
+.gemini/skills/
+# 历史遗留错误路径（已修正为 .gemini/skills，仅保留用于迁移清理）
 .antigravity/

@@ -60,6 +60,20 @@ def test_setup_skills_generation_global(tmp_path):
     # Global edition embeds the absolute installed tool path
     assert opencode_tool_py in content
 
+    # Antigravity/Gemini CLI global: ~/.gemini/skills/trainpilot
+    gemini_skill_md = os.path.join(fake_home, ".gemini", "skills", "trainpilot", "SKILL.md")
+    gemini_tool_py = os.path.join(fake_home, ".gemini", "skills", "trainpilot", "scripts", "trainpilot_tool.py")
+    assert os.path.isfile(gemini_skill_md), f"{gemini_skill_md} does not exist"
+    assert os.path.isfile(gemini_tool_py), f"{gemini_tool_py} does not exist"
+    assert os.access(gemini_tool_py, os.X_OK), "global gemini trainpilot_tool.py must be executable"
+
+    with open(gemini_skill_md, "r", encoding="utf-8") as f:
+        content = f.read()
+    assert "name: trainpilot" in content
+    assert "28780" in content
+    assert gemini_tool_py in content
+    assert "Antigravity/Gemini" in content
+
     # Universal agents global
     agents_skill_md = os.path.join(fake_home, ".agents", "skills", "trainpilot", "SKILL.md")
     agents_tool_py = os.path.join(fake_home, ".agents", "skills", "trainpilot", "scripts", "trainpilot_tool.py")
@@ -94,14 +108,14 @@ def test_setup_skills_project_scope(tmp_path):
         content = f.read()
     assert ".opencode/skills/trainpilot/scripts/trainpilot_tool.py" in content
 
-    antigravity_skill_md = os.path.join(PROJECT_ROOT, ".antigravity", "skills", "trainpilot", "SKILL.md")
-    antigravity_tool_py = os.path.join(PROJECT_ROOT, ".antigravity", "skills", "trainpilot", "scripts", "trainpilot_tool.py")
-    assert os.path.isfile(antigravity_skill_md), f"{antigravity_skill_md} does not exist"
-    assert os.path.isfile(antigravity_tool_py), f"{antigravity_tool_py} does not exist"
+    gemini_skill_md = os.path.join(PROJECT_ROOT, ".gemini", "skills", "trainpilot", "SKILL.md")
+    gemini_tool_py = os.path.join(PROJECT_ROOT, ".gemini", "skills", "trainpilot", "scripts", "trainpilot_tool.py")
+    assert os.path.isfile(gemini_skill_md), f"{gemini_skill_md} does not exist"
+    assert os.path.isfile(gemini_tool_py), f"{gemini_tool_py} does not exist"
 
-    with open(antigravity_skill_md, "r", encoding="utf-8") as f:
+    with open(gemini_skill_md, "r", encoding="utf-8") as f:
         content = f.read()
-    assert ".antigravity/skills/trainpilot/scripts/trainpilot_tool.py" in content
+    assert ".gemini/skills/trainpilot/scripts/trainpilot_tool.py" in content
 
 
 def test_generated_skills_tools_runnable(tmp_path):
@@ -111,12 +125,18 @@ def test_generated_skills_tools_runnable(tmp_path):
     assert res.returncode == 0, res.stderr
 
     opencode_tool_py = os.path.join(fake_home, ".config", "opencode", "skills", "trainpilot", "scripts", "trainpilot_tool.py")
+    gemini_tool_py = os.path.join(fake_home, ".gemini", "skills", "trainpilot", "scripts", "trainpilot_tool.py")
     agents_tool_py = os.path.join(fake_home, ".agents", "skills", "trainpilot", "scripts", "trainpilot_tool.py")
 
     res1 = subprocess.run([sys.executable, opencode_tool_py, "--help"], capture_output=True, text=True)
     assert res1.returncode == 0
     assert "TrainPilot Agent Tool" in res1.stdout
     assert "28780" in res1.stdout
+
+    res_gemini = subprocess.run([sys.executable, gemini_tool_py, "--help"], capture_output=True, text=True)
+    assert res_gemini.returncode == 0
+    assert "TrainPilot Agent Tool" in res_gemini.stdout
+    assert "28780" in res_gemini.stdout
 
     res2 = subprocess.run([sys.executable, agents_tool_py, "--help"], capture_output=True, text=True)
     assert res2.returncode == 0

@@ -5,7 +5,8 @@
 # 功能：
 # 1. 默认在全局位置生成 skills（任意工作目录均可发现）：
 #    - OpenCode 官方全局：${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills/trainpilot
-#    - 通用 Agent 全局：$HOME/.agents/skills/trainpilot（OpenCode/Claude/Codex/Antigravity 均可发现）
+#    - Antigravity/Gemini CLI 全局：$HOME/.gemini/skills/trainpilot
+#    - 通用 Agent 全局：$HOME/.agents/skills/trainpilot
 # 2. 可选保留旧的项目级生成（--project / --all，仅用于兼容）
 # 3. 自动配置工具执行路径与可执行权限 (chmod +x)
 # 4. 可清理遗留的项目级生成目录 (--clean)
@@ -72,13 +73,14 @@ while [[ $# -gt 0 ]]; do
             echo "TrainPilot Agent Skills 生成脚本使用说明:"
             echo "  ./setup_skills.sh            生成或同步全局 Agent Skills (默认，推荐)"
             echo "  ./setup_skills.sh --global   同上：仅安装到全局位置"
-            echo "  ./setup_skills.sh --project  仅安装到项目级 .opencode/.antigravity (旧行为，兼容用)"
+            echo "  ./setup_skills.sh --project  仅安装到项目级 .opencode/.gemini (旧行为，兼容用)"
             echo "  ./setup_skills.sh --all      全局 + 项目级同时安装"
             echo "  ./setup_skills.sh --check    仅检查技能目录与文件完整性，不重新生成"
             echo "  ./setup_skills.sh --clean    仅清理遗留的项目级生成目录，不重新生成"
             echo ""
             echo "全局安装位置："
             echo "  - \${XDG_CONFIG_HOME:-\$HOME/.config}/opencode/skills/trainpilot  (OpenCode 官方全局)"
+            echo "  - \$HOME/.gemini/skills/trainpilot  (Antigravity/Gemini CLI 全局)"
             echo "  - \$HOME/.agents/skills/trainpilot  (通用 Agent 全局)"
             echo "可通过 XDG_CONFIG_HOME / HOME 环境变量覆盖目标根目录（便于测试隔离）。"
             exit 0
@@ -96,11 +98,14 @@ SOURCE_SKILL_DIR="${PROJECT_ROOT}/skills/trainpilot"
 # 全局目标（尊重 XDG / HOME，便于测试隔离与多用户环境）
 CONFIG_BASE="${XDG_CONFIG_HOME:-${HOME}/.config}"
 OPENCODE_GLOBAL_DIR="${CONFIG_BASE}/opencode/skills/trainpilot"
+GEMINI_GLOBAL_DIR="${HOME}/.gemini/skills/trainpilot"
 AGENTS_GLOBAL_DIR="${HOME}/.agents/skills/trainpilot"
 
 # 项目级目标（旧行为，仅 --project / --all 时使用）
 OPENCODE_PROJECT_DIR="${PROJECT_ROOT}/.opencode/skills/trainpilot"
-ANTIGRAVITY_PROJECT_DIR="${PROJECT_ROOT}/.antigravity/skills/trainpilot"
+GEMINI_PROJECT_DIR="${PROJECT_ROOT}/.gemini/skills/trainpilot"
+# 遗留错误路径（历史版本误用 .antigravity，仅用于 --clean 迁移清理）
+LEGACY_ANTIGRAVITY_PROJECT_DIR="${PROJECT_ROOT}/.antigravity/skills/trainpilot"
 
 if [ ! -d "${SOURCE_SKILL_DIR}" ]; then
     log_error "源 Skills 目录不存在: ${SOURCE_SKILL_DIR}"
@@ -112,8 +117,9 @@ fi
 # ------------------------------------------------------------------------------
 if [ "${CLEAN_ONLY}" = true ]; then
     log_info "正在清理遗留的项目级 Agent Skills 目录..."
-    rm -rf "${OPENCODE_PROJECT_DIR}" "${ANTIGRAVITY_PROJECT_DIR}"
-    # .antigravity 下若只剩空 skills 目录则一并移除（该目录完全由本脚本生成）
+    rm -rf "${OPENCODE_PROJECT_DIR}" "${GEMINI_PROJECT_DIR}" "${LEGACY_ANTIGRAVITY_PROJECT_DIR}"
+    # .gemini / .antigravity 下若只剩空 skills 目录则一并移除
+    rmdir -p "${PROJECT_ROOT}/.gemini/skills" 2>/dev/null || true
     rmdir -p "${PROJECT_ROOT}/.antigravity/skills" 2>/dev/null || true
     log_success "项目级遗留目录已清理（全局安装不受影响）。"
     exit 0
@@ -123,11 +129,12 @@ fi
 TARGETS=()
 if [ "${SCOPE}" = "global" ] || [ "${SCOPE}" = "all" ]; then
     TARGETS+=("${OPENCODE_GLOBAL_DIR}|# TrainPilot Agent Skill (OpenCode Global Edition)|__TOOL_PATH__")
+    TARGETS+=("${GEMINI_GLOBAL_DIR}|# TrainPilot Agent Skill (Antigravity/Gemini Edition)|__TOOL_PATH__")
     TARGETS+=("${AGENTS_GLOBAL_DIR}|# TrainPilot Agent Skill (Agents Global Edition)|__TOOL_PATH__")
 fi
 if [ "${SCOPE}" = "project" ] || [ "${SCOPE}" = "all" ]; then
     TARGETS+=("${OPENCODE_PROJECT_DIR}|# TrainPilot Agent Skill (OpenCode Edition)|.opencode/skills/trainpilot/scripts/trainpilot_tool.py")
-    TARGETS+=("${ANTIGRAVITY_PROJECT_DIR}|# TrainPilot Agent Skill (Antigravity Edition)|.antigravity/skills/trainpilot/scripts/trainpilot_tool.py")
+    TARGETS+=("${GEMINI_PROJECT_DIR}|# TrainPilot Agent Skill (Antigravity/Gemini Edition)|.gemini/skills/trainpilot/scripts/trainpilot_tool.py")
 fi
 
 if [ "${CHECK_ONLY}" = true ]; then

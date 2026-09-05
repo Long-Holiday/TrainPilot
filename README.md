@@ -104,7 +104,7 @@ uv sync --extra feishu
 本项目提供了已拆分解耦的一键脚本：
 
 ```bash
-# 1. 独立生成 / 同步全局 Agent Skills（默认安装到 ~/.config/opencode 与 ~/.agents，任意目录均可发现）
+# 1. 独立生成 / 同步全局 Agent Skills（默认安装到 ~/.config/opencode、~/.gemini 与 ~/.agents，任意目录均可发现）
 ./setup_skills.sh
 
 # 2. 一键启动 Web 控制面网关服务 (默认采用小众端口 28780 避免冲突，自动检查端口可用性)

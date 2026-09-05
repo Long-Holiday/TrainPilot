@@ -4,7 +4,7 @@
 # 
 # 功能特性：
 # 1. 自动配置小众高位端口（默认 28780），进行智能端口防冲突检测与指引
-# 2. 自动调用 ./setup_skills.sh 同步全局 Agent Skills（~/.config/opencode 与 ~/.agents）
+# 2. 自动调用 ./setup_skills.sh 同步全局 Agent Skills（~/.config/opencode、~/.gemini 与 ~/.agents）
 # 3. 自动同步/检查 Python 虚拟环境与依赖 (优先使用 .venv / uv)
 # 4. 支持前台交互运行、后台守护进程模式、状态检查与一键停止
 # ==============================================================================
@@ -117,7 +117,7 @@ while [[ $# -gt 0 ]]; do
             echo "  ./start.sh -p <PORT>       临时指定监听端口 (默认: 28780)"
             echo ""
             echo "独立 Skills 管理脚本:"
-            echo "  ./setup_skills.sh          生成或同步全局 Agent Skills（默认，~/.config/opencode 与 ~/.agents）"
+            echo "  ./setup_skills.sh          生成或同步全局 Agent Skills（默认，~/.config/opencode、~/.gemini 与 ~/.agents）"
             exit 0
             ;;
         *)
@@ -315,6 +315,7 @@ echo -e "  - ${CYAN}网关服务地址:${NC}  http://0.0.0.0:${TARGET_PORT}"
 echo -e "  - ${CYAN}API 交互文档:${NC}  http://127.0.0.1:${TARGET_PORT}/docs"
 echo -e "  - ${CYAN}健康检查接口:${NC}  http://127.0.0.1:${TARGET_PORT}/health"
 echo -e "  - ${CYAN}OpenCode Skill:${NC}   ~/.config/opencode/skills/trainpilot"
+echo -e "  - ${CYAN}Gemini Skill:${NC}    ~/.gemini/skills/trainpilot (Antigravity CLI)"
 echo -e "  - ${CYAN}Agents Skill:${NC}    ~/.agents/skills/trainpilot"
 echo -e "  - ${CYAN}运行模式:${NC}      ${RUN_MODE}"
 echo "----------------------------------------------------------------------"
