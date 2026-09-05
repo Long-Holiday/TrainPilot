@@ -12,9 +12,13 @@ def reset_mailbox():
     from trainpilot.server.config import settings
     default_mailbox.reset()
     old_token = settings.feishu_verification_token
+    old_api_token = settings.api_token
+    # 测试必须与本地 .env 解耦: 强制关闭 API 鉴权与 Webhook 校验
     settings.feishu_verification_token = None
+    settings.api_token = None
     yield
     settings.feishu_verification_token = old_token
+    settings.api_token = old_api_token
     default_mailbox.reset()
 
 

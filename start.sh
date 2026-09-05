@@ -1,12 +1,22 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# TrainPilot Control Plane Gateway Web 服务一键启动脚本
-# 
-# 功能特性：
-# 1. 自动配置小众高位端口（默认 28780），进行智能端口防冲突检测与指引
-# 2. 自动调用 ./setup_skills.sh 同步全局 Agent Skills（~/.config/opencode、~/.gemini 与 ~/.agents）
-# 3. 自动同步/检查 Python 虚拟环境与依赖 (优先使用 .venv / uv)
-# 4. 支持前台交互运行、后台守护进程模式、状态检查与一键停止
+# TrainPilot Control Plane Gateway Web 服务启动脚本 (仅 Web 侧使用)
+#
+# 职责 (v0.2+ 精简版):
+# 1. 纯 Web 服务启停: 前台 / 后台守护进程 / 状态检查 / 一键停止, 不再触碰 Skills
+# 2. 自动配置小众高位端口 (默认 28780), 进行智能端口防冲突检测与指引
+# 3. Web 绑定地址解析: --host > $TRAINPILOT_BIND_HOST > $TRAINPILOT_HOST(仅本地值有效) > 0.0.0.0
+# 4. 自动同步/检查 Python 虚拟环境与依赖 (优先使用 .venv / uv)
+#
+# 环境变量 Web/GPU 区分约定:
+# - Web 服务器 (.env 在本机): TRAINPILOT_HOST=0.0.0.0 (绑定地址), TRAINPILOT_PORT=28780
+#   如需覆盖绑定可单独设置 TRAINPILOT_BIND_HOST (优先级更高)。
+# - GPU 服务器 (训练内网机): TRAINPILOT_HOST=<Web公网IP/域名> (如 35.202.16.245),
+#   或直接设置完整 TRAINPILOT_GATEWAY_URL=http://<Web公网IP>:28780。
+#   两台机器不可共用同一 .env, 必须分别配置 TRAINPILOT_HOST。
+#
+# Skills 说明: 本脚本不再创建/同步任何 Skill。
+# GPU 侧如需 Agent Skill, 请在 GPU 机器上手动执行一次 ./setup_skills.sh (独立脚本)。
 # ==============================================================================
 
 set -eo pipefail
@@ -42,6 +52,7 @@ cd "${PROJECT_ROOT}"
 
 # 2. 默认小众端口与关键文件路径（使用 28780 规避 8000、8080 等高频冲突）
 DEFAULT_PORT=28780
+DEFAULT_BIND_HOST="0.0.0.0"
 PID_FILE="${PROJECT_ROOT}/.trainpilot.pid"
 LOG_FILE="${PROJECT_ROOT}/trainpilot.log"
 
@@ -61,29 +72,80 @@ except Exception:
 " 2>/dev/null
 }
 
-# 获取配置端口
+# 从 .env 文件读取单个键 (忽略注释与前后空格, 兼容 export 前缀与引号)
+read_env_file_key() {
+    local key="$1"
+    local file="${PROJECT_ROOT}/.env"
+    [ -f "${file}" ] || return 0
+    grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "${file}" 2>/dev/null \
+        | tail -n 1 \
+        | sed -E "s/^[[:space:]]*(export[[:space:]]+)?${key}=//" \
+        | tr -d '\r' \
+        | sed -E "s/^[[:space:]]+//;s/[[:space:]]+$//;s/^['\"]//;s/['\"]$//" || true
+}
+
+# 获取配置端口: --port > $TRAINPILOT_PORT > .env > 默认
 resolve_port() {
     if [ -n "${CUSTOM_PORT}" ]; then
         echo "${CUSTOM_PORT}"
     elif [ -n "${TRAINPILOT_PORT}" ]; then
         echo "${TRAINPILOT_PORT}"
-    elif [ -f "${PROJECT_ROOT}/.env" ]; then
+    else
         local env_port
-        env_port="$(grep -E '^TRAINPILOT_PORT=' "${PROJECT_ROOT}/.env" | cut -d '=' -f2 | tr -d ' \r\n' || true)"
+        env_port="$(read_env_file_key 'TRAINPILOT_PORT')"
         if [ -n "${env_port}" ]; then
             echo "${env_port}"
         else
             echo "${DEFAULT_PORT}"
         fi
-    else
-        echo "${DEFAULT_PORT}"
     fi
+}
+
+# 获取 Web 绑定地址: --host > $TRAINPILOT_BIND_HOST > $TRAINPILOT_HOST(仅本地值) > 0.0.0.0
+# 即使误把 GPU 侧公网 IP 拷贝到 Web 侧, 也回退到 0.0.0.0 避免 bind 失败。
+resolve_bind_host() {
+    if [ -n "${CUSTOM_HOST}" ]; then
+        echo "${CUSTOM_HOST}"
+        return
+    fi
+    if [ -n "${TRAINPILOT_BIND_HOST}" ]; then
+        echo "${TRAINPILOT_BIND_HOST}"
+        return
+    fi
+    local host_candidate="${TRAINPILOT_HOST}"
+    if [ -z "${host_candidate}" ]; then
+        host_candidate="$(read_env_file_key 'TRAINPILOT_HOST')"
+    fi
+    if [ -z "${host_candidate}" ]; then
+        host_candidate="$(read_env_file_key 'TRAINPILOT_BIND_HOST')"
+    fi
+    case "${host_candidate}" in
+        ""|"0.0.0.0"|"::"|"127.0.0.1"|"localhost")
+            if [ -n "${host_candidate}" ]; then
+                echo "${host_candidate}"
+            else
+                echo "${DEFAULT_BIND_HOST}"
+            fi
+            ;;
+        *)
+            echo "${DEFAULT_BIND_HOST}"
+            ;;
+    esac
+}
+
+# 对外展示用 Host: 0.0.0.0/空 -> 127.0.0.1
+display_host() {
+    local h="$1"
+    case "${h}" in
+        ""|"0.0.0.0"|"::") echo "127.0.0.1" ;;
+        *) echo "${h}" ;;
+    esac
 }
 
 # 解析命令行参数
 RUN_MODE="foreground"
 CUSTOM_PORT=""
-SKIP_SKILLS=false
+CUSTOM_HOST=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -100,24 +162,34 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --skip-skills)
-            SKIP_SKILLS=true
+            log_warn "--skip-skills 已废弃: Web 启动脚本不再同步 Skills (GPU 侧请手动执行 ./setup_skills.sh)。"
             shift
             ;;
         --port|-p)
             CUSTOM_PORT="$2"
             shift 2
             ;;
+        --host|--bind|-H)
+            CUSTOM_HOST="$2"
+            shift 2
+            ;;
         --help|-h)
-            echo "TrainPilot Web 服务启动脚本使用说明:"
-            echo "  ./start.sh                 前台交互式启动控制面网关 (默认，自动同步全局 skills)"
+            echo "TrainPilot Web 服务启动脚本使用说明 (仅 Web 侧, 不创建 Skills):"
+            echo "  ./start.sh                 前台交互式启动控制面网关 (默认)"
             echo "  ./start.sh --daemon, -d    后台守护进程模式启动"
             echo "  ./start.sh --stop          停止后台运行的网关进程"
             echo "  ./start.sh --status        查看网关运行状态及健康检查"
-            echo "  ./start.sh --skip-skills   启动时跳过自动执行 ./setup_skills.sh"
             echo "  ./start.sh -p <PORT>       临时指定监听端口 (默认: 28780)"
+            echo "  ./start.sh --host <HOST>   临时指定绑定地址 (默认: 0.0.0.0)"
             echo ""
-            echo "独立 Skills 管理脚本:"
-            echo "  ./setup_skills.sh          生成或同步全局 Agent Skills（默认，~/.config/opencode、~/.gemini 与 ~/.agents）"
+            echo "环境变量 (Web 侧 .env):"
+            echo "  TRAINPILOT_BIND_HOST       Web 绑定地址 (最高优先级, 默认 0.0.0.0)"
+            echo "  TRAINPILOT_HOST            Web 绑定地址 (兼容旧配置, 仅本地值有效; GPU 侧含义不同)"
+            echo "  TRAINPILOT_PORT            监听端口 (默认 28780)"
+            echo ""
+            echo "GPU 侧请勿使用本脚本, 只需配置:"
+            echo "  TRAINPILOT_HOST=<Web公网IP/域名> 或 TRAINPILOT_GATEWAY_URL=http://<Web公网IP>:28780"
+            echo "  并按需手动执行 ./setup_skills.sh 安装 Agent Skill (独立脚本)。"
             exit 0
             ;;
         *)
@@ -208,21 +280,7 @@ if [ "${RUN_MODE}" = "status" ]; then
 fi
 
 # ------------------------------------------------------------------------------
-# 步骤 1: 调用独立的 setup_skills.sh 生成/同步 Agent Skills
-# ------------------------------------------------------------------------------
-if [ "${SKIP_SKILLS}" = false ]; then
-    if [ -f "${PROJECT_ROOT}/setup_skills.sh" ]; then
-        log_info "正在通过 ./setup_skills.sh 同步 Agent Skills..."
-        bash "${PROJECT_ROOT}/setup_skills.sh"
-    else
-        log_warn "未找到 ./setup_skills.sh，跳过 Agent Skills 自动同步。"
-    fi
-else
-    log_info "已根据参数 --skip-skills 跳过 Agent Skills 同步。"
-fi
-
-# ------------------------------------------------------------------------------
-# 步骤 2: 环境配置与端口冲突防范
+# 步骤 1: 环境配置与端口冲突防范 (纯 Web, 不触碰 Skills)
 # ------------------------------------------------------------------------------
 # 自动清理失效的旧 PID 文件
 if [ -f "${PID_FILE}" ]; then
@@ -240,8 +298,10 @@ if [ ! -f "${PROJECT_ROOT}/.env" ]; then
     log_success ".env 文件已创建并设定 TRAINPILOT_PORT=${DEFAULT_PORT}。"
 fi
 
-# 2. 获取最终端口
+# 2. 获取最终端口与绑定地址
 TARGET_PORT="$(resolve_port)"
+TARGET_BIND_HOST="$(resolve_bind_host)"
+TARGET_DISPLAY_HOST="$(display_host "${TARGET_BIND_HOST}")"
 
 # 3. 检查端口是否被占用
 if ! check_port_available "${TARGET_PORT}"; then
@@ -266,13 +326,13 @@ if ! check_port_available "${TARGET_PORT}"; then
     exit 1
 fi
 
-# 导出环境变量供 Python 代码和配置读取
+# 导出环境变量供 Python 代码和配置读取 (仅 PORT/BIND, 不再伪造 GATEWAY_URL)
 export PYTHONPATH="${PROJECT_ROOT}/src:${PYTHONPATH:-}"
 export TRAINPILOT_PORT="${TARGET_PORT}"
-export TRAINPILOT_GATEWAY_URL="http://127.0.0.1:${TARGET_PORT}"
+export TRAINPILOT_BIND_HOST="${TARGET_BIND_HOST}"
 
 # ------------------------------------------------------------------------------
-# 步骤 3: 依赖环境就绪检查 (优先使用 .venv 与 uv)
+# 步骤 2: 依赖环境就绪检查 (优先使用 .venv 与 uv)
 # ------------------------------------------------------------------------------
 log_info "正在验证 Python 运行环境..."
 
@@ -295,7 +355,7 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# 步骤 4: 启动服务 (前台 / 后台守护进程)
+# 步骤 3: 启动服务 (前台 / 后台守护进程, 纯 Web)
 # ------------------------------------------------------------------------------
 echo -e "${CYAN}${BOLD}"
 cat << 'EOF'
@@ -309,23 +369,22 @@ cat << 'EOF'
 ======================================================================
 EOF
 echo -e "${NC}"
-echo -e "${BOLD}TrainPilot Control Plane Gateway 启动信息:${NC}"
+echo -e "${BOLD}TrainPilot Control Plane Gateway 启动信息 (Web 侧, 不创建 Skills):${NC}"
+echo -e "  - ${CYAN}绑定地址:${NC}      ${GREEN}${TARGET_BIND_HOST}${NC}"
 echo -e "  - ${CYAN}监听端口:${NC}      ${GREEN}${TARGET_PORT}${NC} (已采用小众高位端口规避冲突)"
-echo -e "  - ${CYAN}网关服务地址:${NC}  http://0.0.0.0:${TARGET_PORT}"
-echo -e "  - ${CYAN}API 交互文档:${NC}  http://127.0.0.1:${TARGET_PORT}/docs"
-echo -e "  - ${CYAN}健康检查接口:${NC}  http://127.0.0.1:${TARGET_PORT}/health"
-echo -e "  - ${CYAN}OpenCode Skill:${NC}   ~/.config/opencode/skills/trainpilot"
-echo -e "  - ${CYAN}Gemini Skill:${NC}    ~/.gemini/skills/trainpilot (Antigravity CLI)"
-echo -e "  - ${CYAN}Agents Skill:${NC}    ~/.agents/skills/trainpilot"
+echo -e "  - ${CYAN}网关服务地址:${NC}  http://${TARGET_BIND_HOST}:${TARGET_PORT}"
+echo -e "  - ${CYAN}API 交互文档:${NC}  http://${TARGET_DISPLAY_HOST}:${TARGET_PORT}/docs"
+echo -e "  - ${CYAN}健康检查接口:${NC}  http://${TARGET_DISPLAY_HOST}:${TARGET_PORT}/health"
 echo -e "  - ${CYAN}运行模式:${NC}      ${RUN_MODE}"
+echo -e "  - ${CYAN}Skills 说明:${NC}   本脚本不再同步 Skills；GPU 侧请手动执行 ./setup_skills.sh"
 echo "----------------------------------------------------------------------"
 
 if [ "${RUN_MODE}" = "daemon" ]; then
     log_info "正在后台启动网关服务..."
     if command -v setsid >/dev/null 2>&1; then
-        setsid ${PYTHON_CMD} -m uvicorn trainpilot.server.main:app --host 0.0.0.0 --port "${TARGET_PORT}" </dev/null >> "${LOG_FILE}" 2>&1 &
+        setsid ${PYTHON_CMD} -m uvicorn trainpilot.server.main:app --host "${TARGET_BIND_HOST}" --port "${TARGET_PORT}" </dev/null >> "${LOG_FILE}" 2>&1 &
     else
-        nohup ${PYTHON_CMD} -m uvicorn trainpilot.server.main:app --host 0.0.0.0 --port "${TARGET_PORT}" </dev/null >> "${LOG_FILE}" 2>&1 &
+        nohup ${PYTHON_CMD} -m uvicorn trainpilot.server.main:app --host "${TARGET_BIND_HOST}" --port "${TARGET_PORT}" </dev/null >> "${LOG_FILE}" 2>&1 &
     fi
     NEW_PID=$!
     disown "${NEW_PID}" 2>/dev/null || true
@@ -345,5 +404,5 @@ if [ "${RUN_MODE}" = "daemon" ]; then
     fi
 else
     log_info "正在前台启动网关服务 (按 Ctrl+C 退出)..."
-    exec ${PYTHON_CMD} -m uvicorn trainpilot.server.main:app --host 0.0.0.0 --port "${TARGET_PORT}"
+    exec ${PYTHON_CMD} -m uvicorn trainpilot.server.main:app --host "${TARGET_BIND_HOST}" --port "${TARGET_PORT}"
 fi

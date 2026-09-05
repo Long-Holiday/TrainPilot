@@ -106,7 +106,13 @@ def _coerce_to_float(value: Any) -> float:
 
 
 class TrainPilotClient:
-    """Zero-credential, lightweight HTTP client communicating with TrainPilot Gateway."""
+    """Zero-credential, lightweight HTTP client communicating with TrainPilot Gateway.
+
+    网关地址解析 (GPU 侧):
+    显式 ``gateway_url`` 参数 > ``$TRAINPILOT_GATEWAY_URL`` >
+    ``http://$TRAINPILOT_HOST:$TRAINPILOT_PORT`` > 默认 ``http://127.0.0.1:28780``。
+    因此 GPU 机器只需设置 ``TRAINPILOT_HOST=<Web 公网 IP/域名>`` 即可, 无需拼完整 URL。
+    """
 
     def __init__(
         self,
@@ -116,7 +122,10 @@ class TrainPilotClient:
         api_token: Optional[str] = None,
     ):
         if gateway_url is None:
-            gateway_url = os.environ.get("TRAINPILOT_GATEWAY_URL", "http://localhost:28780")
+            # 延迟导入避免循环依赖; 解析逻辑收敛到 common.gateway
+            from trainpilot.common.gateway import resolve_gateway_url
+
+            gateway_url = resolve_gateway_url()
         if task_id is None:
             task_id = os.environ.get("TRAINPILOT_TASK_ID", "train-task-default")
         if api_token is None:

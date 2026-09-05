@@ -42,7 +42,12 @@ The skill provides an executable script `scripts/trainpilot_tool.py` runnable di
 | **Mock Decision (Dev/Test)** | `python3 skills/trainpilot/scripts/trainpilot_tool.py mock-decision --task-id <ID> --action reduce_lr_rollback` |
 
 > [!NOTE]
-> Environment variables `TRAINPILOT_GATEWAY_URL` (default: `http://localhost:28780`) and `TRAINPILOT_TASK_ID` can be set to omit `--gateway` and `--task-id` flags in scripts.
+> 网关地址解析 (GPU 侧): `--gateway` 参数 > 环境变量 `TRAINPILOT_GATEWAY_URL` (完整 URL)
+> > `http://<TRAINPILOT_HOST>:<TRAINPILOT_PORT>` 拼接 > 默认 `http://127.0.0.1:28780`。
+> 因此 GPU 机器只需设置 `TRAINPILOT_HOST=<Web 公网 IP/域名>` (如 `35.202.16.245`) 即可,
+> 无需拼完整 URL。`TRAINPILOT_TASK_ID` 可用于省略 `--task-id`。
+> 注意: `TRAINPILOT_HOST` 在 Web 侧表示绑定地址 (应为 `0.0.0.0`), 在 GPU 侧表示网关地址,
+> 两台机器必须分别配置, 不可直接共用同一 `.env`。
 
 ---
 

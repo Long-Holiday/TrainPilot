@@ -17,6 +17,7 @@ COPY examples ./examples
 RUN uv sync --frozen --no-dev
 
 ENV PYTHONPATH=/app/src \
+    TRAINPILOT_BIND_HOST=0.0.0.0 \
     TRAINPILOT_HOST=0.0.0.0 \
     TRAINPILOT_PORT=28780
 

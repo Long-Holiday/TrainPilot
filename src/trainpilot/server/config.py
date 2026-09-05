@@ -1,12 +1,24 @@
 """Server configuration management using pydantic-settings."""
 
+import os
 from typing import Optional
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from trainpilot.common.gateway import resolve_bind_host, resolve_gateway_url, resolve_public_host
+
 
 class ServerSettings(BaseSettings):
-    """Configuration settings for the TrainPilot control plane server."""
+    """Configuration settings for the TrainPilot control plane server.
+
+    Web vs GPU 环境变量约定 (v0.2+):
+    - Web 服务器只用 ``host``/``bind_host`` + ``port`` 决定监听地址。
+      优先 ``TRAINPILOT_BIND_HOST``, 回退 ``TRAINPILOT_HOST`` (仅本地值有效),
+      否则默认 ``0.0.0.0``。即使误填公网 IP 也不会导致 bind 失败。
+    - GPU 服务器只用 ``TRAINPILOT_GATEWAY_URL`` 或 ``TRAINPILOT_HOST`` +
+      ``TRAINPILOT_PORT`` 拼接网关地址, 与本机的 bind 无关。
+      例: ``TRAINPILOT_HOST=35.202.16.245`` + ``TRAINPILOT_PORT=28780``。
+    """
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -16,7 +28,10 @@ class ServerSettings(BaseSettings):
     )
 
     # Server binding
-    host: str = Field(default="0.0.0.0", description="Host to bind the server")
+    # TRAINPILOT_HOST: 历史字段, Web 侧表示绑定地址 (建议 0.0.0.0), GPU 侧表示网关 Host。
+    host: str = Field(default="0.0.0.0", description="Host to bind the server (Web 侧绑定地址; GPU 侧请改用网关地址, 见文档)")
+    # TRAINPILOT_BIND_HOST: Web 侧专用绑定地址, 优先级高于 host, GPU 侧忽略。
+    bind_host: Optional[str] = Field(default=None, description="Web-only bind address override (TRAINPILOT_BIND_HOST)")
     port: int = Field(default=28780, description="Port to listen on (custom non-conflicting port)")
     debug: bool = Field(default=False, description="Enable debug logging")
 
@@ -69,6 +84,24 @@ class ServerSettings(BaseSettings):
         default=500,
         description="Max retained events per task (ring buffer, oldest dropped).",
     )
+
+    @property
+    def effective_bind_host(self) -> str:
+        """Web 侧实际用于 uvicorn --host 的绑定地址。"""
+        return resolve_bind_host(bind_host_env=self.bind_host, host_env=self.host)
+
+    @property
+    def public_host(self) -> str:
+        """对外展示/拼接用的网关 Host (0.0.0.0 自动折叠为 127.0.0.1)。"""
+        return resolve_public_host(self.host)
+
+    @property
+    def advertised_gateway_url(self) -> str:
+        """Web 侧对外公布的网关地址 (优先 TRAINPILOT_GATEWAY_URL, 否则由 HOST+PORT 拼接)。"""
+        gateway_env = os.environ.get("TRAINPILOT_GATEWAY_URL")
+        if gateway_env and gateway_env.strip():
+            return gateway_env.strip().rstrip("/")
+        return resolve_gateway_url(host=self.host, port=self.port)
 
     @property
     def is_feishu_configured(self) -> bool:

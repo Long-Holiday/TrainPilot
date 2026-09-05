@@ -25,6 +25,12 @@ class UvicornTestServer(uvicorn.Server):
 
 @pytest.fixture(scope="module")
 def live_server():
+    from trainpilot.server.config import settings
+    old_api_token = settings.api_token
+    old_verify_token = settings.feishu_verification_token
+    # 与本地 .env 解耦: 测试期间关闭鉴权
+    settings.api_token = None
+    settings.feishu_verification_token = None
     config = uvicorn.Config(app=app, host=TEST_HOST, port=TEST_PORT, log_level="warning")
     server = UvicornTestServer(config=config)
     thread = threading.Thread(target=server.run, daemon=True)
@@ -35,6 +41,8 @@ def live_server():
     yield BASE_URL
     server.should_exit = True
     thread.join(timeout=2)
+    settings.api_token = old_api_token
+    settings.feishu_verification_token = old_verify_token
 
 
 def run_cli_cmd(*args):

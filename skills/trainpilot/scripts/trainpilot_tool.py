@@ -37,7 +37,37 @@ def _sanitize_for_json(obj: Any) -> Any:
 
 
 def get_default_gateway() -> str:
-    return os.environ.get("TRAINPILOT_GATEWAY_URL", "http://localhost:28780").rstrip("/")
+    """GPU 侧网关地址: $TRAINPILOT_GATEWAY_URL > http://$TRAINPILOT_HOST:$TRAINPILOT_PORT > 默认.
+
+    与 src/trainpilot/common/gateway.py::resolve_gateway_url 保持一致
+    (本脚本需保持单文件零依赖可拷贝, 故保留精简副本, 修改时请同步)。
+    """
+    env_url = os.environ.get("TRAINPILOT_GATEWAY_URL", "").strip()
+    if env_url:
+        return env_url.rstrip("/")
+    raw_host = (os.environ.get("TRAINPILOT_HOST", "") or "").strip()
+    # 兼容用户误填 scheme/路径/端口
+    host = raw_host
+    for prefix in ("http://", "https://"):
+        if host.lower().startswith(prefix):
+            host = host[len(prefix):]
+            break
+    host = host.split("/")[0].strip()
+    if host.count(":") == 1 and not host.startswith("["):
+        maybe_host, maybe_port = host.rsplit(":", 1)
+        if maybe_port.isdigit() and maybe_host:
+            host = maybe_host
+    if host:
+        if host in ("0.0.0.0", "::"):
+            host = "127.0.0.1"
+        try:
+            port = int(str(os.environ.get("TRAINPILOT_PORT", "28780")).strip())
+            if not 1 <= port <= 65535:
+                port = 28780
+        except (ValueError, TypeError):
+            port = 28780
+        return f"http://{host}:{port}"
+    return "http://127.0.0.1:28780"
 
 
 def get_default_task_id() -> str:

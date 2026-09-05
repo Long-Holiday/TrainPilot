@@ -100,22 +100,29 @@ uv sync
 uv sync --extra feishu
 ```
 
-### 2. 一键启动与专属 Skills 生成 (推荐)
-本项目提供了已拆分解耦的一键脚本：
+### 2. Web 服务启动 (仅 Web 服务器) 与 Skills 安装 (仅 GPU 服务器)
+本项目已将 Web 服务与 Skills 解耦为两个独立脚本, 请按机器角色分别执行:
 
 ```bash
-# 1. 独立生成 / 同步全局 Agent Skills（默认安装到 ~/.config/opencode、~/.gemini 与 ~/.agents，任意目录均可发现）
-./setup_skills.sh
-
-# 2. 一键启动 Web 控制面网关服务 (默认采用小众端口 28780 避免冲突，自动检查端口可用性)
+# Web 服务器 (控制面网关, 如公网云主机): 仅启动服务, 不创建任何 Skill
 ./start.sh
-
-# 支持常用参数：
+# 支持常用参数:
 ./start.sh --daemon   # 后台守护进程启动
 ./start.sh --status   # 查看运行状态与健康检查
 ./start.sh --stop     # 停止后台服务
 ./start.sh -p 29580   # 临时指定其它端口
+./start.sh --host 127.0.0.1  # 临时指定绑定地址 (默认 0.0.0.0)
+
+# GPU 服务器 (训练内网机): 按需手动安装 Agent Skill (默认全局安装, 任意目录均可发现)
+./setup_skills.sh
 ```
+
+> 环境变量 `TRAINPILOT_HOST` 必须按机器分别配置 (不可共用同一 `.env`):
+> - Web 侧 (绑定地址): `TRAINPILOT_HOST=0.0.0.0`, `TRAINPILOT_PORT=28780`
+>   (如需覆盖绑定可单独设置 `TRAINPILOT_BIND_HOST`, 优先级更高)
+> - GPU 侧 (网关地址): `TRAINPILOT_HOST=<Web公网IP/域名>` (如 `35.202.16.245`),
+>   或直接设置完整 `TRAINPILOT_GATEWAY_URL=http://<Web公网IP>:28780` (优先级最高)。
+> 网关地址解析优先级: `$TRAINPILOT_GATEWAY_URL` > `http://$TRAINPILOT_HOST:$TRAINPILOT_PORT` > 默认 `http://127.0.0.1:28780`。
 
 ### 3. 运行开发服务与测试
 ```bash
@@ -140,7 +147,7 @@ uv run pytest tests/test_e2e_simulation.py -v -s
 
 ### CLI 常用操作示例
 
-智能体可在 GPU 节点通过标准终端直接执行（支持配置环境变量 `TRAINPILOT_GATEWAY_URL` 与 `TRAINPILOT_TASK_ID`）：
+智能体可在 GPU 节点通过标准终端直接执行 (推荐在 GPU 机器上 `export TRAINPILOT_HOST=<Web公网IP>` 后可省略 `--gateway`):
 
 ```bash
 # 1. 上报训练阶段里程碑 (静默记录，推送飞书只读绿色卡片)

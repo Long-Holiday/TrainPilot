@@ -20,13 +20,17 @@ def _isolated_env(tmp_path):
 
 
 def test_start_script_help():
-    """Verify start.sh --help outputs usage instructions."""
+    """Verify start.sh --help outputs usage instructions (Web-only, no auto skills)."""
     res = subprocess.run([START_SH, "--help"], cwd=PROJECT_ROOT, capture_output=True, text=True)
     assert res.returncode == 0
     assert "TrainPilot Web 服务启动脚本使用说明" in res.stdout
     assert "--daemon" in res.stdout
     assert "28780" in res.stdout
-    assert "setup_skills.sh" in res.stdout
+    # Web 脚本不再自动同步 skills, 仅作为 GPU 侧手动指引提及
+    assert "--host" in res.stdout
+    assert "不创建" in res.stdout or "不再" in res.stdout or "仅 Web" in res.stdout
+    assert "自动同步全局" not in res.stdout
+    assert "setup_skills.sh" in res.stdout  # 仅作为 GPU 手动指引保留
 
 
 def test_setup_skills_script_help():

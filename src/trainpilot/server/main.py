@@ -98,7 +98,7 @@ def start():
 
     uvicorn.run(
         "trainpilot.server.main:app",
-        host=settings.host,
+        host=settings.effective_bind_host,
         port=settings.port,
         reload=settings.debug,
     )

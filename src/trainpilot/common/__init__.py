@@ -1,5 +1,11 @@
 """TrainPilot common definitions."""
 
+from trainpilot.common.gateway import (
+    resolve_bind_host,
+    resolve_gateway_url,
+    resolve_port,
+    resolve_public_host,
+)
 from trainpilot.common.schemas import (
     EventNotifyRequest,
     EventNotifyResponse,
@@ -16,6 +22,10 @@ __all__ = [
     "TaskState",
     "EventType",
     "ActionType",
+    "resolve_bind_host",
+    "resolve_gateway_url",
+    "resolve_port",
+    "resolve_public_host",
     "EventNotifyRequest",
     "EventNotifyResponse",
     "InstructionResponse",
