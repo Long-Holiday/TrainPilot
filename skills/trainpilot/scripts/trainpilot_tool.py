@@ -37,11 +37,18 @@ def _sanitize_for_json(obj: Any) -> Any:
 
 
 def get_default_gateway() -> str:
-    return os.environ.get("TRAINPILOT_GATEWAY_URL", "http://localhost:8000").rstrip("/")
+    return os.environ.get("TRAINPILOT_GATEWAY_URL", "http://localhost:28780").rstrip("/")
 
 
 def get_default_task_id() -> str:
     return os.environ.get("TRAINPILOT_TASK_ID", "train-task-default")
+
+
+def _auth_headers(args) -> Dict[str, str]:
+    token = getattr(args, "api_token", None) or os.environ.get("TRAINPILOT_API_TOKEN")
+    if token:
+        return {"Authorization": f"Bearer {token}"}
+    return {}
 
 
 def _parse_json_dict(arg_val: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -84,7 +91,7 @@ def cmd_report_milestone(args) -> int:
         "metrics": metrics,
     }
     try:
-        resp = requests.post(url, json=payload, timeout=args.timeout)
+        resp = requests.post(url, json=payload, timeout=args.timeout, headers=_auth_headers(args))
         resp.raise_for_status()
         print(json.dumps(resp.json(), indent=2, ensure_ascii=False))
         return 0
@@ -106,7 +113,7 @@ def cmd_report_alert(args) -> int:
         "metrics": metrics,
     }
     try:
-        resp = requests.post(url, json=payload, timeout=args.timeout)
+        resp = requests.post(url, json=payload, timeout=args.timeout, headers=_auth_headers(args))
         resp.raise_for_status()
         print(json.dumps(resp.json(), indent=2, ensure_ascii=False))
         return 0
@@ -123,7 +130,7 @@ def cmd_poll_instruction(args) -> int:
 
     while True:
         try:
-            resp = requests.get(url, params={"pop": pop_param}, timeout=args.timeout)
+            resp = requests.get(url, params={"pop": pop_param}, timeout=args.timeout, headers=_auth_headers(args))
             resp.raise_for_status()
             data = resp.json()
             if data.get("ready"):
@@ -159,7 +166,7 @@ def cmd_ack_instruction(args) -> int:
         "message": args.message,
     }
     try:
-        resp = requests.post(url, json=payload, timeout=args.timeout)
+        resp = requests.post(url, json=payload, timeout=args.timeout, headers=_auth_headers(args))
         resp.raise_for_status()
         print(json.dumps(resp.json(), indent=2, ensure_ascii=False))
         return 0
@@ -179,7 +186,7 @@ def cmd_send_heartbeat(args) -> int:
         "metrics": metrics,
     }
     try:
-        resp = requests.post(url, json=payload, timeout=args.timeout)
+        resp = requests.post(url, json=payload, timeout=args.timeout, headers=_auth_headers(args))
         resp.raise_for_status()
         print(json.dumps(resp.json(), indent=2, ensure_ascii=False))
         return 0
@@ -192,7 +199,7 @@ def cmd_get_status(args) -> int:
     """Query task status from gateway."""
     url = f"{args.gateway}/api/tasks/{args.task_id}/status"
     try:
-        resp = requests.get(url, timeout=args.timeout)
+        resp = requests.get(url, timeout=args.timeout, headers=_auth_headers(args))
         resp.raise_for_status()
         print(json.dumps(resp.json(), indent=2, ensure_ascii=False))
         return 0
@@ -211,7 +218,7 @@ def cmd_mock_decision(args) -> int:
         "payload": _parse_json_dict(args.payload),
     }
     try:
-        resp = requests.post(url, json=payload, timeout=args.timeout)
+        resp = requests.post(url, json=payload, timeout=args.timeout, headers=_auth_headers(args))
         resp.raise_for_status()
         print(json.dumps(resp.json(), indent=2, ensure_ascii=False))
         return 0
@@ -228,6 +235,7 @@ def main():
     parser.add_argument("--gateway", default=get_default_gateway(), help="Control Plane Gateway URL")
     parser.add_argument("--task-id", default=get_default_task_id(), help="Unique Training Task ID")
     parser.add_argument("--timeout", type=int, default=10, help="HTTP request timeout in seconds")
+    parser.add_argument("--api-token", default=os.environ.get("TRAINPILOT_API_TOKEN"), help="API token when gateway enforces auth")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 

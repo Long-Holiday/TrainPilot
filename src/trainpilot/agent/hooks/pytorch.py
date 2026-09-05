@@ -19,12 +19,14 @@ class TrainPilotPyTorchHook:
     def __init__(
         self,
         task_id: str,
-        gateway_url: str = "http://localhost:8000",
+        gateway_url: Optional[str] = None,
         milestone_step_interval: int = 100,
         heartbeat_step_interval: int = 20,
+        api_token: Optional[str] = None,
+        **guardian_kwargs: Any,
     ):
-        self.client = TrainPilotClient(gateway_url=gateway_url, task_id=task_id)
-        self.guardian = TrainingGuardian(client=self.client)
+        self.client = TrainPilotClient(gateway_url=gateway_url, task_id=task_id, api_token=api_token)
+        self.guardian = TrainingGuardian(client=self.client, **guardian_kwargs)
         self.milestone_step_interval = milestone_step_interval
         self.heartbeat_step_interval = heartbeat_step_interval
         self.current_step = 0
@@ -41,7 +43,7 @@ class TrainPilotPyTorchHook:
     def on_step_end(
         self,
         step: int,
-        loss: float,
+        loss: Any,
         epoch: Optional[int] = None,
         lr: Optional[float] = None,
         extra_metrics: Optional[Dict[str, Any]] = None,
@@ -53,17 +55,19 @@ class TrainPilotPyTorchHook:
         2. Periodic lightweight heartbeat.
         3. Periodic milestone reporting.
         """
+        from trainpilot.agent.client import _coerce_to_float
+
         self.current_step = step
         if epoch is not None:
             self.current_epoch = epoch
 
-        metrics = {"loss": loss}
+        metrics: Dict[str, Any] = {"loss": loss}
         if lr is not None:
             metrics["lr"] = lr
         if extra_metrics:
             metrics.update(extra_metrics)
 
-        # 1. Anomaly check (pauses & polls if anomaly detected)
+        # 1. Anomaly check (pauses & polls if anomaly detected; Tensor/numpy-safe)
         self.guardian.check_and_handle_loss(
             loss_val=loss,
             step=step,
@@ -71,14 +75,19 @@ class TrainPilotPyTorchHook:
             extra_metrics=metrics,
         )
 
-        # 2. Periodic heartbeat
+        # 2. Periodic heartbeat (failures only warn inside client)
         if self.heartbeat_step_interval and step % self.heartbeat_step_interval == 0:
             self.client.send_heartbeat(step=step, epoch=epoch, metrics=metrics)
 
-        # 3. Periodic milestone report
+        # 3. Periodic milestone report (loss formatting must not crash on Tensor/NaN)
         if self.milestone_step_interval and step > 0 and step % self.milestone_step_interval == 0:
+            try:
+                loss_f = _coerce_to_float(loss)
+                loss_str = f"{loss_f:.4f}"
+            except Exception:
+                loss_str = str(loss)
             self.client.notify_milestone(
-                message=f"Cruising normally at step {step} (loss: {loss:.4f})",
+                message=f"Cruising normally at step {step} (loss: {loss_str})",
                 step=step,
                 epoch=epoch,
                 metrics=metrics,

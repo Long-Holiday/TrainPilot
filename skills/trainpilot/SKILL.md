@@ -42,7 +42,7 @@ The skill provides an executable script `scripts/trainpilot_tool.py` runnable di
 | **Mock Decision (Dev/Test)** | `python3 skills/trainpilot/scripts/trainpilot_tool.py mock-decision --task-id <ID> --action reduce_lr_rollback` |
 
 > [!NOTE]
-> Environment variables `TRAINPILOT_GATEWAY_URL` (default: `http://localhost:8000`) and `TRAINPILOT_TASK_ID` can be set to omit `--gateway` and `--task-id` flags in scripts.
+> Environment variables `TRAINPILOT_GATEWAY_URL` (default: `http://localhost:28780`) and `TRAINPILOT_TASK_ID` can be set to omit `--gateway` and `--task-id` flags in scripts.
 
 ---
 
@@ -52,7 +52,7 @@ The skill provides an executable script `scripts/trainpilot_tool.py` runnable di
 When training crosses an epoch boundary or reaches a new evaluation metric high:
 ```bash
 python3 skills/trainpilot/scripts/trainpilot_tool.py report-milestone \
-  --gateway "http://control-plane.example.com:8000" \
+  --gateway "http://control-plane.example.com:28780" \
   --task-id "qwen2-7b-sft-0905" \
   --step 1000 \
   --epoch 1 \
@@ -64,7 +64,7 @@ python3 skills/trainpilot/scripts/trainpilot_tool.py report-milestone \
 When NaN or sudden loss spike is intercepted:
 ```bash
 python3 skills/trainpilot/scripts/trainpilot_tool.py report-alert \
-  --gateway "http://control-plane.example.com:8000" \
+  --gateway "http://control-plane.example.com:28780" \
   --task-id "qwen2-7b-sft-0905" \
   --step 1450 \
   --message "Loss NaN detected at step 1450 (previous loss was 0.35)" \
@@ -75,7 +75,7 @@ python3 skills/trainpilot/scripts/trainpilot_tool.py report-alert \
 After sending the alert, wait for an engineer to click a button on the Feishu interactive card:
 ```bash
 python3 skills/trainpilot/scripts/trainpilot_tool.py poll-instruction \
-  --gateway "http://control-plane.example.com:8000" \
+  --gateway "http://control-plane.example.com:28780" \
   --task-id "qwen2-7b-sft-0905" \
   --wait \
   --interval 2 \
@@ -97,7 +97,7 @@ Output JSON will indicate the selected strategy:
 Once the recovery procedure finishes (e.g. reload checkpoint, reduce learning rate by 50%):
 ```bash
 python3 skills/trainpilot/scripts/trainpilot_tool.py ack-instruction \
-  --gateway "http://control-plane.example.com:8000" \
+  --gateway "http://control-plane.example.com:28780" \
   --task-id "qwen2-7b-sft-0905" \
   --instruction-id "inst_b12fa09c" \
   --action "reduce_lr_rollback" \
@@ -116,7 +116,7 @@ from trainpilot.agent import TrainPilotClient, TrainingGuardian
 
 # 1. Initialize lightweight client
 client = TrainPilotClient(
-    gateway_url="http://control-plane.example.com:8000",
+    gateway_url="http://control-plane.example.com:28780",
     task_id="qwen2-7b-sft-0905",
 )
 
@@ -150,7 +150,7 @@ from trainpilot.agent.hooks.pytorch import TrainPilotPyTorchHook
 
 hook = TrainPilotPyTorchHook(
     task_id="qwen2-7b-sft-0905",
-    gateway_url="http://control-plane.example.com:8000",
+    gateway_url="http://control-plane.example.com:28780",
     milestone_step_interval=100,
 )
 hook.register_recovery_callback("reduce_lr_rollback", my_rollback_fn)

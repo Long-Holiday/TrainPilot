@@ -9,8 +9,12 @@ from trainpilot.server.mailbox import default_mailbox
 
 @pytest.fixture(autouse=True)
 def reset_mailbox():
+    from trainpilot.server.config import settings
     default_mailbox.reset()
+    old_token = settings.feishu_verification_token
+    settings.feishu_verification_token = None
     yield
+    settings.feishu_verification_token = old_token
     default_mailbox.reset()
 
 

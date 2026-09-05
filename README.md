@@ -100,7 +100,24 @@ uv sync
 uv sync --extra feishu
 ```
 
-### 2. 运行开发服务与测试
+### 2. 一键启动与专属 Skills 生成 (推荐)
+本项目提供了已拆分解耦的一键脚本：
+
+```bash
+# 1. 独立生成 / 同步全局 Agent Skills（默认安装到 ~/.config/opencode 与 ~/.agents，任意目录均可发现）
+./setup_skills.sh
+
+# 2. 一键启动 Web 控制面网关服务 (默认采用小众端口 28780 避免冲突，自动检查端口可用性)
+./start.sh
+
+# 支持常用参数：
+./start.sh --daemon   # 后台守护进程启动
+./start.sh --status   # 查看运行状态与健康检查
+./start.sh --stop     # 停止后台服务
+./start.sh -p 29580   # 临时指定其它端口
+```
+
+### 3. 运行开发服务与测试
 ```bash
 # 启动控制面公网网关服务
 uv run python examples/run_server.py
@@ -118,8 +135,8 @@ uv run pytest tests/test_e2e_simulation.py -v -s
 
 为让运行在 GPU 服务器上的 AI Agent（如 `agy`、`opencode`、`claude-code`）能够自主调用网关的 HTTP 接口，本项目在项目根目录构建了标准规范的 Skills 包：
 
-- **技能规范定义**：[`skills/trainpilot/SKILL.md`](file:///home/default_user/TrainPilot/skills/trainpilot/SKILL.md)
-- **独立可执行工具**：[`skills/trainpilot/scripts/trainpilot_tool.py`](file:///home/default_user/TrainPilot/skills/trainpilot/scripts/trainpilot_tool.py)
+- **技能规范定义**：[`skills/trainpilot/SKILL.md`](skills/trainpilot/SKILL.md)
+- **独立可执行工具**：[`skills/trainpilot/scripts/trainpilot_tool.py`](skills/trainpilot/scripts/trainpilot_tool.py)
 
 ### CLI 常用操作示例
 
@@ -128,7 +145,7 @@ uv run pytest tests/test_e2e_simulation.py -v -s
 ```bash
 # 1. 上报训练阶段里程碑 (静默记录，推送飞书只读绿色卡片)
 python3 skills/trainpilot/scripts/trainpilot_tool.py report-milestone \
-  --gateway "http://127.0.0.1:8000" \
+  --gateway "http://127.0.0.1:28780" \
   --task-id "qwen2-7b-sft-0905" \
   --step 1000 \
   --epoch 1 \
@@ -137,7 +154,7 @@ python3 skills/trainpilot/scripts/trainpilot_tool.py report-milestone \
 
 # 2. 上报训练异常并挂起现场 (推送飞书红色告警卡片，等待工程师决策)
 python3 skills/trainpilot/scripts/trainpilot_tool.py report-alert \
-  --gateway "http://127.0.0.1:8000" \
+  --gateway "http://127.0.0.1:28780" \
   --task-id "qwen2-7b-sft-0905" \
   --step 1450 \
   --message "Loss NaN detected at step 1450" \
@@ -145,14 +162,14 @@ python3 skills/trainpilot/scripts/trainpilot_tool.py report-alert \
 
 # 3. 阻塞轮询信箱，等待人类专家在飞书端下发的决策指令
 python3 skills/trainpilot/scripts/trainpilot_tool.py poll-instruction \
-  --gateway "http://127.0.0.1:8000" \
+  --gateway "http://127.0.0.1:28780" \
   --task-id "qwen2-7b-sft-0905" \
   --wait \
   --wait-timeout 600
 
 # 4. 执行本地修复后，向网关确认 ACK，将任务状态重置为 RUNNING
 python3 skills/trainpilot/scripts/trainpilot_tool.py ack-instruction \
-  --gateway "http://127.0.0.1:8000" \
+  --gateway "http://127.0.0.1:28780" \
   --task-id "qwen2-7b-sft-0905" \
   --instruction-id "inst_b12fa09c" \
   --action "reduce_lr_rollback" \
@@ -161,14 +178,14 @@ python3 skills/trainpilot/scripts/trainpilot_tool.py ack-instruction \
 
 # 5. 上报运行时心跳
 python3 skills/trainpilot/scripts/trainpilot_tool.py send-heartbeat \
-  --gateway "http://127.0.0.1:8000" \
+  --gateway "http://127.0.0.1:28780" \
   --task-id "qwen2-7b-sft-0905" \
   --step 1500 \
   --metrics "gpu_mem=88%"
 
 # 6. 查询当前任务完整信箱与状态看板
 python3 skills/trainpilot/scripts/trainpilot_tool.py get-status \
-  --gateway "http://127.0.0.1:8000" \
+  --gateway "http://127.0.0.1:28780" \
   --task-id "qwen2-7b-sft-0905"
 ```
 
@@ -183,7 +200,7 @@ from trainpilot.agent import TrainPilotClient, TrainingGuardian
 
 # 初始化轻量客户端（仅依赖标准 requests）
 client = TrainPilotClient(
-    gateway_url="http://your-control-plane:8000",
+    gateway_url="http://your-control-plane:28780",
     task_id="llama3-8b-lora",
 )
 
@@ -216,7 +233,7 @@ from trainpilot.agent.hooks.pytorch import TrainPilotPyTorchHook
 
 hook = TrainPilotPyTorchHook(
     task_id="llama3-8b-lora",
-    gateway_url="http://your-control-plane:8000",
+    gateway_url="http://your-control-plane:28780",
     milestone_step_interval=500, # 每 500 步自动上报里程碑
     heartbeat_step_interval=50,  # 每 50 步上报心跳
 )
@@ -237,9 +254,16 @@ hook.on_step_end(step=step, loss=loss_val, lr=current_lr)
 | **GPU Agent** | `/api/tasks/{task_id}/ack` | `POST` | 确认指令执行结果，恢复状态至 `RUNNING` |
 | **GPU Agent** | `/api/tasks/{task_id}/heartbeat` | `POST` | 定期上报保活心跳与显存/资源利用率 |
 | **GPU Agent** | `/api/tasks/{task_id}/status` | `GET` | 查询指定任务详情与历史事件记录 |
-| **控制台/管理** | `/api/tasks` | `GET` | 列出所有受控训练任务及其当前状态总览 |
+| **GPU Agent** | `/api/tasks/{task_id}/events?limit=100&offset=0` | `GET` | 分页查询任务事件历史（审计用） |
+| **控制台/管理** | `/api/tasks?limit=100&offset=0&state=RUNNING&stale_only=false` | `GET` | 分页列出任务，支持按状态/失联过滤 |
 | **控制台/管理** | `/api/tasks/{task_id}/decision` | `POST` | 直接注入人工决策（可用于测试或 Web UI 控制台） |
 | **飞书客户端** | `/webhook/feishu` | `POST` | 飞书应用事件握手（`url_verification`）与交互卡片点击回调（`card.action.trigger`） |
+
+> **部署约束（v0.1.1+）**：
+> - 信箱为进程内存 + 环形裁剪（默认每任务保留 500 事件），重启丢失；勿用 `--workers>1`，生产建议外置 Redis/SQLite。
+> - 公网部署请设置 `TRAINPILOT_API_TOKEN`，Agent 侧配置同值 `TRAINPILOT_API_TOKEN` 或 `Authorization: Bearer`；Webhook 另用飞书 `verification_token` 严格校验（缺失也拒绝）。
+> - `/notify` 的飞书推送已改为后台任务，不阻塞训练循环；失联任务可通过 `/health` 的 `stale_tasks_count` 或 `stale_only=true` 发现。
+> - Docker：`docker build -t trainpilot . && docker run -p 28780:28780 --env-file .env trainpilot`（单副本）。
 
 ---
 

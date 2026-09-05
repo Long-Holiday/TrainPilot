@@ -1,5 +1,6 @@
 """Thread-safe in-memory task mailbox and state machine management."""
 
+import json
 import logging
 import threading
 import uuid
@@ -18,6 +19,29 @@ from trainpilot.common.states import EventType, TaskState
 
 logger = logging.getLogger("trainpilot.mailbox")
 
+TERMINAL_STATES = frozenset({TaskState.COMPLETED, TaskState.FAILED})
+STALE_CANDIDATE_STATES = frozenset({TaskState.RUNNING, TaskState.WAITING, TaskState.RECOVERING})
+
+
+def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def _alert_fingerprint(req: EventNotifyRequest) -> str:
+    try:
+        metrics_str = json.dumps(req.metrics, sort_keys=True, default=str)
+    except Exception:
+        metrics_str = str(req.metrics)
+    return f"{req.message}|{req.step}|{req.epoch}|{metrics_str}"
+
 
 @dataclass
 class TaskRecord:
@@ -35,14 +59,21 @@ class TaskRecord:
     events: List[Dict[str, Any]] = field(default_factory=list)
     pending_instruction: Optional[InstructionResponse] = None
     latest_instruction: Optional[Dict[str, Any]] = None
+    last_alert_fingerprint: Optional[str] = None
 
 
 class TaskMailboxManager:
-    """Manages multi-task state machines, events, and instruction mailboxes safely."""
+    """Manages multi-task state machines, events, and instruction mailboxes safely.
 
-    def __init__(self):
+    NOTE: in-memory only. Restart loses state and multi-worker deployments
+    diverge. For production use an external store; this class caps memory via
+    per-task ring buffer (`max_events_per_task`).
+    """
+
+    def __init__(self, max_events_per_task: int = 500):
         self._lock = threading.Lock()
         self._tasks: Dict[str, TaskRecord] = {}
+        self._max_events = max(1, int(max_events_per_task))
 
     def _get_or_create(self, task_id: str) -> TaskRecord:
         """Internal helper without lock acquisition."""
@@ -74,13 +105,23 @@ class TaskMailboxManager:
                 "extra": req.extra,
             }
             task.events.append(event_entry)
+            # Ring-buffer cap: drop oldest to bound memory on long trainings.
+            if len(task.events) > self._max_events:
+                task.events = task.events[-self._max_events:]
 
             # State transitions
             if req.event_type == EventType.ALERT:
+                fp = _alert_fingerprint(req)
+                is_retry = fp == task.last_alert_fingerprint
+                task.last_alert_fingerprint = fp
                 task.state = TaskState.WAITING
-                # Drop previous un-consumed instruction if any, waiting for fresh human input
-                task.pending_instruction = None
-                logger.warning("Task %s transitioned to WAITING due to alert: %s", req.task_id, req.message)
+                if is_retry:
+                    # Network retry of identical alert: preserve pending human decision.
+                    logger.info("Task %s duplicate alert ignored (idempotent): %s", req.task_id, req.message)
+                else:
+                    # Fresh anomaly supersedes stale decision awaiting consumption.
+                    task.pending_instruction = None
+                    logger.warning("Task %s transitioned to WAITING due to alert: %s", req.task_id, req.message)
             elif req.event_type == EventType.MILESTONE:
                 if task.state != TaskState.WAITING:
                     task.state = TaskState.RUNNING
@@ -120,6 +161,8 @@ class TaskMailboxManager:
         """Record human decision into the task mailbox and move state to RESOLVED."""
         with self._lock:
             task = self._get_or_create(task_id)
+            if task.state in TERMINAL_STATES:
+                raise ValueError(f"Task '{task_id}' already in terminal state {task.state.value}, refusing new decision")
             inst_id = f"inst_{uuid.uuid4().hex[:12]}"
             now_iso = utc_now_iso()
 
@@ -186,6 +229,13 @@ class TaskMailboxManager:
         """Confirm execution of a recovery instruction and transition state back to RUNNING."""
         with self._lock:
             task = self._get_or_create(task_id)
+            # Validate against last consumed instruction to catch stale/duplicate ACKs.
+            if task.latest_instruction and instruction_id:
+                expected = task.latest_instruction.get("instruction_id")
+                if expected and instruction_id != expected:
+                    raise ValueError(
+                        f"Stale instruction ack: got {instruction_id}, expected {expected} for task '{task_id}'"
+                    )
             task.updated_at = utc_now_iso()
 
             ack_record = {
@@ -216,10 +266,65 @@ class TaskMailboxManager:
                 return None
             return self._build_summary(task)
 
-    def list_tasks(self) -> List[TaskSummary]:
-        """List summaries of all tracked tasks."""
+    def get_events(self, task_id: str, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+        """Paginated chronological event history."""
         with self._lock:
-            return [self._build_summary(t) for t in self._tasks.values()]
+            task = self._tasks.get(task_id)
+            if not task:
+                return []
+            return list(task.events[offset:offset + limit])
+
+    def get_events_count(self, task_id: str) -> Optional[int]:
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                return None
+            return len(task.events)
+
+    def list_tasks(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        state: Optional[TaskState] = None,
+        stale_only: bool = False,
+        heartbeat_timeout_seconds: Optional[int] = None,
+    ) -> List[TaskSummary]:
+        """List summaries with pagination and optional state/stale filters."""
+        with self._lock:
+            tasks = list(self._tasks.values())
+            if state is not None:
+                tasks = [t for t in tasks if t.state == state]
+            if stale_only:
+                tasks = [t for t in tasks if self._is_stale_locked(t, heartbeat_timeout_seconds)]
+            tasks = tasks[offset:offset + limit]
+            return [self._build_summary(t) for t in tasks]
+
+    def get_stale_tasks(self, timeout_seconds: int = 300) -> List[TaskSummary]:
+        """Tasks without heartbeat beyond timeout (candidates for intervention)."""
+        with self._lock:
+            return [
+                self._build_summary(t)
+                for t in self._tasks.values()
+                if self._is_stale_locked(t, timeout_seconds)
+            ]
+
+    def _is_stale_locked(self, task: TaskRecord, timeout_seconds: Optional[int]) -> bool:
+        if timeout_seconds is None:
+            try:
+                from trainpilot.server.config import settings as _s
+                timeout_seconds = _s.task_heartbeat_timeout_seconds
+            except Exception:
+                timeout_seconds = 300
+        if task.state not in STALE_CANDIDATE_STATES:
+            return False
+        last = _parse_iso(task.last_heartbeat_at)
+        if last is None:
+            # Never heartbeated: use updated_at; brand-new tasks (<timeout) are not stale.
+            last = _parse_iso(task.updated_at)
+        if last is None:
+            return False
+        now = datetime.now(timezone.utc)
+        return (now - last).total_seconds() > timeout_seconds
 
     def reset(self) -> None:
         """Reset all tasks (mainly for testing)."""

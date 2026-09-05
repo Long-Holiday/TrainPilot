@@ -16,3 +16,8 @@ wheels/
 
 # Local environment secrets
 .env
+.trainpilot.pid
+
+# Legacy project-level generated Agent Skills (now installed globally via ./setup_skills.sh)
+.opencode/skills/
+.antigravity/

@@ -5,6 +5,7 @@ import os
 import sys
 import threading
 import time
+from typing import Optional
 import requests
 
 # Ensure src is on python path
@@ -13,7 +14,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 from trainpilot.agent import TrainPilotClient, TrainingGuardian
 
 
-def run_mock_training(gateway_url: str = "http://localhost:8000", task_id: str = "demo-llm-pretrain"):
+def run_mock_training(gateway_url: Optional[str] = None, task_id: str = "demo-llm-pretrain"):
+    if gateway_url is None:
+        gateway_url = os.environ.get("TRAINPILOT_GATEWAY_URL", "http://localhost:28780")
     print(f"\n==========================================")
     print(f"🚀 Starting Simulated Training for Task: {task_id}")
     print(f"🔗 Gateway: {gateway_url}")
@@ -114,6 +117,6 @@ def run_mock_training(gateway_url: str = "http://localhost:8000", task_id: str =
 
 
 if __name__ == "__main__":
-    url = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8000"
+    url = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("TRAINPILOT_GATEWAY_URL", "http://localhost:28780")
     task = sys.argv[2] if len(sys.argv) > 2 else "demo-llm-pretrain"
     run_mock_training(url, task)

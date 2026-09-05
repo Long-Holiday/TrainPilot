@@ -5,7 +5,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from trainpilot import __version__
 from trainpilot.server.config import settings
+from trainpilot.server.mailbox import default_mailbox
 from trainpilot.server.routes.tasks import router as tasks_router
 from trainpilot.server.routes.webhook import router as webhook_router
 
@@ -28,15 +30,17 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="TrainPilot Control Plane",
     description="Centralized HITL Control Gateway for GPU Distributed Training with Feishu Card Integration",
-    version="0.1.0",
+    version=__version__,
     lifespan=lifespan,
 )
 
 # Cross-Origin Resource Sharing
+# NOTE: single-worker in-memory mailbox; do not run with --workers>1 (see README).
+# '*' cannot be combined with credentials per Fetch spec, enforced in config.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=settings.parsed_cors_origins,
+    allow_credentials=settings.effective_cors_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -48,12 +52,34 @@ app.include_router(webhook_router)
 
 @app.get("/health", tags=["System"])
 def health_check():
-    """Liveness probe."""
+    """Liveness probe (never fails on downstream Feishu errors)."""
+    try:
+        stale = default_mailbox.get_stale_tasks(timeout_seconds=settings.task_heartbeat_timeout_seconds)
+        stale_count = len(stale)
+        tasks_count = len(default_mailbox.list_tasks(limit=100000, offset=0))
+    except Exception:
+        stale_count = 0
+        tasks_count = -1
     return {
         "status": "healthy",
         "service": "trainpilot-control-plane",
+        "version": __version__,
         "feishu_ready": settings.is_feishu_configured,
+        "auth_enforced": settings.is_api_token_configured,
+        "tasks_count": tasks_count,
+        "stale_tasks_count": stale_count,
     }
+
+
+@app.get("/ready", tags=["System"])
+def readiness_check():
+    """Readiness probe: mailbox accessible."""
+    try:
+        default_mailbox.list_tasks(limit=1, offset=0)
+        return {"ready": True, "service": "trainpilot-control-plane", "version": __version__}
+    except Exception as exc:
+        logger.error("Readiness check failed: %s", exc)
+        return {"ready": False, "error": str(exc)}
 
 
 @app.get("/", tags=["System"])

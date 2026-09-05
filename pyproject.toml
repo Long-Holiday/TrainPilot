@@ -1,9 +1,9 @@
 [project]
 name = "trainpilot"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.1.1"
+description = "Centralized HITL Control Gateway for GPU Distributed Training with Feishu Card Integration"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.115.0",
     "httpx>=0.27.0",

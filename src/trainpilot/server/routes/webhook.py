@@ -35,10 +35,10 @@ async def feishu_webhook(request: Request) -> Any:
         logger.info("Responded to Feishu url_verification challenge")
         return {"challenge": challenge}
 
-    # 2. Token validation if configured
+    # 2. Token validation if configured (strict: missing token also rejected)
     token = data.get("token") or (data.get("header", {}).get("token") if isinstance(data.get("header"), dict) else None)
-    if settings.feishu_verification_token and token and token != settings.feishu_verification_token:
-        logger.warning("Received invalid token on Feishu webhook: %s", token)
+    if settings.feishu_verification_token and token != settings.feishu_verification_token:
+        logger.warning("Received invalid or missing token on Feishu webhook")
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unauthorized token")
 
     # 3. Handle interactive card action trigger (card.action.trigger)
@@ -72,12 +72,17 @@ async def feishu_webhook(request: Request) -> Any:
                 task_id, action, operator_name)
 
     # 4. Save decision into Task Mailbox
-    instruction = default_mailbox.submit_decision(
-        task_id=task_id,
-        action=action,
-        payload=payload,
-        operator=operator_name,
-    )
+    try:
+        instruction = default_mailbox.submit_decision(
+            task_id=task_id,
+            action=action,
+            payload=payload,
+            operator=operator_name,
+        )
+    except ValueError as exc:
+        # Terminal-state task: acknowledge to Feishu but do not resurrect.
+        logger.warning("Webhook decision rejected for task %s: %s", task_id, exc)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
 
     # 5. Build resolved card for in-place card replacement (anti-duplicate click)
     resolved_card = build_resolved_card(
