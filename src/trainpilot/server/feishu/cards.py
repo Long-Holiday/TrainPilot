@@ -211,7 +211,10 @@ def build_resolved_card(
             "",
             f"**📋 原告警说明**: *{original_message}*",
         ])
-    markdown_lines.append("\n> ✅ 指令已派发至任务信箱，GPU 边缘节点将自动拉取执行。按钮已停用，防呆机制生效。")
+    if action_name == "self_resolve":
+        markdown_lines.append("\n> ✅ 指令已派发至任务信箱，GPU 边缘节点将自动拉取执行并回传解决方法卡片。按钮已停用，防呆机制生效。")
+    else:
+        markdown_lines.append("\n> ✅ 指令已派发至任务信箱，GPU 边缘节点将自动拉取执行。按钮已停用，防呆机制生效。")
 
     elements: List[Dict[str, Any]] = [
         {
@@ -243,3 +246,63 @@ def build_resolved_card(
         },
         "elements": elements,
     }
+
+
+def build_recovery_card(
+    task_id: str,
+    solution: str,
+    step: Optional[int] = None,
+    epoch: Optional[int] = None,
+    metrics: Optional[Dict[str, Any]] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Construct an informative recovery card sent by Agent when self_resolve is executed.
+
+    告知问题解决方法与恢复状态，简单清晰，由 Agent 概括一句解决方法发送回来，
+    让用户知道问题已经解决、训练任务恢复正常。
+    """
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    markdown_lines = [
+        f"**🎯 任务标识**: `{task_id}`",
+        f"**⏱ 恢复进度**: Epoch `{epoch if epoch is not None else '-'}` | Step `{step if step is not None else '-'}`",
+    ]
+    if metrics:
+        markdown_lines.append(f"**📊 恢复指标**: {_format_metrics(metrics)}")
+    markdown_lines.extend([
+        f"**💡 解决方法**: \n> {solution}",
+        "",
+        "**🟢 运行状态**: ✅ 问题已解决，训练任务已恢复正常运行",
+    ])
+
+    elements: List[Dict[str, Any]] = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": "\n".join(markdown_lines),
+            },
+        },
+        {
+            "tag": "note",
+            "elements": [
+                {
+                    "tag": "plain_text",
+                    "content": f"TrainPilot Agent 智能自愈 • 解决时间: {now_str}",
+                }
+            ],
+        },
+    ]
+
+    return {
+        "config": {"wide_screen_mode": True, "enable_forward": True},
+        "header": {
+            "template": "green",
+            "title": {
+                "tag": "plain_text",
+                "content": f"🛠️【异常已自行解决】任务: {task_id}",
+            },
+        },
+        "elements": elements,
+    }
+

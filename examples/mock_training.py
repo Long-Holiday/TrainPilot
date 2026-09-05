@@ -35,7 +35,7 @@ def run_mock_training(gateway_url: Optional[str] = None, task_id: str = "demo-ll
         "loss": 2.5,
     }
 
-    # 自行解决：无需自定义恢复逻辑，默认 handler 直接继续训练。
+    # 自行解决：无需复杂恢复逻辑，默认 handler 直接继续训练，Agent 将自动发送卡片概括解决方法并告知任务恢复正常。
 
     # Simulate steps
     total_steps = 10

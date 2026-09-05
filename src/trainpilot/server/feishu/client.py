@@ -9,6 +9,7 @@ from trainpilot.server.config import ServerSettings, settings
 from trainpilot.server.feishu.cards import (
     build_alert_card,
     build_milestone_card,
+    build_recovery_card,
     build_resolved_card,
 )
 
@@ -98,6 +99,30 @@ class FeishuCardClient:
             task_id=task_id,
             card_dict=card_content,
             card_type="milestone",
+        )
+
+    def send_recovery(
+        self,
+        task_id: str,
+        solution: str,
+        step: Optional[int] = None,
+        epoch: Optional[int] = None,
+        metrics: Optional[Dict[str, Any]] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Send a recovery notification card to the configured receiver."""
+        card_content = build_recovery_card(
+            task_id=task_id,
+            solution=solution,
+            step=step,
+            epoch=epoch,
+            metrics=metrics,
+            extra=extra,
+        )
+        return self._send_card(
+            task_id=task_id,
+            card_dict=card_content,
+            card_type="recovery",
         )
 
     def update_card_to_resolved(

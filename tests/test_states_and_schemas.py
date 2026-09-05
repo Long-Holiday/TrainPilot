@@ -22,6 +22,7 @@ def test_task_states_and_events():
 
     assert EventType.ALERT == "alert"
     assert EventType.MILESTONE == "milestone"
+    assert EventType.RECOVERY == "recovery"
     assert ActionType.STOP_TRAINING == "stop_training"
     assert ActionType.SELF_RESOLVE == "self_resolve"
 

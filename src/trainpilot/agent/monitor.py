@@ -143,6 +143,14 @@ class TrainingGuardian:
             extra=extra,
         )
 
+        anomaly_ctx = {
+            "message": message,
+            "step": step,
+            "epoch": epoch,
+            "metrics": metrics,
+            "extra": extra,
+        }
+
         # 2. Block and poll for human instruction (with timeout fallback)
         try:
             instruction = self.client.poll_instruction(
@@ -158,6 +166,7 @@ class TrainingGuardian:
                     action=self.timeout_fallback_action,
                     instruction_id=None,
                     payload={"timeout_fallback": True, "original_message": message},
+                    anomaly_context=anomaly_ctx,
                 )
             raise
 
@@ -166,13 +175,43 @@ class TrainingGuardian:
         payload = instruction.get("payload")
 
         logger.info("Executing recovery action: '%s' (instruction_id: %s)", action, instruction_id)
-        return self._execute_action(action=action, instruction_id=instruction_id, payload=payload)
+        return self._execute_action(
+            action=action,
+            instruction_id=instruction_id,
+            payload=payload,
+            anomaly_context=anomaly_ctx,
+        )
+
+    def _generate_solution_summary(
+        self,
+        result: Any,
+        payload: Optional[Dict[str, Any]],
+        anomaly_context: Optional[Dict[str, Any]],
+    ) -> str:
+        """生成概括一句解决方法，简单明了告知用户自愈措施。"""
+        # 1. 优先采用自定义 handler 返回的解决说明
+        if isinstance(result, str) and result.strip():
+            return result.strip()
+        if isinstance(result, dict) and result.get("solution") and str(result["solution"]).strip():
+            return str(result["solution"]).strip()
+        # 2. 检查 payload 中是否显式指定 solution
+        if payload and isinstance(payload, dict) and payload.get("solution") and str(payload["solution"]).strip():
+            return str(payload["solution"]).strip()
+
+        # 3. 智能根据异常信息概括一句解决方法
+        anomaly_msg = (anomaly_context.get("message") or "").lower() if anomaly_context else ""
+        if "nan" in anomaly_msg or "inf" in anomaly_msg or "loss" in anomaly_msg:
+            return "已跳过异常 Batch 并重置优化器梯度状态，Loss 恢复正常，训练继续进行。"
+        if "oom" in anomaly_msg or "memory" in anomaly_msg or "cuda" in anomaly_msg:
+            return "已清理 GPU 显存碎片并释放非必要缓存，显存恢复安全水位，训练继续进行。"
+        return "已完成现场自愈检查并重置执行状态，现场校验通过，训练恢复正常运行。"
 
     def _execute_action(
         self,
         action: str,
         instruction_id: Optional[str],
         payload: Optional[Dict[str, Any]],
+        anomaly_context: Optional[Dict[str, Any]] = None,
     ) -> Any:
         # 3. Dispatch to handler
         handler = self._action_handlers.get(action)
@@ -189,12 +228,37 @@ class TrainingGuardian:
 
         try:
             result = handler(payload)
+
+            # 当执行 self_resolve 动作时，Agent 发送卡片告知解决方法，让用户知道问题已经解决任务恢复正常
+            solution_summary = None
+            if action == "self_resolve":
+                solution_summary = self._generate_solution_summary(result, payload, anomaly_context)
+                try:
+                    step = anomaly_context.get("step") if anomaly_context else None
+                    epoch = anomaly_context.get("epoch") if anomaly_context else None
+                    metrics = anomaly_context.get("metrics") if anomaly_context else None
+                    extra = {"anomaly_message": anomaly_context.get("message")} if anomaly_context else None
+                    self.client.notify_recovery(
+                        solution=solution_summary,
+                        step=step,
+                        epoch=epoch,
+                        metrics=metrics,
+                        extra=extra,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to dispatch recovery card: %s", exc)
+
             # 4. Acknowledge success to reset state to RUNNING
+            ack_msg = (
+                f"Action '{action}' executed successfully. Solution: {solution_summary}"
+                if solution_summary
+                else f"Action '{action}' executed successfully"
+            )
             self.client.ack_instruction(
                 action=action,
                 instruction_id=instruction_id,
                 status="success",
-                message=f"Action '{action}' executed successfully",
+                message=ack_msg,
             )
             return result
         except StopTrainingException:

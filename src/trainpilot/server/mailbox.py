@@ -129,6 +129,10 @@ class TaskMailboxManager:
                 if task.state != TaskState.WAITING:
                     task.state = TaskState.RUNNING
                 logger.info("Task %s recorded milestone at step %s", req.task_id, req.step)
+            elif req.event_type == EventType.RECOVERY:
+                if task.state not in TERMINAL_STATES:
+                    task.state = TaskState.RUNNING
+                logger.info("Task %s self-recovered: %s", req.task_id, req.message)
             elif req.event_type == EventType.COMPLETED:
                 task.state = TaskState.COMPLETED
                 task.pending_instruction = None

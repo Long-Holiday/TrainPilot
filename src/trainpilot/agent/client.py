@@ -216,6 +216,24 @@ class TrainPilotClient:
             agent_note=agent_note,
         )
 
+    def notify_recovery(
+        self,
+        solution: str,
+        step: Optional[int] = None,
+        epoch: Optional[int] = None,
+        metrics: Optional[Dict[str, Any]] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Report anomaly recovery with a concise solution summary to notify users via Feishu card."""
+        return self.notify_event(
+            event_type="recovery",
+            message=solution,
+            step=step,
+            epoch=epoch,
+            metrics=metrics,
+            extra=extra,
+        )
+
     def poll_instruction(
         self,
         timeout: Optional[float] = 300.0,

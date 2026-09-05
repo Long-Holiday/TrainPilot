@@ -3,6 +3,7 @@
 from trainpilot.server.feishu.cards import (
     build_alert_card,
     build_milestone_card,
+    build_recovery_card,
     build_resolved_card,
 )
 
@@ -140,3 +141,28 @@ def test_build_resolved_card_auto_timeout():
     )
     assert "自行解决" in contents
     assert "30" in contents
+
+
+def test_build_recovery_card():
+    card = build_recovery_card(
+        task_id="llm-task-9",
+        solution="已跳过异常 Batch 并重置优化器梯度状态，Loss 恢复正常，训练继续进行。",
+        step=150,
+        epoch=2,
+        metrics={"loss": 1.45, "lr": 1e-4},
+    )
+    assert card["header"]["template"] == "green"
+    assert "【异常已自行解决】" in card["header"]["title"]["content"]
+    assert "llm-task-9" in card["header"]["title"]["content"]
+
+    contents = " ".join(
+        elem.get("text", {}).get("content", "")
+        for elem in card["elements"]
+        if elem.get("tag") == "div"
+    )
+    assert "💡 解决方法" in contents
+    assert "已跳过异常 Batch" in contents
+    assert "问题已解决，训练任务已恢复正常运行" in contents
+    assert "150" in contents
+    assert "Epoch `2`" in contents
+

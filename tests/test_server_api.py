@@ -133,3 +133,34 @@ def test_feishu_webhook_flow(client: TestClient):
     assert inst["ready"] is True
     assert inst["action"] == "stop_training"
     assert inst["decision_by"] == "ou_feishu_engineer"
+
+
+def test_notify_recovery_event(client: TestClient):
+    from trainpilot.server.feishu.client import default_feishu_client
+
+    task_id = "recovery-test-task"
+    # First notify alert
+    client.post("/api/tasks/notify", json={
+        "task_id": task_id,
+        "event_type": "alert",
+        "message": "Loss exploded",
+    })
+
+    # Agent reports recovery with solution summary
+    resp = client.post("/api/tasks/notify", json={
+        "task_id": task_id,
+        "event_type": "recovery",
+        "message": "已跳过异常批次并重置优化器梯度状态，Loss 恢复正常，训练继续进行。",
+        "step": 60,
+        "epoch": 1,
+    })
+    assert resp.status_code == 200
+    assert resp.json()["state"] == "RUNNING"
+
+    # Verify Feishu client received recovery card
+    history = default_feishu_client.sent_cards_history
+    rec_cards = [c for c in history if c.get("type") == "recovery" and c.get("task_id") == task_id]
+    assert len(rec_cards) == 1
+    card_dict = rec_cards[0]["card"]
+    assert "【异常已自行解决】" in card_dict["header"]["title"]["content"]
+
