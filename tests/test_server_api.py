@@ -127,6 +127,10 @@ def test_feishu_webhook_flow(client: TestClient):
     wh_data = wh_resp.json()
     assert "toast" in wh_data
     assert "card" in wh_data
+    assert wh_data["card"]["type"] == "raw"
+    assert "data" in wh_data["card"]
+    assert "elements" in wh_data["card"]["data"]
+    assert wh_data["card"]["data"]["header"]["template"] == "turquoise"
 
     # Check that mailbox received the decision
     inst = client.get(f"/api/tasks/{task_id}/instruction").json()

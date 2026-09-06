@@ -103,8 +103,19 @@ async def feishu_webhook(request: Request, background_tasks: BackgroundTasks) ->
     }
     default_feishu_client._sent_cards_history.append({"type": "resolved_update", "data": record})
 
+    # Asynchronously patch Feishu message as double insurance (in case of client sync issues)
+    background_tasks.add_task(
+        default_feishu_client.update_card_to_resolved,
+        task_id=task_id,
+        action=action,
+        operator=operator_name,
+        resolved_at=instruction.decided_at,
+    )
+
     # Feishu Interactive Card response format to update card on the fly:
-    # Returning `card` updates the message in place.
+    # According to Feishu card.action.trigger callback protocol:
+    # `card` must be an object with `type: "raw"` and `data: <card_json>`
+    # Returning plain card dict without `type` causes Feishu error 200672 (invalid response body format).
     _toast_labels = {
         "stop_training": "停止训练",
         "self_resolve": "自行解决",
@@ -115,5 +126,8 @@ async def feishu_webhook(request: Request, background_tasks: BackgroundTasks) ->
             "type": "success",
             "content": f"策略 [{toast_label}] 已下发，训练将自动恢复",
         },
-        "card": resolved_card,
+        "card": {
+            "type": "raw",
+            "data": resolved_card,
+        },
     }
