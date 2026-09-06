@@ -27,9 +27,13 @@ wheels/
 .opencode/
 
 
-# SQLite database files
+# SQLite database and runtime files
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
+trainpilot.db
+trainpilot.db-shm
+trainpilot.db-wal
+trainpilot.log
 

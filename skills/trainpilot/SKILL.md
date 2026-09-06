@@ -159,29 +159,21 @@ for step, (inputs, targets) in enumerate(dataloader):
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
-```
 
-Or plug in `TrainPilotPyTorchHook`:
-```python
-from trainpilot.agent.hooks.pytorch import TrainPilotPyTorchHook
-
-hook = TrainPilotPyTorchHook(
-    task_id="qwen2-7b-sft-0905",
-    gateway_url="http://control-plane.example.com:28780",
-    milestone_step_interval=100,
-    auto_agent_note=True,  # 未显式提供 agent_note 时基于指标自动生成兜底点评
+# 4. Periodically report milestones with autonomous AI Agent note:
+client.notify_milestone(
+    message="Epoch 1 completed, val_loss reached 0.450",
+    step=1000,
+    epoch=1,
+    metrics={"loss": 0.421, "val_loss": 0.450},
+    agent_note="val_loss 0.450 为当前新低，收敛平稳未见明显过拟合；建议保持学习率继续推进下个 epoch。",
 )
-hook.register_recovery_callback("self_resolve", my_continue_fn)
-
-# In loop:
-hook.on_step_end(step=step, loss=loss_val, lr=current_lr, agent_note="收敛平稳，建议继续")
 ```
 
-> [!NOTE]
-> **Python SDK 上报 Agent 点评**：`client.notify_milestone(..., agent_note="...")` /
-> `client.notify_alert(..., agent_note="...")` 同样支持该字段。外部 AI 智能体若通过
-> SDK 上报，应自行撰写并传入 `agent_note`；传入 `hook.on_step_end(...)` / `on_epoch_end(...)`
-> 亦同。
+> [!IMPORTANT]
+> **TrainingGuardian 与 AI Agent 自主点评标准模式**：
+> 1. **统一异常守卫**：在训练主循环中使用 `TrainingGuardian` 守卫异常（`NaN` / `Inf` / 数值突增），自动完成“现场冻结 ➔ 飞书告警 ➔ 决策轮询 ➔ 执行回调 ➔ ACK 确认”完整闭环。
+> 2. **AI Agent 自主撰写 `agent_note`**：在阶段里程碑（如 Epoch 完成或周期评测）时，由外部 AI 智能体（如 agy / opencode / claude-code）结合实时训练日志与指标走势，**自主撰写 1-3 句专业阶段点评**并随 `client.notify_milestone(..., agent_note="...")` 上报。飞书卡片会在 `🤖 Agent 智能点评` 区块中独立展示，为人类工程师提供清晰的收敛判断与决策建议。
 
 ---
 

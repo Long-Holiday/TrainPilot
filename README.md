@@ -1,351 +1,143 @@
 # TrainPilot: 深度学习训练集群的公网网关与 HITL 闭环决策系统
 
-TrainPilot 专为大规模深度学习分布式训练（PyTorch / DeepSpeed / Slurm / K8s）设计，采用 **“集中式公网网关（Control Plane） + 边缘轻量 Agent（Worker Pull 模式）”** 的解耦架构。
+> 专为大规模深度学习分布式训练（PyTorch / DeepSpeed / Slurm / K8s）设计，采用 **“集中式公网网关（Control Plane） + 边缘轻量 Agent（Worker Pull 模式）”** 解耦架构。
 
-它彻底解决了内网 GPU 算力集群物理隔离、缺乏公网 IP 与无外网凭据约束的痛点，同时将训练异常捕获、现场冻结与飞书交互式卡片原生打通，实现**人类在回路（Human-In-The-Loop, HITL）**的一键闭环决策与热修复恢复。
-
----
-
-## 🌟 核心设计与实际落地优化
-
-相较于初步草案，本项目在实际生产落地中进行了如下关键工程修正与深度优化：
-
-1. **浮点异常安全序列化（Sanitization）**：
-   - 在真实 PyTorch 训练中，Loss 爆炸常表现为 `float('nan')` 或 `float('inf')`。由于标准 JSON（RFC 7159/8259）不支持原生 NaN，直接序列化会导致 Python `requests` 崩溃。
-   - TrainPilot 客户端与 CLI 内置递归清洗机制，自动将数值安全转换为 `"NaN"` / `"Infinity"`，确保异常告警百分之百可靠送达公网。
-2. **状态机闭环与双向 ACK 确认机制**：
-   - 确立了严格的状态流转：`RUNNING -> WAITING -> RESOLVED -> RECOVERING -> RUNNING`。
-   - 指令拉取支持原子消费（Pop）与完成回执（ACK），避免指令重放、漏跑或网络重试导致的重复回滚。
-3. **飞书交互卡片“就地防呆”更新**：
-   - 飞书 Webhook 接收到操作点击后，立即更新原卡片为绿色【已处理】状态并移除操作按钮，杜绝多人协作场景下的误触与重复执行。
-   - Webhook 3 秒内即刻响应，彻底解耦耗时数分钟的模型 Checkpoint 回滚与显存清理。
-4. **轻量与优雅降级（Mock 模式）**：
-   - 网关控制面支持未配置飞书凭证时的本地 Mock 运行模式，支持通过 API / Webhook 直接注入决策，保障无外网环境和自动化测试顺畅执行。
-   - GPU 节点 Agent 保持**零外网凭据、零飞书依赖、仅用原生 `requests`**。
-5. **项目级别 AI Agent Skills（适配 `agy`、`opencode`）**：
-   - 提炼出符合 Agent 技能规范的项目级 Skill（`skills/trainpilot`），供智能体自主上报指标、捕获异常、轮询信箱和执行自动化运维。
-6. **HTTP 长轮询（Long Polling）毫秒级唤醒**：
-   - 客户端拉取指令时支持服务端长轮询挂起（默认 20s），一旦人类工程师在飞书端或 API 提交决策，服务端即刻唤醒挂起连接并毫秒级下发，网络空轮询请求骤降 90% 以上。
-7. **SQLite 本地持久化与超长事件自动淘汰（Pruning）**：
-   - 引入零配置 SQLite WAL 模式本地持久化，控制面服务重启无缝恢复任务状态与信箱上下文；同时内置单任务事件上限与全局修剪机制，杜绝内存和磁盘无界膨胀。
-8. **服务端主动失联看门狗（Watchdog）**：
-   - 内置后台守护巡检线程，每隔指定周期（默认 15s）巡检长时间无心跳的僵死/失联训练任务，自动向飞书群推送失联预警卡片，并定期执行数据库健康维护。
+TrainPilot 彻底解决了内网 GPU 集群无公网 IP 与无外网凭据的痛点，将训练异常捕获、现场冻结与飞书交互卡片原生打通，实现**人类在回路（Human-In-The-Loop, HITL）**的一键闭环决策与热修复恢复。
 
 ---
 
-## 🏛 系统架构总览
+## ✨ 核心特性
+
+- 🛡️ **异常安全上报**：内置浮点递归清洗机制，自动转换 `NaN` / `Inf`，杜绝 JSON 序列化崩溃，确保告警 100% 可靠送达。
+- 🔄 **双向 ACK 状态机**：严格的 `RUNNING -> WAITING -> RESOLVED -> RECOVERING -> RUNNING` 状态流转与原子消费，杜绝重复执行与重放。
+- ⚡ **长轮询毫秒唤醒**：客户端指令拉取支持服务端挂起（默认 20s），一旦人类决策提交毫秒级唤醒下发，空轮询减少 90% 以上。
+- 📱 **飞书卡片就地防呆**：Webhook 3 秒内即刻响应，点击后立即就地更新卡片为【已处理】状态并收起按钮，防止多人误触。
+- 💾 **轻量持久化与自修剪**：内置 SQLite WAL 模式，控制面重启无缝恢复；自动淘汰历史事件，防内存与磁盘无界膨胀。
+- 🐕 **失联看门狗 (Watchdog)**：后台守护巡检线程定时检测长时间无心跳的僵死/失联任务，主动向飞书群推送失联预警。
+- 🤖 **Agent 原生友好**：内置标准项目级 Skill（[`skills/trainpilot`](skills/trainpilot/SKILL.md)），无缝接入 `agy`、`opencode`、`claude-code` 等。
+- 🪶 **GPU 节点零凭证依赖**：内网 GPU 节点仅依赖原生 `requests`，无需任何飞书凭据与公网 IP。
+
+---
+
+## 🏛 架构总览
 
 ```text
-  [ GPU 训练集群 / 内网节点 ]                   [ 轻量公网云服务器 ]                     [ 飞书移动端 / PC 客户端 ]
-   (无需公网 IP / 零飞书凭证)                    (FastAPI + lark_oapi)                       (人类专家在回路 HITL)
-             │                                            │                                            │
-             │                                            │                                            │
-   ┌─────────┴─────────┐                                  │                                            │
-   │  PyTorch 训练任务  │                                  │                                            │
-   │        │          │                                  │                                            │
-   │ (Hook 捕获异常/指标) │                                  │                                            │
-   │        ▼          │                                  │                                            │
-   │   GPU Agent 进程  │─── 1. POST /api/tasks/notify ───►│                                            │
-   │ (纯原生 requests)  │    (上报异常或阶段里程碑)        │─── 2. lark_oapi 发送富文本卡片 ──────────►│
-    │                   │                                  │       (带 [停止训练] [自行解决] 按钮，30s超时自动自行解决) │ (卡片展示异常与按钮)
-   │                   │                                  │                                            │
-   │                   │                                  │◄── 3. 点击按钮: card.action.trigger ───────│ (工程师点击方案)
-   │                   │                                  │    (写入任务信箱，并就地将卡片置为“已处理”) │
-   │                   │                                  │                                            │
-   │                   │─── 4. GET .../instruction ──────►│                                            │
-   │                   │    (轮询信箱，获取决策)          │                                            │
-   │                   │◄── 5. 返回 {"action": "..."} ────│                                            │
-   │        │          │                                  │                                            │
-   │ (执行恢复策略与ACK)│─── 6. POST .../ack ─────────────►│ (确认恢复，状态重回 RUNNING)                 │
-   └───────────────────┘                                  │                                            │
-```
-
-### 状态机流转
-
-```text
- ┌──────────────┐      里程碑达成 (Epoch完成/指标新高/心跳)
- │   RUNNING    ├────────────────────────────────► [单向推送绿色概览卡片，静默记录]
- └──────┬───────┘
-        │ 检测到偏离 Goal (Loss NaN, Loss Spike, OOM, 进程僵死)
-        ▼
- ┌──────────────┐      POST /api/tasks/notify (alert)
- │   WAITING    ├────────────────────────────────► [推送红色告警卡片，冻结现场并提供交互按钮]
- └──────┬───────┘
-        │ 工程师在飞书客户端点击决策按钮 (Webhook 回调)
-        ▼
- ┌──────────────┐
- │   RESOLVED   ├────────────────────────────────► [就地更新卡片为已处理并收起按钮，决策入信箱]
- └──────┬───────┘
-        │ GPU Agent 轮询读取到 action (pop=true)
-        ▼
- ┌──────────────┐
-  │  RECOVERING  ├───► (自行解决继续训练 / 停止训练优雅退出)
- └──────┬───────┘
-        │ Agent 执行完成，POST /api/tasks/{task_id}/ack
-        ▼
- ┌──────────────┐
- │   RUNNING    ├───► [重回静默巡航继续训练]
- └──────────────┘
+[ GPU 内网训练集群 ]                  [ 公网云服务器 ]                     [ 飞书客户端 ]
+ (无公网 IP / 零飞书凭证)          (FastAPI 控制面网关)                   (人类在回路 HITL)
+        │                                  │                                  │
+  PyTorch 训练 ─── 1. POST /notify ───────►│                                  │
+  (Guardian 监控)   (上报异常或里程碑)       │─── 2. 发送富文本/交互卡片 ───────►│
+        │                                  │        (带停止训练/自行解决按钮)     │ (展示异常与按钮)
+        │                                  │◄── 3. 点击按钮 (Webhook) ─────────│ (人工点击决策)
+        │                                  │    (写入信箱并就地置为“已处理”)
+  GPU Agent ◄─── 4. Long-poll /instruction ┤
+   (执行恢复) ─── 5. POST /ack ────────────►│ (确认恢复，重回 RUNNING)
 ```
 
 ---
 
-## 🛠 使用 uv 进行项目环境依赖管理
+## 🚀 快速上手
 
-本项目采用高性能 Python 包管理器 `uv` 进行环境与依赖管理。
+本项目基于高性能 Python 管理工具 [uv](https://docs.astral.sh/uv/)。
 
-### 1. 安装与同步环境
+### 1. 环境准备
 ```bash
-# 1. 克隆或进入项目目录
-cd TrainPilot
-
-# 2. 一键创建虚拟环境并同步所有核心依赖与开发依赖
-uv sync
-
-# 3. 若需要安装飞书官方 lark-oapi SDK
-uv sync --extra feishu
+git clone https://github.com/Long-Holiday/TrainPilot.git && cd TrainPilot
+uv sync --extra feishu  # 一键安装核心依赖与飞书 SDK
 ```
 
-### 2. 双端分离部署流程与脚本运行 (Web 端 vs GPU 端)
+### 2. 双端分离部署
 
-TrainPilot 采用双端解耦架构，两端均基于 `uv` 作为统一的高性能环境管理器：
+TrainPilot 将公网控制面与内网训练节点物理解耦，两端独立配置、各司其职：
 
-```text
-TrainPilot/
-├── start.sh              # 【Web 端服务器入口】一键启动控制面网关 (uv 环境)
-├── setup_skills.sh       # 【GPU 端服务器入口】一键同步依赖并安装 Agent Skills (uv 环境)
-├── .env.example          # 【总环境变量模板】包含 Web/GPU 双端所有配置项，清晰按模块分离
-├── .env.web.example      # 【Web 端专属模板】轻量控制面配置，仅需在 Web 服务器部署
-├── .env.gpu.example      # 【GPU 端专属模板】训练节点与 Agent 客户端配置，仅需在 GPU 服务器部署
-├── pyproject.toml        # uv / PEP 621 统一依赖声明
-├── src/                  # 核心源码 (server / agent / common)
-└── skills/               # Agent Skills 标准定义与工具
-```
+| 节点角色 | 部署位置 | 配置文件模板 | 启动/安装命令 | 核心环境变量 |
+| :--- | :--- | :--- | :--- | :--- |
+| **Web 控制面** | 公网云服务器 | `.env.web.example` | `./start.sh`<br>(`--daemon` 后台守护) | `TRAINPILOT_BIND_HOST=0.0.0.0`<br>`TRAINPILOT_PORT=28780`<br>飞书凭据（未配置自动降级为 Mock 模式） |
+| **GPU 节点** | 内网训练集群 | `.env.gpu.example` | `./setup_skills.sh` | `TRAINPILOT_HOST=<Web公网IP/域名>`<br>`TRAINPILOT_PORT=28780`<br>`TRAINPILOT_TASK_ID` |
 
-#### 🖥️ A. Web 端服务器 (轻量公网云主机)
-> 职责：运行控制面网关，接收请求、维持状态机、对接飞书卡片 Webhook。
-
-```bash
-# 1. 初始化 Web 端专属配置文件
-cp .env.web.example .env
-# (按需填写飞书凭证、TRAINPILOT_API_TOKEN 等)
-
-# 2. 启动控制面网关 (自动利用 uv 同步环境并启动 uvicorn)
-./start.sh
-
-# 常用运维参数:
-./start.sh --daemon   # 后台守护进程启动
-./start.sh --status   # 查看运行状态与健康检查接口
-./start.sh --stop     # 停止后台服务
-./start.sh -p 28780   # 临时指定监听端口
-```
-
-#### ⚡ B. GPU 端服务器 (训练内网集群)
-> 职责：运行 PyTorch / DeepSpeed 训练任务与 AI Agent，零飞书凭证。
-
-```bash
-# 1. 初始化 GPU 端专属配置文件
-cp .env.gpu.example .env
-# 核心设置: 将 TRAINPILOT_HOST 设置为 Web 服务器的真实公网 IP 或域名 (千万不要写 0.0.0.0)
-# TRAINPILOT_HOST=35.202.16.245
-
-# 2. 运行环境准备并一键全局安装 Agent Skills (基于 uv)
-./setup_skills.sh
-
-# 常用参数:
-./setup_skills.sh --test     # 测试与 Web 控制面网关的网络连通性
-./setup_skills.sh --check    # 检查技能目录及文件完整性
-./setup_skills.sh --clean    # 清理已安装技能
-```
+> ⚠️ **注意**：GPU 节点为客户端，`TRAINPILOT_HOST` 必须配置为 Web 端真实公网 IP 或域名，严禁配置为 `0.0.0.0`。
 
 ---
 
-### 3. 环境变量分离设计 (.env)
+## 💻 使用示例
 
-为了防止在两台机器上互相混淆配置，TrainPilot 在环境变量设计上严格分离：
+### 1. Python 训练脚本接入 (零外部凭据)
 
-| 服务器角色 | 部署脚本 | 推荐模板 | 核心需要填写的环境变量 |
-| :--- | :--- | :--- | :--- |
-| **Web 端服务器**<br>(控制面公网网关) | `./start.sh` | `.env.web.example` | `TRAINPILOT_BIND_HOST=0.0.0.0`<br>`TRAINPILOT_PORT=28780`<br>`TRAINPILOT_FEISHU_APP_ID`<br>`TRAINPILOT_FEISHU_APP_SECRET`<br>`TRAINPILOT_FEISHU_RECEIVER_ID`<br>`TRAINPILOT_API_TOKEN`<br>`TRAINPILOT_ENABLE_SQLITE=true` |
-| **GPU 端服务器**<br>(训练节点 / Agent 客户端) | `./setup_skills.sh` | `.env.gpu.example` | `TRAINPILOT_HOST=<Web公网IP/域名>`<br>`TRAINPILOT_PORT=28780`<br>*(或 `TRAINPILOT_GATEWAY_URL`)*<br>`TRAINPILOT_TASK_ID`<br>`TRAINPILOT_API_TOKEN` |
-
-> ⚠️ **关键注意**：GPU 端是**客户端**，`TRAINPILOT_HOST` 必须配置为 Web 端公网 IP/域名，绝不能填写 `0.0.0.0`；Web 端默认监听 `0.0.0.0`。
-
----
-
-### 4. 运行开发与测试
-```bash
-# 启动控制面公网网关服务
-uv run python examples/run_server.py
-
-# 运行全量自动化测试套件
-uv run pytest -v
-
-# 运行端到端训练与 HITL 恢复闭环模拟
-uv run pytest tests/test_e2e_simulation.py -v -s
-```
-
----
-
-## 🤖 项目级 Agent Skills 规范（支持 agy 与 opencode）
-
-为让运行在 GPU 服务器上的 AI Agent（如 `agy`、`opencode`、`claude-code`）能够自主调用网关的 HTTP 接口，本项目在项目根目录构建了标准规范的 Skills 包：
-
-- **技能规范定义**：[`skills/trainpilot/SKILL.md`](skills/trainpilot/SKILL.md)
-- **独立可执行工具**：[`skills/trainpilot/scripts/trainpilot_tool.py`](skills/trainpilot/scripts/trainpilot_tool.py)
-
-### CLI 常用操作示例
-
-智能体可在 GPU 节点通过标准终端直接执行 (推荐在 GPU 机器上 `export TRAINPILOT_HOST=<Web公网IP>` 后可省略 `--gateway`):
-
-```bash
-# 1. 上报训练阶段里程碑 (静默记录，推送飞书只读绿色卡片)
-#    --agent-note: 由外部 AI 智能体 (agy/opencode/claude-code) 针对实际训练情况自主生成的
-#    1-3 句点评，将呈现在飞书卡片 "🤖 Agent 智能点评" 区块
-python3 skills/trainpilot/scripts/trainpilot_tool.py report-milestone \
-  --gateway "http://127.0.0.1:28780" \
-  --task-id "qwen2-7b-sft-0905" \
-  --step 1000 \
-  --epoch 1 \
-  --message "Epoch 1 finished successfully" \
-  --metrics "loss=0.41,val_loss=0.43" \
-  --agent-note "val_loss 0.43 为本轮新低，train/val 差距约 0.08 未见明显过拟合；loss 曲线平滑，建议保持当前 lr 继续观察并在下一里程碑做 eval 存档。"
-
-# 2. 上报训练异常并挂起现场 (推送飞书红色告警卡片，等待工程师决策)
-python3 skills/trainpilot/scripts/trainpilot_tool.py report-alert \
-  --gateway "http://127.0.0.1:28780" \
-  --task-id "qwen2-7b-sft-0905" \
-  --step 1450 \
-  --message "Loss NaN detected at step 1450" \
-  --metrics "loss=NaN"
-
-# 3. 阻塞轮询信箱，等待人类专家在飞书端下发的决策指令
-python3 skills/trainpilot/scripts/trainpilot_tool.py poll-instruction \
-  --gateway "http://127.0.0.1:28780" \
-  --task-id "qwen2-7b-sft-0905" \
-  --wait \
-  --wait-timeout 600
-
-# 4. 执行本地确认后，向网关确认 ACK，将任务状态重置为 RUNNING
-python3 skills/trainpilot/scripts/trainpilot_tool.py ack-instruction \
-  --gateway "http://127.0.0.1:28780" \
-  --task-id "qwen2-7b-sft-0905" \
-  --instruction-id "inst_b12fa09c" \
-  --action "self_resolve" \
-  --status "success" \
-  --message "Self-resolved and continued training"
-
-# 5. 上报运行时心跳
-python3 skills/trainpilot/scripts/trainpilot_tool.py send-heartbeat \
-  --gateway "http://127.0.0.1:28780" \
-  --task-id "qwen2-7b-sft-0905" \
-  --step 1500 \
-  --metrics "gpu_mem=88%"
-
-# 6. 查询当前任务完整信箱与状态看板
-python3 skills/trainpilot/scripts/trainpilot_tool.py get-status \
-  --gateway "http://127.0.0.1:28780" \
-  --task-id "qwen2-7b-sft-0905"
-```
-
----
-
-## 🐍 Python 原生 SDK（零凭证极简依赖）
-
-在训练脚本中，可以直接导入 `trainpilot.agent` 原生 Python 模块：
+在 PyTorch 训练主循环中注入 `TrainingGuardian`，当检测到 `NaN` / `Inf` / 数值突增时自动冻结现场并等待飞书端处理：
 
 ```python
 from trainpilot.agent import TrainPilotClient, TrainingGuardian
 
-# 初始化轻量客户端（仅依赖标准 requests）
 client = TrainPilotClient(
-    gateway_url="http://your-control-plane:28780",
+    gateway_url="http://<Web公网IP>:28780",
     task_id="llama3-8b-lora",
 )
-
 guardian = TrainingGuardian(client=client)
 
-# 注册针对飞书卡片决策的回调函数（仅 stop_training / self_resolve）
-def on_self_resolve(payload):
-    print("自行解决：继续训练，无须干预...")
+# 注册飞书卡片决策处理回调 (stop_training / self_resolve)
+guardian.register_action_handler("self_resolve", lambda payload: print("自行解决：继续训练..."))
 
-guardian.register_action_handler("self_resolve", on_self_resolve)
-
-# 在训练主循环中调用：
 for step, batch in enumerate(dataloader):
     loss = model(batch)
     
-    # 自动监测 NaN / Inf / 突发数值爆炸
-    # 异常时自动：挂起现场 -> 推送飞书卡片 -> 轮询决策 -> 执行注册回调 -> ACK 恢复！
+    # 自动监测异常：冻结现场 -> 飞书告警 -> 轮询决策 -> 执行回调 -> ACK 恢复
     guardian.check_and_handle_loss(loss.item(), step=step)
     
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
 
-# 上报里程碑并附带 AI Agent 自主点评（可选，会渲染为飞书卡片 🤖 Agent 智能点评）
+# 上报里程碑（支持外部 AI Agent 自主点评）
 client.notify_milestone(
     message="Epoch 1 finished",
     step=1000,
     epoch=1,
     metrics={"loss": 0.41, "val_loss": 0.43},
-    agent_note="收敛平稳，train/val 未见过拟合，建议保持当前超参。",
+    agent_note="收敛平稳，train/val 差距健康，建议保持当前超参继续观察。",
 )
 ```
 
-或者使用通用训练 Hook：
-```python
-from trainpilot.agent.hooks.pytorch import TrainPilotPyTorchHook
+### 2. AI Agent 命令行工具 (CLI)
 
-hook = TrainPilotPyTorchHook(
-    task_id="llama3-8b-lora",
-    gateway_url="http://your-control-plane:28780",
-    milestone_step_interval=500, # 每 500 步自动上报里程碑
-    heartbeat_step_interval=50,  # 每 50 步上报心跳
-)
-hook.register_recovery_callback("self_resolve", my_continue_logic)
-
-# 训练步结束时：
-hook.on_step_end(step=step, loss=loss_val, lr=current_lr)
-```
-
----
-
-## 📡 核心接口契约 (API Contracts)
-
-| 请求方 | 接口路径 | 方法 | 作用说明 |
-|---|---|---|---|
-| **GPU Agent** | `/api/tasks/notify` | `POST` | 上报事件（`alert` 告警、`milestone` 里程碑、`completed` 完成） |
-| **GPU Agent** | `/api/tasks/{task_id}/instruction` | `GET` | 轮询信箱获取人类决策（参数 `pop=true` 消费并进入 `RECOVERING`） |
-| **GPU Agent** | `/api/tasks/{task_id}/ack` | `POST` | 确认指令执行结果，恢复状态至 `RUNNING` |
-| **GPU Agent** | `/api/tasks/{task_id}/heartbeat` | `POST` | 定期上报保活心跳与显存/资源利用率 |
-| **GPU Agent** | `/api/tasks/{task_id}/status` | `GET` | 查询指定任务详情与历史事件记录 |
-| **GPU Agent** | `/api/tasks/{task_id}/events?limit=100&offset=0` | `GET` | 分页查询任务事件历史（审计用） |
-| **控制台/管理** | `/api/tasks?limit=100&offset=0&state=RUNNING&stale_only=false` | `GET` | 分页列出任务，支持按状态/失联过滤 |
-| **控制台/管理** | `/api/tasks/{task_id}/decision` | `POST` | 直接注入人工决策（可用于测试或 Web UI 控制台） |
-| **飞书客户端** | `/webhook/feishu` | `POST` | 飞书应用事件握手（`url_verification`）与交互卡片点击回调（`card.action.trigger`） |
-
-> **部署约束（v0.1.1+）**：
-> - 信箱为进程内存 + 环形裁剪（默认每任务保留 500 事件），重启丢失；勿用 `--workers>1`，生产建议外置 Redis/SQLite。
-> - 公网部署请设置 `TRAINPILOT_API_TOKEN`，Agent 侧配置同值 `TRAINPILOT_API_TOKEN` 或 `Authorization: Bearer`；Webhook 另用飞书 `verification_token` 严格校验（缺失也拒绝）。
-> - `/notify` 的飞书推送已改为后台任务，不阻塞训练循环；失联任务可通过 `/health` 的 `stale_tasks_count` 或 `stale_only=true` 发现。
-> - Docker：`docker build -t trainpilot . && docker run -p 28780:28780 --env-file .env trainpilot`（单副本）。
-
----
-
-## 🧪 自动化测试验证
-
-项目内置全面的测试覆盖（包含单元测试与端到端模拟测试）：
+GPU 节点上的智能体可通过标准终端调用工具脚本（完整规范详见 [`skills/trainpilot/SKILL.md`](skills/trainpilot/SKILL.md)）：
 
 ```bash
-uv run pytest -v
+# 1. 上报训练阶段里程碑 (飞书绿色卡片 + Agent 智能点评)
+python3 skills/trainpilot/scripts/trainpilot_tool.py report-milestone \
+  --task-id "task-01" --step 1000 --epoch 1 --metrics "loss=0.41" \
+  --agent-note "val_loss 为本轮新低，未见过拟合，建议保持 lr。"
+
+# 2. 上报训练异常并挂起现场 (飞书红色告警卡片，等待专家决策)
+python3 skills/trainpilot/scripts/trainpilot_tool.py report-alert \
+  --task-id "task-01" --step 1450 --message "Loss NaN" --metrics "loss=NaN"
+
+# 3. 阻塞长轮询信箱等待决策，执行后向网关发送 ACK 确认并恢复训练
+python3 skills/trainpilot/scripts/trainpilot_tool.py poll-instruction --task-id "task-01" --wait
+python3 skills/trainpilot/scripts/trainpilot_tool.py ack-instruction --task-id "task-01" --action self_resolve --status success
 ```
 
-测试集清单：
-- `tests/test_states_and_schemas.py`：生命周期状态枚举与 Pydantic 数据契约校验
-- `tests/test_mailbox.py`：多任务并发安全信箱、状态机流转与超时心跳测试
-- `tests/test_feishu_cards.py`：飞书富文本、交互式告警卡片与防呆更新卡片生成
-- `tests/test_server_api.py`：FastAPI 核心端点与飞书 Webhook 交互测试
-- `tests/test_agent_client.py`：Agent 客户端、NaN/Inf 安全清洗、PyTorch Hook 与异常处理测试
-- `tests/test_skills_cli.py`：项目级 Agent Skill CLI 命令行工具端到端调用测试
-- `tests/test_e2e_simulation.py`：完整模拟训练遇 NaN、冻结、飞书决策、恢复至完成的端到端闭环测试
+---
+
+## 📡 核心 API 契约
+
+| 接口路径 | 方法 | 调用方 | 功能说明 |
+|---|---|---|---|
+| `/api/tasks/notify` | `POST` | GPU Agent | 上报事件（`alert` 告警、`milestone` 里程碑、`completed` 完成） |
+| `/api/tasks/{task_id}/instruction` | `GET` | GPU Agent | 长轮询信箱获取决策（`pop=true` 消费并进入 `RECOVERING`） |
+| `/api/tasks/{task_id}/ack` | `POST` | GPU Agent | 确认指令执行结果，任务状态恢复为 `RUNNING` |
+| `/api/tasks/{task_id}/heartbeat` | `POST` | GPU Agent | 运行时心跳保活与资源利用率上报 |
+| `/api/tasks/{task_id}/status` | `GET` | GPU / 运维 | 查询任务当前状态详情与信箱概况 |
+| `/api/tasks/{task_id}/decision` | `POST` | 控制台/测试 | 直接注入人工决策（支持本地开发或 Web 控制台） |
+| `/webhook/feishu` | `POST` | 飞书客户端 | 飞书 URL 握手校验与卡片交互点击回调（`card.action.trigger`） |
+
+---
+
+## 🧪 自动化测试
+
+```bash
+# 运行全量单元与集成测试套件
+uv run pytest -v
+
+# 运行完整的“遇异常 -> 冻结 -> 飞书决策 -> 恢复”端到端闭环模拟
+uv run pytest tests/test_e2e_simulation.py -v -s
+```
