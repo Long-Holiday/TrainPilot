@@ -278,12 +278,18 @@ Tool path: \`${tool_path}\`
 2. **Poll & Pop**: \`poll-instruction\` pops the pending decision and transitions status to \`RECOVERING\`. To check status without popping, use \`get-status\`.
 3. **Always ACK**: After executing the recovery strategy (e.g. \`self_resolve\` / reload checkpoint / adjust lr), call \`ack-instruction\` to transition back to \`RUNNING\`.
 
-## Python Hook (Optional)
+## Python In-Process Usage (TrainingGuardian)
 \`\`\`python
-from trainpilot.agent.hooks.pytorch import TrainPilotPyTorchHook
-hook = TrainPilotPyTorchHook(task_id="qwen2-7b-sft", gateway_url="http://control-plane:28780", auto_agent_note=True)
-# Inside training loop:
-hook.on_step_end(step=step, loss=loss_val, lr=current_lr, agent_note="收敛平稳，建议继续")
+from trainpilot.agent import TrainPilotClient, TrainingGuardian
+
+client = TrainPilotClient(gateway_url="http://control-plane:28780", task_id="qwen2-7b-sft")
+guardian = TrainingGuardian(client=client)
+guardian.register_action_handler("self_resolve", lambda p: print("Resume"))
+
+# Training loop: auto freeze, Feishu alert, poll decision & ACK on NaN/Inf
+guardian.check_and_handle_loss(loss.item(), step=step)
+# Report milestone with AI Agent note:
+client.notify_milestone(message="Epoch done", step=step, metrics={"loss": 0.35}, agent_note="收敛平稳，建议继续")
 \`\`\`
 EOF
 }

@@ -139,7 +139,7 @@ client = TrainPilotClient(
     task_id="qwen2-7b-sft-0905",
 )
 
-# 2. Setup guardian (defaults: 30s timeout auto self_resolve)
+# 2. Setup guardian (blocking long-polling for human decision)
 guardian = TrainingGuardian(client=client)
 
 def on_self_resolve(payload):
