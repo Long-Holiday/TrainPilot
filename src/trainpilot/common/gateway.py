@@ -139,3 +139,39 @@ def resolve_port(explicit: str | int | None = None) -> int:
     if p:
         return p
     return _normalize_port(os.environ.get("TRAINPILOT_PORT")) or DEFAULT_PORT
+
+
+def load_dotenv_if_present(start_dir: str | None = None) -> None:
+    """自动检测并加载当前目录或上级目录中的 .env 文件到 os.environ（不覆盖已有环境变量）。
+
+    从 start_dir 或当前工作目录开始逐级向上查找，直到根目录或遇到首个 .env 文件。
+    """
+    curr = os.path.abspath(start_dir or os.getcwd())
+    if os.path.isfile(curr):
+        curr = os.path.dirname(curr)
+
+    while True:
+        env_path = os.path.join(curr, ".env")
+        if os.path.isfile(env_path):
+            try:
+                with open(env_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        if line.startswith("export "):
+                            line = line[len("export "):].strip()
+                        if "=" in line:
+                            k, v = line.split("=", 1)
+                            k = k.strip()
+                            v = v.strip().strip("'\"")
+                            if k and k not in os.environ:
+                                os.environ[k] = v
+                return
+            except Exception:
+                pass
+        parent = os.path.dirname(curr)
+        if parent == curr:
+            break
+        curr = parent
+

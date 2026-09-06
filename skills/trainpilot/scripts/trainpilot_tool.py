@@ -25,7 +25,10 @@ if _src_path not in sys.path:
     sys.path.insert(0, _src_path)
 
 from trainpilot.agent.client import _sanitize_for_json
-from trainpilot.common.gateway import resolve_gateway_url
+from trainpilot.common.gateway import load_dotenv_if_present, resolve_gateway_url
+
+load_dotenv_if_present()
+
 
 
 def get_default_task_id() -> str:
