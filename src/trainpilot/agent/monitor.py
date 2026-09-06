@@ -23,17 +23,13 @@ class TrainingGuardian:
         self,
         client: TrainPilotClient,
         poll_interval: float = 2.0,
-        poll_timeout: Optional[float] = 60.0,
+        poll_timeout: Optional[float] = None,
         loss_spike_threshold: Optional[float] = 1e4,
-        timeout_fallback_action: Optional[str] = "self_resolve",
     ):
         self.client = client
         self.poll_interval = poll_interval
         self.poll_timeout = poll_timeout
         self.loss_spike_threshold = loss_spike_threshold
-        # 30 秒无人工决策则视为“自行解决”，训练自行继续；None 则超时抛异常。
-        # e.g. timeout_fallback_action="self_resolve" keeps training alive; None re-raises.
-        self.timeout_fallback_action = timeout_fallback_action
         self._action_handlers: Dict[str, Callable[[Optional[Dict[str, Any]]], Any]] = {}
 
         # Register default built-in handlers
@@ -58,9 +54,7 @@ class TrainingGuardian:
         raise StopTrainingException("Training stopped by human operator decision")
 
     def _default_self_resolve_handler(self, payload: Optional[Dict[str, Any]] = None):
-        if payload and payload.get("timeout_fallback"):
-            logger.warning("No human decision within 30s; auto self-resolve: continuing training as-is.")
-        elif payload and payload.get("auto_resolved"):
+        if payload and payload.get("auto_resolved"):
             logger.warning("Server auto self-resolve after timeout; continuing training as-is.")
         else:
             logger.info("Self-resolve action: continuing training without modification.")
@@ -151,24 +145,12 @@ class TrainingGuardian:
             "extra": extra,
         }
 
-        # 2. Block and poll for human instruction (with timeout fallback)
-        try:
-            instruction = self.client.poll_instruction(
-                timeout=self.poll_timeout,
-                interval=self.poll_interval,
-                pop=True,
-            )
-        except TimeoutError as exc:
-            if self.timeout_fallback_action:
-                logger.warning("HITL poll timed out (%s); executing fallback '%s'",
-                               exc, self.timeout_fallback_action)
-                return self._execute_action(
-                    action=self.timeout_fallback_action,
-                    instruction_id=None,
-                    payload={"timeout_fallback": True, "original_message": message},
-                    anomaly_context=anomaly_ctx,
-                )
-            raise
+        # 2. Block and poll for human instruction
+        instruction = self.client.poll_instruction(
+            timeout=self.poll_timeout,
+            interval=self.poll_interval,
+            pop=True,
+        )
 
         action = instruction.get("action") or "self_resolve"
         instruction_id = instruction.get("instruction_id")
