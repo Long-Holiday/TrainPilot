@@ -34,32 +34,32 @@ TrainPilot 彻底终结了内网 GPU 训练集群“无公网 IP”、“无法�
 ### 网络拓扑架构
 
 ```mermaid
-graph LR
+flowchart LR
     %% 样式定义
-    classDef gpuCluster fill:#F8FAFC,stroke:#3B82F6,stroke-width:2px,rx:8px,ry:8px;
-    classDef serverStyle fill:#EFF6FF,stroke:#2563EB,stroke-width:2px,rx:8px,ry:8px;
-    classDef userStyle fill:#F0FDF4,stroke:#16A34A,stroke-width:2px,rx:8px,ry:8px;
+    classDef gpuCluster fill:#F8FAFC,stroke:#3B82F6,stroke-width:2px;
+    classDef serverStyle fill:#EFF6FF,stroke:#2563EB,stroke-width:2px;
+    classDef userStyle fill:#F0FDF4,stroke:#16A34A,stroke-width:2px;
 
-    subgraph GPU_Side["🏢 内网 GPU 训练集群 (无公网 IP)"]
+    subgraph GPU_Side["内网 GPU 训练集群【无公网 IP】"]
         direction TB
-        Agent["🤖 <b>GPU 端 AI Agent / 训练进程</b><br/>(Claude Code / OpenCode / 训练脚本)<br/><i>• 执行 PyTorch / DeepSpeed 训练任务<br/>• 监测 Loss / 显存 / 异常指标</i>"]:::gpuCluster
+        Agent["🤖 GPU 端 AI Agent / 训练进程<br/>Claude Code / OpenCode / 训练脚本<br/>• 执行 PyTorch / DeepSpeed 训练任务<br/>• 监测 Loss / 显存 / 异常指标"]:::gpuCluster
     end
 
-    subgraph Control_Plane["☁️ 公网云服务器 (TrainPilot Control Plane)"]
+    subgraph Control_Plane["公网云服务器【TrainPilot Control Plane】"]
         direction TB
-        MCPServer["🌐 <b>公网 MCP Server (FastAPI)</b><br/><code>/mcp (Streamable HTTP)</code><br/><i>• 接收 Agent 上报的状态与指标<br/>• 维护任务状态机 & 毫秒级长轮询信箱<br/>• SQLite WAL 本地轻量持久化</i>"]:::serverStyle
+        MCPServer["🌐 公网 MCP Server 网关<br/>/mcp 端点 - Streamable HTTP<br/>• 接收 Agent 上报的状态与指标<br/>• 维护任务状态机与长轮询信箱<br/>• SQLite WAL 本地轻量持久化"]:::serverStyle
     end
 
-    subgraph User_Side["📱 人类用户 (Human-in-the-Loop)"]
+    subgraph User_Side["人类专家【Human-in-the-Loop】"]
         direction TB
-        FeishuUser["👨‍💻 <b>算法工程师 / 运维用户</b><br/>(移动端 / 桌面端 飞书客户端)<br/><i>• 接收里程碑卡片与 Agent 智能点评<br/>• 接收异常告警并一键点击闭环决策</i>"]:::userStyle
+        FeishuUser["👨‍💻 算法工程师 / 运维用户<br/>移动端 / 桌面端 飞书客户端<br/>• 接收里程碑卡片与 Agent 智能点评<br/>• 接收异常告警并一键点击闭环决策"]:::userStyle
     end
 
     %% 核心数据流
-    Agent ==>|① 执行任务，通过 MCP 工具上报状态与指标| MCPServer
-    MCPServer ==>|② 异步下发富文本/交互卡片通知用户| FeishuUser
-    FeishuUser -.->|③ 点击决策 (Webhook 交互)| MCPServer
-    MCPServer -.->|④ 长轮询毫秒下发指令，Agent 执行自愈| Agent
+    Agent ==> |"1. 执行任务，调用 MCP 工具上报状态与指标"| MCPServer
+    MCPServer ==> |"2. 异步下发飞书卡片通知用户"| FeishuUser
+    FeishuUser -.-> |"3. 点击决策 - Webhook 交互"| MCPServer
+    MCPServer -.-> |"4. 长轮询毫秒唤醒，Agent 执行自愈"| Agent
 ```
 
 ### 任务生命周期状态机
@@ -67,14 +67,14 @@ graph LR
 ```mermaid
 stateDiagram-v2
     [*] --> RUNNING: Agent 启动训练任务
-    RUNNING --> RUNNING: 上报心跳 (send_heartbeat) / 里程碑 (report_milestone)
-    RUNNING --> WAITING: Agent 捕获异常冻结现场 (report_alert)
-    WAITING --> RESOLVED: 用户点击飞书卡片 / 30s 超时自动决策 (submit_decision)
-    RESOLVED --> RECOVERING: Agent 轮询拉取恢复指令 (poll_instruction)
-    RECOVERING --> RUNNING: Agent 自愈成功并 ACK (ack_instruction: success)
-    RECOVERING --> WAITING: Agent 自愈失败并 ACK (ack_instruction: failed)
-    RUNNING --> COMPLETED: Agent 上报训练圆满完成
-    RUNNING --> FAILED: Agent 进程崩溃或用户指令停止 (stop_training)
+    RUNNING --> RUNNING: 上报心跳 send_heartbeat / 里程碑 report_milestone
+    RUNNING --> WAITING: 捕获异常并冻结现场 report_alert
+    WAITING --> RESOLVED: 用户在飞书点击决策或超时自动决策
+    RESOLVED --> RECOVERING: Agent 轮询拉取指令 poll_instruction
+    RECOVERING --> RUNNING: 自愈成功 ack_instruction - success
+    RECOVERING --> WAITING: 自愈失败 ack_instruction - failed
+    RUNNING --> COMPLETED: 训练圆满完成 completed
+    RUNNING --> FAILED: 进程崩溃或用户指令停止 stop_training
     WAITING --> FAILED: 用户在飞书点击【停止训练】
     COMPLETED --> [*]
     FAILED --> [*]
