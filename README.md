@@ -8,22 +8,24 @@
   <img src="https://img.shields.io/badge/License-MIT-purple" alt="License" />
 </p>
 
-> 专为大规模深度学习分布式训练（PyTorch / DeepSpeed / Megatron-LM / Slurm / K8s）量身定制，采用 **“公网 MCP Server（Control Plane 网关） + 内网 GPU 客户端（Worker 主动连接 / 纯 Pull 模式）”** 的现代化解耦架构。
+> 专为大规模深度学习分布式训练设计，采用 **“内网 GPU 执行任务的 AI Agent + 公网 MCP Server 控制面 + 飞书通知用户”** 的现代化解耦架构。
 
-TrainPilot 彻底终结了内网 GPU 训练集群“无公网 IP”、“无法直接接收外网 Webhook”、“无外部凭据下发通道”与“训练异常难以及时干预”的痛点。通过标准 **Model Context Protocol (MCP)** 协议，打通训练异常捕获、现场就地冻结、飞书交互式卡片推送与**人类在回路（Human-In-The-Loop, HITL）**决策闭环，助力算法与运维团队实现秒级异常处置与智能自愈。
+TrainPilot 彻底终结了内网 GPU 训练集群“无公网 IP”、“无法直接接收外网 Webhook”、“无外部凭据下发通道”与“训练异常难以及时干预”的痛点：
+1. **Agent 在 GPU 服务器上执行训练任务**：内网 GPU 节点上的 AI Agent（如 Claude Code、OpenCode、自定义 Agent 或训练脚本）负责调度并运行模型训练。
+2. **向公网 MCP Server 发送任务状态**：GPU 端 Agent 通过标准 Model Context Protocol (MCP) 远程协议，主动将训练进度、实时指标（Loss/LR/显存）及自主研判点评（`agent_note`）上报给公网 MCP 服务器。
+3. **实时通知人类用户并闭环决策**：公网 MCP 服务器接收到任务状态后，即刻渲染富文本卡片推送到飞书通知用户；遇异常（NaN/OOM）就地冻结现场并提供交互按钮，用户在飞书上一键决策，指令实时回传 GPU 端 Agent 完成自愈恢复。
 
 ---
 
 ## ✨ 核心特性
 
-- 🌐 **公网 MCP 原生驱动**：暴露标准 Streamable HTTP `/mcp` 端点，外部智能体（Claude Code、Cursor、OpenCode、Gemini CLI 等）开箱即用。
-- 🪶 **内网 GPU 纯客户端**：无公网 IP、无入站端口、零外网凭据存储，训练节点作为纯客户端主动出站连接控制面。
-- 🛡️ **浮点安全与就地冻结**：递归清洗 `NaN` / `Inf` 与 PyTorch Tensor / NumPy 标量，杜绝 JSON 崩溃；异常时就地冻结训练现场。
-- 🔄 **双向 ACK 与自愈闭环**：严格的生命周期状态机，客户端完成自愈后携带 `solution` 上报 ACK，控制面原子流转回 `RUNNING` 并通知飞书。
-- ⚡ **毫秒唤醒与单点超时**：支持长轮询挂起（空轮询减少 90%+）；告警超过 30s 无人干预由服务端统一自动决策兜底，消除分布式死锁。
-- 📱 **飞书卡片就地防呆**：Webhook 秒级响应，点击后即刻将卡片更新为【已处理】状态并收起操作按钮，防范多人并发误触与重放。
-- 🤖 **Agent 智能点评原生支持**：支持 AI 智能体在里程碑或异常上报时附带对收敛趋势、调参建议的 `agent_note` 自主研判分析。
-- 💾 **轻量持久化与失联看门狗**：SQLite WAL 冷热内存分离（运行内存 <50MB）；Watchdog 后台线程实时侦测进程挂死与 NCCL 死锁。
+- 🤖 **GPU 端 Agent 原生驱动**：内网 GPU 节点上执行训练任务的 AI Agent 通过标准 Streamable HTTP `/mcp` 协议与控制面通信，无需额外开发私有接口。
+- 🪶 **内网 GPU 纯客户端**：无公网 IP、无入站端口、零外网凭证存储，GPU 端 Agent 纯出站主动向公网 MCP 服务器同步状态。
+- 📱 **飞书卡片秒级通知用户**：MCP 服务端自动将 Agent 上报的阶段里程碑、模型收敛指标与智能点评格式化推送到飞书，让算法工程师随时掌握训练动态。
+- 🛡️ **浮点安全与异常冻结**：递归清洗 `NaN` / `Inf` 与 PyTorch Tensor，杜绝 JSON 序列化崩溃；突增异常时自动就地挂起训练。
+- 🔄 **双向 ACK 与自愈闭环**：严格的生命周期状态机，Agent 执行自愈后携带 `solution` 方案确认，控制面原子流转回 `RUNNING` 并向飞书推送【自愈成功】卡片。
+- ⚡ **毫秒唤醒与单点超时**：指令拉取支持服务端长连接挂起（空轮询减少 90%+）；告警超过 30s 用户未干预由服务端统一自动决策兜底，消除死锁。
+- 📱 **飞书卡片就地防呆**：Webhook 秒级响应，用户点击后即刻将卡片更新为【已处理】状态并收起操作按钮，防范团队多人并发误触与重放。
 
 ---
 
@@ -32,65 +34,48 @@ TrainPilot 彻底终结了内网 GPU 训练集群“无公网 IP”、“无法�
 ### 网络拓扑架构
 
 ```mermaid
-graph TB
+graph LR
     %% 样式定义
-    classDef clusterStyle fill:#F8FAFC,stroke:#94A3B8,stroke-width:2px,stroke-dasharray: 4 4;
-    classDef nodeStyle fill:#FFFFFF,stroke:#3B82F6,stroke-width:2px,rx:6px,ry:6px;
-    classDef serverStyle fill:#EFF6FF,stroke:#2563EB,stroke-width:2px,rx:6px,ry:6px;
-    classDef userStyle fill:#F0FDF4,stroke:#16A34A,stroke-width:2px,rx:6px,ry:6px;
+    classDef gpuCluster fill:#F8FAFC,stroke:#3B82F6,stroke-width:2px,rx:8px,ry:8px;
+    classDef serverStyle fill:#EFF6FF,stroke:#2563EB,stroke-width:2px,rx:8px,ry:8px;
+    classDef userStyle fill:#F0FDF4,stroke:#16A34A,stroke-width:2px,rx:8px,ry:8px;
 
-    subgraph GPU_Cluster["🏢 内网 GPU 训练集群 (私网 / NAT / 无公网 IP)"]
-        direction LR
-        GPU1["🖥️ GPU 训练节点 01<br/><b>TrainingGuardian 守卫</b>"]:::nodeStyle
-        GPU2["🖥️ GPU 训练节点 02<br/><b>PyTorch / DeepSpeed</b>"]:::nodeStyle
-        GPUN["🖥️ GPU 训练节点 N<br/><b>trainpilot-cli / SDK</b>"]:::nodeStyle
-    end
-
-    subgraph Control_Plane["☁️ 公网云服务器 (Control Plane Gateway)"]
+    subgraph GPU_Side["🏢 内网 GPU 训练集群 (无公网 IP)"]
         direction TB
-        MCP_GW["🌐 <b>FastAPI + MCP Server</b><br/><code>/mcp (Streamable HTTP)</code> & <code>/api/tasks</code>"]:::serverStyle
-        MB["📬 <b>Mailbox 任务信箱 & 调度器</b><br/>毫秒级长轮询唤醒挂起机制"]:::serverStyle
-        DB[("💾 <b>SQLite WAL 存储引擎</b><br/>冷热任务分离 / 终态内存驱逐")]:::serverStyle
-        WD["🐕 <b>Server Watchdog</b><br/>心跳监测 / 失联预警 / 自动瘦身"]:::serverStyle
-        
-        MCP_GW --> MB
-        MB <--> DB
-        MB <--> WD
+        Agent["🤖 <b>GPU 端 AI Agent / 训练进程</b><br/>(Claude Code / OpenCode / 训练脚本)<br/><i>• 执行 PyTorch / DeepSpeed 训练任务<br/>• 监测 Loss / 显存 / 异常指标</i>"]:::gpuCluster
     end
 
-    subgraph Human_Agent_Loop["📱 人类在回路与智能协作 (HITL & Agents)"]
+    subgraph Control_Plane["☁️ 公网云服务器 (TrainPilot Control Plane)"]
         direction TB
-        FS["💬 <b>飞书协作客户端</b><br/>交互式告警卡片 / 就地防呆闭环"]:::userStyle
-        AI_AGENT["🤖 <b>外部 AI 智能体</b><br/>Claude Code / Cursor / OpenCode"]:::userStyle
+        MCPServer["🌐 <b>公网 MCP Server (FastAPI)</b><br/><code>/mcp (Streamable HTTP)</code><br/><i>• 接收 Agent 上报的状态与指标<br/>• 维护任务状态机 & 毫秒级长轮询信箱<br/>• SQLite WAL 本地轻量持久化</i>"]:::serverStyle
     end
 
-    %% 连接关系
-    GPU1 ==>|主动出站长轮询 / 异常上报| MCP_GW
-    GPU2 ==>|主动出站保活 / 纯客户端 Pull| MCP_GW
-    GPUN ==>|双向 ACK / 里程碑同步| MCP_GW
+    subgraph User_Side["📱 人类用户 (Human-in-the-Loop)"]
+        direction TB
+        FeishuUser["👨‍💻 <b>算法工程师 / 运维用户</b><br/>(移动端 / 桌面端 飞书客户端)<br/><i>• 接收里程碑卡片与 Agent 智能点评<br/>• 接收异常告警并一键点击闭环决策</i>"]:::userStyle
+    end
 
-    MCP_GW <==>|Webhook 交互 / 推送卡片| FS
-    AI_AGENT <==>|MCP 远程协议 / 监控与决策| MCP_GW
-
-    class GPU_Cluster clusterStyle;
-    class Control_Plane clusterStyle;
-    class Human_Agent_Loop clusterStyle;
+    %% 核心数据流
+    Agent ==>|① 执行任务，通过 MCP 工具上报状态与指标| MCPServer
+    MCPServer ==>|② 异步下发富文本/交互卡片通知用户| FeishuUser
+    FeishuUser -.->|③ 点击决策 (Webhook 交互)| MCPServer
+    MCPServer -.->|④ 长轮询毫秒下发指令，Agent 执行自愈| Agent
 ```
 
 ### 任务生命周期状态机
 
 ```mermaid
 stateDiagram-v2
-    [*] --> RUNNING: 创建任务 / 启动巡航
+    [*] --> RUNNING: Agent 启动训练任务
     RUNNING --> RUNNING: 上报心跳 (send_heartbeat) / 里程碑 (report_milestone)
-    RUNNING --> WAITING: 触发异常告警 (report_alert)
-    WAITING --> RESOLVED: 人工点击飞书卡片 / 30s 超时自动决策 (submit_decision)
-    RESOLVED --> RECOVERING: GPU 客户端拉取指令 (poll_instruction)
-    RECOVERING --> RUNNING: 自愈成功并 ACK (ack_instruction: success)
-    RECOVERING --> WAITING: 自愈失败并 ACK (ack_instruction: failed)
-    RUNNING --> COMPLETED: 训练圆满完成 (completed)
-    RUNNING --> FAILED: 训练崩溃或人工停止 (stop_training / failed)
-    WAITING --> FAILED: 人工点击【停止训练】(stop_training)
+    RUNNING --> WAITING: Agent 捕获异常冻结现场 (report_alert)
+    WAITING --> RESOLVED: 用户点击飞书卡片 / 30s 超时自动决策 (submit_decision)
+    RESOLVED --> RECOVERING: Agent 轮询拉取恢复指令 (poll_instruction)
+    RECOVERING --> RUNNING: Agent 自愈成功并 ACK (ack_instruction: success)
+    RECOVERING --> WAITING: Agent 自愈失败并 ACK (ack_instruction: failed)
+    RUNNING --> COMPLETED: Agent 上报训练圆满完成
+    RUNNING --> FAILED: Agent 进程崩溃或用户指令停止 (stop_training)
+    WAITING --> FAILED: 用户在飞书点击【停止训练】
     COMPLETED --> [*]
     FAILED --> [*]
 ```
@@ -128,9 +113,9 @@ cd TrainPilot
 uv sync
 ```
 
-### 2. 服务端一键启停 (`start.sh`)
+### 2. 公网服务端一键启停 (`start.sh`)
 
-项目根目录提供了功能齐备的运维管理脚本 [`start.sh`](file:///home/default_user/TrainPilot/start.sh)，自动处理环境检测、端口可用性排查与进程托管：
+公网控制面脚本 [`start.sh`](file:///home/default_user/TrainPilot/start.sh) 负责启动 MCP Server，自动处理环境检测与进程托管：
 
 ```bash
 # 1. 前台交互式启动 (调试与查看实时日志)
@@ -144,12 +129,9 @@ uv sync
 
 # 4. 优雅停止后台服务
 ./start.sh --stop
-
-# 5. 自定义端口与绑定地址启动
-./start.sh -p 28780 --host 0.0.0.0
 ```
 
-服务启动后，终端将输出如下关键端点：
+服务端关键端点：
 - **MCP 服务端点**: `http://<公网IP>:28780/mcp` (Streamable HTTP 传输)
 - **API 交互文档**: `http://<公网IP>:28780/docs` (Swagger UI)
 - **健康检查探针**: `http://<公网IP>:28780/health`
@@ -157,50 +139,21 @@ uv sync
 
 ### 3. 极速端到端模拟演练
 
-无需真实 GPU 即可在本地完整验证 **异常告警 -> 飞书卡片 -> 人工/超时决策 -> 现场恢复 -> 闭环 ACK** 的全流程：
+在本地快速验证 **Agent 执行任务 -> 向 MCP Server 上报异常 -> 飞书通知用户 -> 用户决策 -> Agent 自愈** 的全闭环：
 
 ```bash
-# 启动模拟训练（默认自动连接本地 28780 端口，模拟在第 6 步触发 NaN 并在 3 秒后闭环自愈）
 uv run python examples/mock_training.py
 ```
 
 ---
 
-## 🤖 客户端接入：外部 AI 智能体接入
+## 🤖 GPU 端 Agent 接入与状态上报
 
-任何支持 **Model Context Protocol (MCP)** 的现代智能体（如 Claude Code、Cursor、OpenCode、Gemini CLI 等）只需配置公网 MCP Server 地址，即可无需在本地安装任何插件或写代码，直接在自然语言对话中获得全套训练集群监控、指标研判与交互决策能力。
+在内网 GPU 服务器上执行任务的 AI Agent（例如 Claude Code、OpenCode、Cursor 或算法自主 Agent），只需通过配置连接公网 MCP Server，即可在执行训练时自主向控制面上报状态、实时指标及智能点评，并接收用户的干预指令。
 
-### MCP 客户端配置规范
+### 1. GPU 端 Agent 的 MCP 客户端配置
 
-采用 MCP 2.x 标准最新的 **Streamable HTTP** 传输协议，在智能体对应的配置文件中添加公网端点：
-
-#### 1. Claude Code / Claude Desktop 配置 (`~/.claude.json` 或 `claude_desktop_config.json`)
-
-```json
-{
-  "mcpServers": {
-    "trainpilot": {
-      "url": "http://<公网服务器IP>:28780/mcp"
-    }
-  }
-}
-```
-
-#### 2. Cursor IDE 配置 (`.cursor/mcp.json`)
-
-```json
-{
-  "mcpServers": {
-    "trainpilot": {
-      "url": "http://<公网服务器IP>:28780/mcp"
-    }
-  }
-}
-```
-
-#### 3. 环境变量可选认证
-
-若公网服务端配置了 `TRAINPILOT_API_TOKEN`，MCP 客户端可配置携带 HTTP Header：
+在 GPU 服务器上运行的 AI Agent 配置文件中（如 `~/.claude.json`、`.cursor/mcp.json`），添加公网 MCP Server 的 Streamable HTTP 端点：
 
 ```json
 {
@@ -208,32 +161,77 @@ uv run python examples/mock_training.py
     "trainpilot": {
       "url": "http://<公网服务器IP>:28780/mcp",
       "headers": {
-        "Authorization": "Bearer your_secret_token"
+        "Authorization": "Bearer your_optional_api_token"
       }
     }
   }
 }
 ```
 
+配置后，GPU 端运行的 Agent 在执行训练脚本或运维排障时，即可直接调用 TrainPilot 提供的标准化 MCP 工具。
+
 ---
 
-### 常见智能体交互场景
+### 2. GPU 端 Agent 常用工作流
 
-接入后，AI 智能体将自动在其上下文工具栏中获得全部 8 项标准工具与只读资源，用户可在对话框中直接发起如下交互：
+在 GPU 服务器上执行训练任务时，Agent 通过以下工具与公网 MCP Server 交互：
 
-```text
-💬 "帮我查看一下当前有哪些训练任务处于失联或异常状态？"
-🤖 Agent 自动调用: list_tasks(stale_only=True) / list_tasks(state="WAITING")
+1. **上报训练阶段里程碑并通知用户**：
+   Agent 定期（如每个 Epoch 或 Checkpoint）上报进度，并在 `agent_note` 中附带自主生成的趋势研判，MCP Server 随即向飞书群推送绿色卡片通知用户：
+   ```json
+   {
+     "tool": "report_milestone",
+     "arguments": {
+       "task_id": "llama3-8b-sft",
+       "step": 5000,
+       "epoch": 1,
+       "metrics": {"loss": 0.385, "gpu_mem": "82%"},
+       "message": "Epoch 1 预热阶段圆满完成，Checkpoint 已保存",
+       "agent_note": "Loss 收敛速率稳定，验证集未出现过拟合，建议维持当前学习率继续训练。"
+     }
+   }
+   ```
 
-💬 "llama3-8b-lora 任务当前进度如何？最新的 Loss 和学习率是多少？"
-🤖 Agent 自动读取: tasks://status/llama3-8b-lora 或调用 get_task_status
+2. **检测到训练异常，就地冻结现场并请求用户介入**：
+   当 Agent 检测到 `Loss NaN`、剧烈数值突增或 `CUDA OOM` 时，上报告警。控制面将任务置为 `WAITING` 冻结现场，并向飞书推送带有【🛑 停止训练】与【✅ 自行解决】按钮的红色告警卡片：
+   ```json
+   {
+     "tool": "report_alert",
+     "arguments": {
+       "task_id": "llama3-8b-sft",
+       "step": 5420,
+       "metrics": {"loss": "NaN"},
+       "message": "检测到 Loss 变为 NaN",
+       "agent_note": "怀疑因批次中包含异常脏样本引起梯度溢出，现场已冻结。"
+     }
+   }
+   ```
 
-💬 "针对正在等待决策的 qwen2-7b 任务，下发【自行解决】决策，并让节点回退上一个 Checkpoint。"
-🤖 Agent 自动调用: submit_decision(task_id="qwen2-7b", action="self_resolve", operator="Claude-Code")
+3. **拉取用户在飞书上的决策指令并执行自愈**：
+   Agent 调用 `poll_instruction` 挂起长轮询。用户在飞书端点击决策（或 30 秒超时自动决策触发）后，Agent 毫秒级获得决策：
+   ```json
+   {
+     "tool": "poll_instruction",
+     "arguments": {
+       "task_id": "llama3-8b-sft",
+       "wait_timeout": 30.0
+     }
+   }
+   ```
 
-💬 "为 task-01 上报一个第 10000 步的里程碑，并附加你的调优点评意见。"
-🤖 Agent 自动调用: report_milestone(task_id="task-01", step=10000, agent_note="梯度范数平稳收敛，未出现震荡...")
-```
+4. **确认恢复并向用户通报自愈结果**：
+   Agent 在 GPU 端执行自愈动作（如丢弃脏样本、回退 Checkpoint、调低学习率）后，发送 ACK。控制面将任务状态流转回 `RUNNING`，并自动向飞书推送【自愈成功】卡片通知用户：
+   ```json
+   {
+     "tool": "ack_instruction",
+     "arguments": {
+       "task_id": "llama3-8b-sft",
+       "action": "self_resolve",
+       "status": "success",
+       "solution": "已跳过异常 Batch，加载 step 5000 Checkpoint 并重置优化器状态，训练恢复正常运行。"
+     }
+   }
+   ```
 
 ---
 
@@ -245,18 +243,18 @@ uv run python examples/mock_training.py
 
 | 工具名称 (Tool Name) | 核心职责 | 输入参数摘要 | 输出及行为效果 |
 |:---|:---|:---|:---|
-| **`report_milestone`** | 监控上报 | `task_id`, `message`, `step`, `epoch`, `metrics`, `agent_note`, `extra` | 记录里程碑，更新步数与指标，向飞书推送绿色卡片及 Agent 点评 |
-| **`report_alert`** | 异常拦截 | `task_id`, `message`, `step`, `epoch`, `metrics`, `agent_note`, `extra` | 状态置为 `WAITING`，冻结训练，推送红色交互卡片，激活 30s 超时定时器 |
-| **`poll_instruction`** | HITL 决策拉取 | `task_id`, `wait_timeout` (默认20s), `pop` (默认True) | 挂起等待决策；决策到达时返回指令并将状态流转至 `RECOVERING` |
-| **`ack_instruction`** | 自愈确认 | `task_id`, `instruction_id`, `action`, `status`, `solution`, `message` | 校验指令有效性，状态流转回 `RUNNING`，异步推送飞书【自愈恢复】卡片 |
+| **`report_milestone`** | 状态上报 | `task_id`, `message`, `step`, `epoch`, `metrics`, `agent_note`, `extra` | 记录训练里程碑，更新步数与指标，向飞书推送绿色卡片及 Agent 点评通知用户 |
+| **`report_alert`** | 异常拦截 | `task_id`, `message`, `step`, `epoch`, `metrics`, `agent_note`, `extra` | 状态置为 `WAITING`，冻结训练，推送红色交互卡片提醒用户，激活 30s 超时定时器 |
+| **`poll_instruction`** | 决策拉取 | `task_id`, `wait_timeout` (默认20s), `pop` (默认True) | Agent 挂起等待用户决策；决策到达时返回指令并将状态流转至 `RECOVERING` |
+| **`ack_instruction`** | 自愈确认 | `task_id`, `instruction_id`, `action`, `status`, `solution`, `message` | 校验指令有效性，状态流转回 `RUNNING`，向飞书推送【自愈恢复】卡片通知用户 |
 | **`send_heartbeat`** | 节点保活 | `task_id`, `step`, `epoch`, `metrics`, `status` | 更新 `last_heartbeat_at`，重置失联预警标记，向看门狗报到 |
 | **`get_task_status`** | 状态查询 | `task_id` | 获取指定任务当前生命周期状态、最新指标、信箱未决指令与事件统计 |
 | **`list_tasks`** | 集群汇总 | `limit`, `offset`, `state` (状态过滤), `stale_only` (仅失联) | 分页查询集群所有跟踪任务列表，支持失联与状态过滤 |
-| **`submit_decision`** | 控制台干预 | `task_id`, `action`, `payload`, `operator` | 运维人员或测试直接注入决策，更新信箱并就地将飞书卡片置为已处理 |
+| **`submit_decision`** | 用户干预 | `task_id`, `action`, `payload`, `operator` | 注入运维决策，更新信箱并就地将飞书卡片置为已处理 |
 
 ### MCP Resources (只读资源)
 
-除了可调用的 Tools，TrainPilot 还向 MCP 客户端暴露如下标准资源：
+除了可调用的 Tools，TrainPilot 还向客户端暴露如下标准资源：
 
 | 资源 URI (Resource URI) | MIME 类型 | 功能描述 |
 |:---|:---|:---|
@@ -273,15 +271,15 @@ TrainPilot 为深度学习生命周期的不同场景精心设计了视觉分明
 
 | 卡片类型 | 视觉色系 | 触发时机 | 核心内容与交互要素 |
 |:---|:---:|:---|:---|
-| **⚠️ 训练异常告警卡片** | 🔴 红色 Header | 触发 `report_alert` (如 Loss NaN、突增) | 实时指标、异常详情、**🤖 Agent 异常研判**、30s 倒计时说明；提供【🛑 停止训练】与【✅ 自行解决】两个交互按钮 |
-| **🚀 训练里程碑卡片** | 🟢 绿色 Header | 触发 `report_milestone` (如 Epoch 完成) | 阶段进度、关键指标、**🤖 Agent 智能点评**（独立区块呈现模型调优意见） |
+| **⚠️ 训练异常告警卡片** | 🔴 红色 Header | Agent 触发 `report_alert` (如 Loss NaN) | 实时指标、异常详情、**🤖 Agent 异常研判**、30s 倒计时说明；提供【🛑 停止训练】与【✅ 自行解决】两个交互按钮 |
+| **🚀 训练里程碑卡片** | 🟢 绿色 Header | Agent 触发 `report_milestone` (如 Epoch 完成) | 阶段进度、关键指标、**🤖 Agent 智能点评**（独立区块呈现模型调优意见） |
 | **✅ 决策闭环防呆卡片** | 🟦 绿松石 Header | 用户点击决策按钮或 30s 超时触发 | 就地替换原告警卡片，展示**决策人**、**选定动作**及**闭环时间**；完全隐藏按钮防呆 |
-| **🛠️ 异常自愈成功卡片** | 🟢 绿色 Header | 客户端执行自愈后发送 `ack_instruction` | 展示执行的解决方法概要（如回退 Checkpoint、调小学习率），告知团队训练已复苏 |
+| **🛠️ 异常自愈成功卡片** | 🟢 绿色 Header | Agent 执行自愈后发送 `ack_instruction` | 展示执行的解决方法概要（如回退 Checkpoint、调小学习率），告知团队训练已复苏 |
 | **⚠️ 训练失联预警卡片** | 🟠 橙色 Header | Watchdog 检测到心跳超时（默认 >300s） | 失联时长、最后已知步数与心跳时间，提示排查硬件断电、节点崩溃或 NCCL 死锁 |
 
 ### 卡片防呆与幂等保障
 
-1. **就地回写替换**：飞书用户在手机或 PC 端点击按钮后，服务端响应中直接携带 `type: "raw"` 的新卡片，飞书客户端 3 秒内将原告警卡片更新为【决策已闭环】，彻底移除操作按钮，防止并发环境下多人重复点击。
+1. **就地回写替换**：用户在手机或 PC 端点击按钮后，服务端响应中直接携带 `type: "raw"` 的新卡片，飞书客户端 3 秒内将原告警卡片更新为【决策已闭环】，彻底移除操作按钮，防止并发环境下多人重复点击。
 2. **状态机强锁保护**：即使网络抖动产生重放请求，一旦任务脱离 `WAITING` 状态，控制面将拒绝后续的重复决策；客户端 ACK 时也必须携带匹配的 `instruction_id`。
 
 ### 飞书自建应用配置流程
