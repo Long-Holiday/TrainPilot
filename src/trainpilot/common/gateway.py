@@ -12,9 +12,8 @@
 - Web 侧示例: ``TRAINPILOT_HOST=0.0.0.0`` (或留空取默认)
 - GPU 侧示例: ``TRAINPILOT_HOST=35.202.16.245`` (Web 公网 IP/域名, 不要写 0.0.0.0)
 
-本模块被 server (bind 解析) 与 agent/client (网关 URL 解析) 共同复用,
-``skills/trainpilot/scripts/trainpilot_tool.py`` 因需保持单文件零依赖可拷贝,
-在该脚本内保留了一份精简副本 (逻辑与此处保持一致, 修改时请同步)。
+本模块被 server (bind 解析)、agent/client (网关 URL 解析)
+以及 skills/trainpilot/scripts/trainpilot_tool.py (CLI 工具) 共同复用。
 """
 
 import os
