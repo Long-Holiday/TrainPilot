@@ -161,10 +161,6 @@ while [[ $# -gt 0 ]]; do
             RUN_MODE="status"
             shift
             ;;
-        --skip-skills)
-            log_warn "--skip-skills 已废弃: Web 启动脚本不再同步 Skills (GPU 侧请手动执行 ./setup_skills.sh)。"
-            shift
-            ;;
         --port|-p)
             CUSTOM_PORT="$2"
             shift 2
@@ -292,10 +288,14 @@ fi
 
 # 1. 检查并初始化 .env
 if [ ! -f "${PROJECT_ROOT}/.env" ]; then
-    log_info "未检测到 .env 文件，正在从 .env.example 自动生成并配置小众端口..."
-    cp "${PROJECT_ROOT}/.env.example" "${PROJECT_ROOT}/.env"
-    sed -i "s/^TRAINPILOT_PORT=.*/TRAINPILOT_PORT=${DEFAULT_PORT}/" "${PROJECT_ROOT}/.env"
-    log_success ".env 文件已创建并设定 TRAINPILOT_PORT=${DEFAULT_PORT}。"
+    log_info "未检测到 .env 文件，正在为 Web 控制面自动初始化配置..."
+    if [ -f "${PROJECT_ROOT}/.env.web.example" ]; then
+        cp "${PROJECT_ROOT}/.env.web.example" "${PROJECT_ROOT}/.env"
+    else
+        cp "${PROJECT_ROOT}/.env.example" "${PROJECT_ROOT}/.env"
+    fi
+    sed -i "s/^TRAINPILOT_PORT=.*/TRAINPILOT_PORT=${DEFAULT_PORT}/" "${PROJECT_ROOT}/.env" 2>/dev/null || true
+    log_success "Web 控制面专属 .env 文件已创建并设定 TRAINPILOT_PORT=${DEFAULT_PORT}。"
 fi
 
 # 2. 获取最终端口与绑定地址

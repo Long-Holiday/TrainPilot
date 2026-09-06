@@ -18,56 +18,100 @@ import os
 import sys
 import time
 from typing import Any, Dict, Optional
-import requests
+try:
+    import requests
+except ImportError:
+    # 若系统环境中无 requests，尝试利用 uv 创建的 .venv/bin/python 重新执行
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    _candidates = [
+        os.path.join(os.getcwd(), ".venv", "bin", "python"),
+        os.path.abspath(os.path.join(_script_dir, "..", "..", "..", ".venv", "bin", "python")),
+        os.path.abspath(os.path.join(_script_dir, "..", "..", ".venv", "bin", "python")),
+    ]
+    for _cand in _candidates:
+        if os.path.isfile(_cand) and os.access(_cand, os.X_OK) and _cand != sys.executable:
+            os.execv(_cand, [_cand] + sys.argv)
+    raise
 
 
-def _sanitize_for_json(obj: Any) -> Any:
-    """Recursively convert float('nan') and float('inf') into JSON-compliant representations."""
-    if isinstance(obj, float):
-        if math.isnan(obj):
-            return "NaN"
-        if math.isinf(obj):
-            return "Infinity" if obj > 0 else "-Infinity"
+def _load_dotenv_if_present() -> None:
+    """自动加载当前目录或上级目录中的 .env 文件中的环境变量（不覆盖已有环境变量）。"""
+    dirs_to_check = [os.getcwd()]
+    try:
+        s_dir = os.path.dirname(os.path.abspath(__file__))
+        dirs_to_check.extend([
+            s_dir,
+            os.path.abspath(os.path.join(s_dir, "..")),
+            os.path.abspath(os.path.join(s_dir, "..", "..")),
+            os.path.abspath(os.path.join(s_dir, "..", "..", "..")),
+        ])
+    except Exception:
+        pass
+
+    seen = set()
+    for d in dirs_to_check:
+        if d in seen:
+            continue
+        seen.add(d)
+        env_path = os.path.join(d, ".env")
+        if os.path.isfile(env_path):
+            try:
+                with open(env_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        if line.startswith("export "):
+                            line = line[len("export "):].strip()
+                        if "=" in line:
+                            k, v = line.split("=", 1)
+                            k = k.strip()
+                            v = v.strip().strip("'\"")
+                            if k and k not in os.environ:
+                                os.environ[k] = v
+                break
+            except Exception:
+                pass
+
+
+_load_dotenv_if_present()
+
+
+try:
+    from trainpilot.agent.client import _sanitize_for_json
+    from trainpilot.common.gateway import resolve_gateway_url as get_default_gateway
+except ImportError:
+    def _sanitize_for_json(obj: Any) -> Any:
+        """Recursively convert float('nan') and float('inf') into JSON-compliant representations."""
+        if isinstance(obj, float):
+            if math.isnan(obj):
+                return "NaN"
+            if math.isinf(obj):
+                return "Infinity" if obj > 0 else "-Infinity"
+            return obj
+        if isinstance(obj, dict):
+            return {k: _sanitize_for_json(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [_sanitize_for_json(x) for x in obj]
         return obj
-    if isinstance(obj, dict):
-        return {k: _sanitize_for_json(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_sanitize_for_json(x) for x in obj]
-    return obj
 
-
-def get_default_gateway() -> str:
-    """GPU 侧网关地址: $TRAINPILOT_GATEWAY_URL > http://$TRAINPILOT_HOST:$TRAINPILOT_PORT > 默认.
-
-    与 src/trainpilot/common/gateway.py::resolve_gateway_url 保持一致
-    (本脚本需保持单文件零依赖可拷贝, 故保留精简副本, 修改时请同步)。
-    """
-    env_url = os.environ.get("TRAINPILOT_GATEWAY_URL", "").strip()
-    if env_url:
-        return env_url.rstrip("/")
-    raw_host = (os.environ.get("TRAINPILOT_HOST", "") or "").strip()
-    # 兼容用户误填 scheme/路径/端口
-    host = raw_host
-    for prefix in ("http://", "https://"):
-        if host.lower().startswith(prefix):
-            host = host[len(prefix):]
-            break
-    host = host.split("/")[0].strip()
-    if host.count(":") == 1 and not host.startswith("["):
-        maybe_host, maybe_port = host.rsplit(":", 1)
-        if maybe_port.isdigit() and maybe_host:
-            host = maybe_host
-    if host:
-        if host in ("0.0.0.0", "::"):
-            host = "127.0.0.1"
-        try:
-            port = int(str(os.environ.get("TRAINPILOT_PORT", "28780")).strip())
-            if not 1 <= port <= 65535:
-                port = 28780
-        except (ValueError, TypeError):
-            port = 28780
-        return f"http://{host}:{port}"
-    return "http://127.0.0.1:28780"
+    def get_default_gateway() -> str:
+        env_url = os.environ.get("TRAINPILOT_GATEWAY_URL", "").strip()
+        if env_url:
+            return env_url.rstrip("/")
+        raw_host = (os.environ.get("TRAINPILOT_HOST", "") or "").strip()
+        host = raw_host
+        for prefix in ("http://", "https://"):
+            if host.lower().startswith(prefix):
+                host = host[len(prefix):]
+                break
+        host = host.split("/")[0].strip()
+        if host:
+            if host in ("0.0.0.0", "::"):
+                host = "127.0.0.1"
+            port = os.environ.get("TRAINPILOT_PORT", "28780")
+            return f"http://{host}:{port}"
+        return "http://127.0.0.1:28780"
 
 
 def get_default_task_id() -> str:
@@ -155,14 +199,33 @@ def cmd_report_alert(args) -> int:
 
 
 def cmd_poll_instruction(args) -> int:
-    """Poll gateway mailbox for human decision."""
+    """Poll gateway mailbox for human decision (with server Long Polling support)."""
     url = f"{args.gateway}/api/tasks/{args.task_id}/instruction"
     start_time = time.time()
     pop_param = "true" if not args.no_pop else "false"
 
     while True:
+        elapsed = time.time() - start_time
+        if args.wait and args.wait_timeout and elapsed >= args.wait_timeout:
+            print(json.dumps({
+                "ready": False,
+                "error": f"Polling timed out after {args.wait_timeout}s",
+                "task_id": args.task_id,
+            }), file=sys.stderr)
+            return 2
+
+        params = {"pop": pop_param}
+        req_timeout = args.timeout
+
+        # Enable long polling on server if --wait is set
+        if args.wait:
+            remaining = (args.wait_timeout - elapsed) if args.wait_timeout else 20.0
+            lp_wait = max(1.0, min(20.0, remaining))
+            params["wait_timeout"] = str(round(lp_wait, 1))
+            req_timeout = lp_wait + args.timeout
+
         try:
-            resp = requests.get(url, params={"pop": pop_param}, timeout=args.timeout, headers=_auth_headers(args))
+            resp = requests.get(url, params=params, timeout=req_timeout, headers=_auth_headers(args))
             resp.raise_for_status()
             data = resp.json()
             if data.get("ready"):
@@ -171,20 +234,13 @@ def cmd_poll_instruction(args) -> int:
             if not args.wait:
                 print(json.dumps(data, indent=2, ensure_ascii=False))
                 return 0
+            # Next cycle immediately for long polling, or sleep if short-polling
+            time.sleep(0.1 if args.wait else args.interval)
         except Exception as e:
             if not args.wait:
                 print(json.dumps({"error": str(e), "task_id": args.task_id}), file=sys.stderr)
                 return 1
-
-        if args.wait_timeout and (time.time() - start_time) >= args.wait_timeout:
-            print(json.dumps({
-                "ready": False,
-                "error": f"Polling timed out after {args.wait_timeout}s",
-                "task_id": args.task_id,
-            }), file=sys.stderr)
-            return 2
-
-        time.sleep(args.interval)
+            time.sleep(args.interval)
 
 
 def cmd_ack_instruction(args) -> int:
@@ -196,6 +252,10 @@ def cmd_ack_instruction(args) -> int:
         "action": args.action,
         "status": args.status,
         "message": args.message,
+        "solution": getattr(args, "solution", None),
+        "step": getattr(args, "step", None),
+        "epoch": getattr(args, "epoch", None),
+        "metrics": _parse_json_dict(getattr(args, "metrics", None)),
     }
     try:
         resp = requests.post(url, json=payload, timeout=args.timeout, headers=_auth_headers(args))
@@ -311,6 +371,10 @@ def main():
     p_ack.add_argument("--instruction-id", default=None, help="Instruction ID")
     p_ack.add_argument("--status", choices=["success", "failed"], default="success", help="Execution result")
     p_ack.add_argument("--message", default=None, help="Optional details or error message")
+    p_ack.add_argument("--solution", default=None, help="Optional solution description for recovery")
+    p_ack.add_argument("--step", type=int, default=None, help="Current training step")
+    p_ack.add_argument("--epoch", type=int, default=None, help="Current training epoch")
+    p_ack.add_argument("--metrics", default=None, help="Current metrics JSON string")
     p_ack.set_defaults(func=cmd_ack_instruction)
 
     # send-heartbeat

@@ -52,20 +52,15 @@ def test_guardian_loss_anomaly_trigger(mock_client):
     # Verify custom handler was executed
     assert recovered is True
 
-    # Verify recovery notification card was dispatched by Agent
-    mock_client.notify_recovery.assert_called_once()
-    recovery_args = mock_client.notify_recovery.call_args[1]
-    assert "已跳过异常 Batch" in recovery_args["solution"]
-    assert recovery_args["step"] == 42
-    assert recovery_args["epoch"] == 1
-
-    # Verify ack sent
+    # Verify ack sent with solution and metadata (merged recovery notification)
     mock_client.ack_instruction.assert_called_once()
     ack_args = mock_client.ack_instruction.call_args[1]
     assert ack_args["action"] == "self_resolve"
     assert ack_args["instruction_id"] == "inst_xyz"
     assert ack_args["status"] == "success"
-    assert "Solution:" in ack_args["message"]
+    assert "已跳过异常 Batch" in ack_args["solution"]
+    assert ack_args["step"] == 42
+    assert ack_args["epoch"] == 1
 
 
 def test_guardian_custom_solution_summary(mock_client):
@@ -81,10 +76,10 @@ def test_guardian_custom_solution_summary(mock_client):
 
     guardian.check_and_handle_loss(loss_val=float("nan"), step=88, epoch=2)
 
-    mock_client.notify_recovery.assert_called_once()
-    rec_args = mock_client.notify_recovery.call_args[1]
-    assert rec_args["solution"] == "已动态降低学习率至 5e-5 并跳过脏样本。"
-    assert rec_args["step"] == 88
+    mock_client.ack_instruction.assert_called_once()
+    ack_args = mock_client.ack_instruction.call_args[1]
+    assert ack_args["solution"] == "已动态降低学习率至 5e-5 并跳过脏样本。"
+    assert ack_args["step"] == 88
 
 
 def test_guardian_stop_training_exception(mock_client):

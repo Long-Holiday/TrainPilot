@@ -10,6 +10,7 @@ from trainpilot.server.config import settings
 from trainpilot.server.mailbox import default_mailbox
 from trainpilot.server.routes.tasks import router as tasks_router
 from trainpilot.server.routes.webhook import router as webhook_router
+from trainpilot.server.watchdog import default_watchdog
 
 logging.basicConfig(
     level=logging.DEBUG if settings.debug else logging.INFO,
@@ -23,7 +24,9 @@ async def lifespan(app: FastAPI):
     """Application startup and shutdown hooks."""
     logger.info("Starting TrainPilot Control Plane Gateway...")
     logger.info("Feishu configured: %s (Receiver: %s)", settings.is_feishu_configured, settings.feishu_receiver_id)
+    default_watchdog.start()
     yield
+    default_watchdog.stop()
     logger.info("TrainPilot Control Plane Gateway stopped.")
 
 
@@ -66,8 +69,10 @@ def health_check():
         "version": __version__,
         "feishu_ready": settings.is_feishu_configured,
         "auth_enforced": settings.is_api_token_configured,
+        "sqlite_enabled": settings.enable_sqlite,
         "tasks_count": tasks_count,
         "stale_tasks_count": stale_count,
+        "watchdog": default_watchdog.get_stats(),
     }
 
 

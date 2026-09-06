@@ -95,11 +95,12 @@ def test_client_uses_host_fallback(monkeypatch):
     assert c.gateway_url == "http://35.202.16.245:28780"
 
 
-def test_start_script_skip_skills_deprecated_but_compatible():
+def test_start_script_clean_flags():
     res = subprocess.run(
-        [START_SH, "--skip-skills", "--help"],
+        [START_SH, "--help"],
         cwd=PROJECT_ROOT,
         capture_output=True,
         text=True,
     )
     assert res.returncode == 0
+    assert "TRAINPILOT_BIND_HOST" in res.stdout

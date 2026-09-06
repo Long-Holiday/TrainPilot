@@ -44,23 +44,32 @@ def build_alert_card(
     metrics: Optional[Dict[str, Any]] = None,
     extra: Optional[Dict[str, Any]] = None,
     timeout_seconds: int = 30,
+    agent_note: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Construct a high-priority interactive alert card for Feishu with HITL action buttons.
 
     仅保留两个决策按钮：停止训练 (stop_training) 与自行解决 (self_resolve)。
     超过 timeout_seconds 未点击则视为“自行解决”。
+    若提供 agent_note，将展示 🤖 Agent 异常研判 区块。
     """
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    resolved_note = _resolve_agent_note(agent_note, extra)
 
     markdown_lines = [
         f"**🚨 任务标识**: `{task_id}`",
         f"**⏱ 触发进度**: Epoch `{epoch if epoch is not None else '-'}` | Step `{step if step is not None else '-'}`",
         f"**📊 实时指标**: {_format_metrics(metrics)}",
         f"**⚠️ 异常详情**: \n> {message}",
+    ]
+    if resolved_note:
+        markdown_lines.extend([
+            f"**🤖 Agent 异常研判**: \n> {resolved_note}",
+        ])
+    markdown_lines.extend([
         "",
         "---",
         f"**请在下方选择（{timeout_seconds} 秒内未决策将自动视为“自行解决”，训练自行继续）：**",
-    ]
+    ])
 
     elements: List[Dict[str, Any]] = [
         {
@@ -305,4 +314,62 @@ def build_recovery_card(
         },
         "elements": elements,
     }
+
+
+def build_stale_alert_card(
+    task_id: str,
+    silent_seconds: float,
+    last_heartbeat_at: Optional[str] = None,
+    latest_step: Optional[int] = None,
+    latest_epoch: Optional[int] = None,
+    latest_message: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Construct a warning notification card dispatched by server Watchdog on heartbeat timeout."""
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    markdown_lines = [
+        f"**🚨 任务标识**: `{task_id}`",
+        f"**⏳ 失联时长**: 已超过 `{int(silent_seconds)}` 秒未收到心跳",
+        f"**⏱ 最后进度**: Epoch `{latest_epoch if latest_epoch is not None else '-'}` | Step `{latest_step if latest_step is not None else '-'}`",
+        f"**🕒 最后心跳**: `{last_heartbeat_at or '未知'}`",
+    ]
+    if latest_message:
+        markdown_lines.append(f"**📋 最后已知状态**: {latest_message}")
+
+    markdown_lines.extend([
+        "",
+        "> ⚠️ **服务端看门狗检测到该任务可能已崩溃、硬件断电、或陷入 NCCL 通信死锁**。请运维/算法工程师检查 GPU 服务器日志。",
+    ])
+
+    elements: List[Dict[str, Any]] = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": "\n".join(markdown_lines),
+            },
+        },
+        {
+            "tag": "note",
+            "elements": [
+                {
+                    "tag": "plain_text",
+                    "content": f"TrainPilot 看门狗失联预警 • 检测时间: {now_str}",
+                }
+            ],
+        },
+    ]
+
+    return {
+        "config": {"wide_screen_mode": True, "enable_forward": True},
+        "header": {
+            "template": "orange",
+            "title": {
+                "tag": "plain_text",
+                "content": f"⚠️【训练任务失联预警】任务: {task_id}",
+            },
+        },
+        "elements": elements,
+    }
+
 

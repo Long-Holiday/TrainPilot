@@ -60,6 +60,10 @@ class InstructionAckRequest(BaseModel):
     action: str = Field(..., description="The action executed")
     status: str = Field("success", description="Execution result: 'success' or 'failed'")
     message: Optional[str] = Field(None, description="Execution log or error message")
+    solution: Optional[str] = Field(None, description="Optional solution summary for recovery notification")
+    step: Optional[int] = Field(None, description="Training step counter")
+    epoch: Optional[int] = Field(None, description="Training epoch counter")
+    metrics: Optional[Dict[str, Any]] = Field(default=None, description="Metrics upon recovery")
     timestamp: str = Field(default_factory=utc_now_iso)
 
 

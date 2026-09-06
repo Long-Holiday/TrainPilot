@@ -2,6 +2,7 @@
 
 import json
 import logging
+from collections import deque
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone
 
@@ -11,6 +12,7 @@ from trainpilot.server.feishu.cards import (
     build_milestone_card,
     build_recovery_card,
     build_resolved_card,
+    build_stale_alert_card,
 )
 
 logger = logging.getLogger("trainpilot.feishu")
@@ -21,7 +23,8 @@ class FeishuCardClient:
 
     def __init__(self, server_settings: Optional[ServerSettings] = None):
         self.settings = server_settings or settings
-        self._sent_cards_history: List[Dict[str, Any]] = []
+        # Use bounded deque (maxlen=200) to prevent unbounded memory growth on long-running servers
+        self._sent_cards_history: deque = deque(maxlen=200)
         self._task_message_map: Dict[str, str] = {}  # task_id -> latest message_id
         self._lark_client = None
 
@@ -42,7 +45,7 @@ class FeishuCardClient:
     @property
     def sent_cards_history(self) -> List[Dict[str, Any]]:
         """Return history of sent cards (useful for test assertions and dev logs)."""
-        return self._sent_cards_history
+        return list(self._sent_cards_history)
 
     def send_alert(
         self,
@@ -53,6 +56,7 @@ class FeishuCardClient:
         metrics: Optional[Dict[str, Any]] = None,
         extra: Optional[Dict[str, Any]] = None,
         timeout_seconds: Optional[int] = None,
+        agent_note: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Send an interactive alert card to the configured receiver."""
         if timeout_seconds is None:
@@ -68,6 +72,7 @@ class FeishuCardClient:
             metrics=metrics,
             extra=extra,
             timeout_seconds=timeout_seconds,
+            agent_note=agent_note,
         )
         return self._send_card(
             task_id=task_id,
@@ -125,6 +130,30 @@ class FeishuCardClient:
             card_type="recovery",
         )
 
+    def send_stale_alert(
+        self,
+        task_id: str,
+        silent_seconds: float,
+        last_heartbeat_at: Optional[str] = None,
+        latest_step: Optional[int] = None,
+        latest_epoch: Optional[int] = None,
+        latest_message: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Send a stale/heartbeat timeout alert card to the configured receiver."""
+        card_content = build_stale_alert_card(
+            task_id=task_id,
+            silent_seconds=silent_seconds,
+            last_heartbeat_at=last_heartbeat_at,
+            latest_step=latest_step,
+            latest_epoch=latest_epoch,
+            latest_message=latest_message,
+        )
+        return self._send_card(
+            task_id=task_id,
+            card_dict=card_content,
+            card_type="stale_alert",
+        )
+
     def update_card_to_resolved(
         self,
         task_id: str,
@@ -142,7 +171,15 @@ class FeishuCardClient:
             resolved_at=resolved_at,
         )
 
-        message_id = self._task_message_map.get(task_id)
+        # Retrieve message_id from SQLite/mailbox first (survives restarts), fallback to local map
+        message_id = None
+        try:
+            from trainpilot.server.mailbox import default_mailbox
+            message_id = default_mailbox.get_task_feishu_message_id(task_id)
+        except Exception:
+            pass
+        if not message_id:
+            message_id = self._task_message_map.get(task_id)
 
         record = {
             "task_id": task_id,
@@ -198,6 +235,8 @@ class FeishuCardClient:
         }
         self._sent_cards_history.append(entry)
 
+        final_msg_id = simulated_msg_id
+
         if self._lark_client and self.settings.feishu_receiver_id:
             try:
                 import lark_oapi as lark
@@ -218,6 +257,7 @@ class FeishuCardClient:
                     if real_msg_id:
                         entry["message_id"] = real_msg_id
                         self._task_message_map[task_id] = real_msg_id
+                        final_msg_id = real_msg_id
                     logger.info("Dispatched Feishu %s card for task %s, msg_id=%s",
                                 card_type, task_id, real_msg_id)
                 else:
@@ -228,6 +268,14 @@ class FeishuCardClient:
         else:
             logger.info("[Mock Feishu] Dispatched %s card for task %s: %s",
                         card_type, task_id, json.dumps(card_dict, ensure_ascii=False))
+
+        # For interactive alert cards, persist message_id to SQLite so restart won't break PATCH
+        if card_type == "alert":
+            try:
+                from trainpilot.server.mailbox import default_mailbox
+                default_mailbox.set_task_feishu_message_id(task_id, final_msg_id)
+            except Exception:
+                pass
 
         return entry
 

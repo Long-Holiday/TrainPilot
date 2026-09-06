@@ -1,9 +1,10 @@
-"""Thread-safe in-memory task mailbox and state machine management."""
+"""Thread-safe task mailbox and state machine management with SQLite persistence and Long Polling."""
 
 import json
 import logging
 import threading
 import uuid
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -56,30 +57,60 @@ class TaskRecord:
     latest_epoch: Optional[int] = None
     latest_metrics: Optional[Dict[str, Any]] = None
     latest_message: Optional[str] = None
-    events: List[Dict[str, Any]] = field(default_factory=list)
     pending_instruction: Optional[InstructionResponse] = None
     latest_instruction: Optional[Dict[str, Any]] = None
     last_alert_fingerprint: Optional[str] = None
     last_alert_at: Optional[str] = None
+    events_count: int = 0
+    feishu_message_id: Optional[str] = None
 
 
 class TaskMailboxManager:
     """Manages multi-task state machines, events, and instruction mailboxes safely.
 
-    NOTE: in-memory only. Restart loses state and multi-worker deployments
-    diverge. For production use an external store; this class caps memory via
-    per-task ring buffer (`max_events_per_task`).
+    Features:
+    - SQLite-first persistence: events stored strictly on-disk, minimal memory consumption.
+    - Long Polling support (instant zero-delay wake up on human decisions).
+    - Thread-safe state transitions.
     """
 
-    def __init__(self, max_events_per_task: int = 500):
+    def __init__(self, max_events_per_task: int = 500, storage: Optional[Any] = None):
         self._lock = threading.Lock()
         self._tasks: Dict[str, TaskRecord] = {}
+        self._fallback_memory_events: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         self._max_events = max(1, int(max_events_per_task))
+        self._instruction_waiters: Dict[str, List[threading.Event]] = defaultdict(list)
+
+        # Initialize SQLite Storage if enabled
+        self._storage = storage
+        if self._storage is None:
+            try:
+                from trainpilot.server.config import settings as _s
+                if getattr(_s, "enable_sqlite", True):
+                    from trainpilot.server.storage import SQLiteStorage
+                    db_path = getattr(_s, "sqlite_path", "trainpilot.db")
+                    self._storage = SQLiteStorage(db_path)
+            except Exception as e:
+                logger.warning("Failed to initialize SQLiteStorage: %s", e)
+                self._storage = None
+
+        # Warm up tasks from SQLite storage if available
+        if self._storage:
+            try:
+                persisted_tasks = self._storage.load_all_tasks()
+                for tid, rec in persisted_tasks.items():
+                    rec.events_count = self._storage.get_events_count(tid)
+                    self._tasks[tid] = rec
+                logger.info("Restored %d tasks from SQLite storage", len(persisted_tasks))
+            except Exception as e:
+                logger.error("Failed to restore tasks from SQLite: %s", e)
 
     def _get_or_create(self, task_id: str) -> TaskRecord:
         """Internal helper without lock acquisition."""
         if task_id not in self._tasks:
             self._tasks[task_id] = TaskRecord(task_id=task_id)
+            if self._storage:
+                self._storage.save_task(self._tasks[task_id])
             logger.info("Initialized new task in mailbox: %s", task_id)
         return self._tasks[task_id]
 
@@ -106,10 +137,7 @@ class TaskMailboxManager:
                 "extra": req.extra,
                 "agent_note": req.agent_note,
             }
-            task.events.append(event_entry)
-            # Ring-buffer cap: drop oldest to bound memory on long trainings.
-            if len(task.events) > self._max_events:
-                task.events = task.events[-self._max_events:]
+            task.events_count += 1
 
             # State transitions
             if req.event_type == EventType.ALERT:
@@ -119,10 +147,8 @@ class TaskMailboxManager:
                 task.last_alert_at = task.updated_at
                 task.state = TaskState.WAITING
                 if is_retry:
-                    # Network retry of identical alert: preserve pending human decision.
                     logger.info("Task %s duplicate alert ignored (idempotent): %s", req.task_id, req.message)
                 else:
-                    # Fresh anomaly supersedes stale decision awaiting consumption.
                     task.pending_instruction = None
                     logger.warning("Task %s transitioned to WAITING due to alert: %s", req.task_id, req.message)
             elif req.event_type == EventType.MILESTONE:
@@ -133,6 +159,8 @@ class TaskMailboxManager:
                 if task.state not in TERMINAL_STATES:
                     task.state = TaskState.RUNNING
                 logger.info("Task %s self-recovered: %s", req.task_id, req.message)
+            elif req.event_type == EventType.HEARTBEAT:
+                task.last_heartbeat_at = req.timestamp or utc_now_iso()
             elif req.event_type == EventType.COMPLETED:
                 task.state = TaskState.COMPLETED
                 task.pending_instruction = None
@@ -141,6 +169,18 @@ class TaskMailboxManager:
                 task.state = TaskState.FAILED
                 task.pending_instruction = None
                 logger.error("Task %s marked as FAILED", req.task_id)
+
+            # Persist to SQLite (primary) or fallback to bounded memory (when storage disabled)
+            if self._storage:
+                try:
+                    self._storage.save_task(task)
+                    self._storage.append_event(req.task_id, event_entry, max_events=self._max_events)
+                except Exception as e:
+                    logger.error("Failed to persist event to SQLite: %s", e)
+            else:
+                self._fallback_memory_events[req.task_id].append(event_entry)
+                if len(self._fallback_memory_events[req.task_id]) > self._max_events:
+                    self._fallback_memory_events[req.task_id] = self._fallback_memory_events[req.task_id][-self._max_events:]
 
             return task.state
 
@@ -157,6 +197,18 @@ class TaskMailboxManager:
                 task.latest_epoch = req.epoch
             if req.metrics is not None:
                 task.latest_metrics = req.metrics
+
+            if self._storage:
+                try:
+                    self._storage.save_task(task, stale_alerted=False)
+                except Exception as e:
+                    logger.error("Failed to update heartbeat in SQLite: %s", e)
+
+    def _notify_instruction_waiters(self, task_id: str) -> None:
+        """Wake up any pending long-polling requests waiting for this task's decision."""
+        waiters = list(self._instruction_waiters.get(task_id, []))
+        for ev in waiters:
+            ev.set()
 
     def submit_decision(
         self,
@@ -186,8 +238,19 @@ class TaskMailboxManager:
             task.pending_instruction = instruction
             task.state = TaskState.RESOLVED
             task.updated_at = now_iso
+
+            if self._storage:
+                try:
+                    self._storage.save_task(task)
+                except Exception as e:
+                    logger.error("Failed to persist decision to SQLite: %s", e)
+
             logger.info("Decision submitted for task %s by %s: action=%s, id=%s",
                         task_id, operator, action, inst_id)
+
+            # Wake up long-polling agents immediately
+            self._notify_instruction_waiters(task_id)
+
             return instruction
 
     def try_auto_resolve(
@@ -198,12 +261,7 @@ class TaskMailboxManager:
         timeout_seconds: float = 30,
         payload: Optional[Dict[str, Any]] = None,
     ) -> Optional[InstructionResponse]:
-        """Conditionally auto-resolve an alert that received no human decision in time.
-
-        仅当任务仍处于 WAITING 且无待消费指令、且距离上次告警已超过
-        timeout_seconds 时才写入自动“自行解决”决策。人工已决策时为 no-op，
-        因此定时器与人工点击竞态时人工优先。
-        """
+        """Conditionally auto-resolve an alert that received no human decision in time."""
         with self._lock:
             task = self._tasks.get(task_id)
             if not task:
@@ -218,7 +276,6 @@ class TaskMailboxManager:
                 return None
             now = datetime.now(timezone.utc)
             if (now - base_dt).total_seconds() < timeout_seconds:
-                # 期间产生了更新鲜的告警，等待新一轮超时。
                 return None
             inst_id = f"inst_{uuid.uuid4().hex[:12]}"
             now_iso = utc_now_iso()
@@ -237,18 +294,32 @@ class TaskMailboxManager:
             task.pending_instruction = instruction
             task.state = TaskState.RESOLVED
             task.updated_at = now_iso
+
+            if self._storage:
+                try:
+                    self._storage.save_task(task)
+                except Exception as e:
+                    logger.error("Failed to persist auto-resolve to SQLite: %s", e)
+
             logger.warning("Task %s auto-resolved to '%s' after %.1fs without human decision",
                            task_id, action, timeout_seconds)
+
+            # Wake up long-polling agents immediately
+            self._notify_instruction_waiters(task_id)
+
             return instruction
 
-    def get_instruction(self, task_id: str, pop: bool = True) -> InstructionResponse:
-        """Poll instructions for a task.
+    def get_instruction(
+        self, task_id: str, pop: bool = True, wait_timeout: float = 0.0
+    ) -> InstructionResponse:
+        """Poll instructions for a task with Long Polling support.
 
-        If an instruction is pending and pop=True, moves state to RECOVERING and clears pending.
+        If wait_timeout > 0 and no instruction is ready, blocks up to wait_timeout
+        seconds waiting for submit_decision or try_auto_resolve, waking up immediately.
         """
+        # 1. Fast path: check if instruction is already ready
         with self._lock:
             task = self._get_or_create(task_id)
-
             if task.pending_instruction and task.pending_instruction.ready:
                 instruction = task.pending_instruction
                 if pop:
@@ -262,7 +333,59 @@ class TaskMailboxManager:
                         "decision_by": instruction.decision_by,
                         "popped_at": task.updated_at,
                     }
+                    if self._storage:
+                        try:
+                            self._storage.save_task(task)
+                        except Exception as e:
+                            logger.error("Failed to update pop state in SQLite: %s", e)
                     logger.info("Task %s polled instruction %s (%s), transitioned to RECOVERING",
+                                task_id, instruction.instruction_id, instruction.action)
+                return instruction
+
+            if wait_timeout <= 0.0:
+                return InstructionResponse(
+                    ready=False,
+                    status=task.state,
+                    instruction_id=None,
+                    action=None,
+                    payload=None,
+                    decision_by=None,
+                    decided_at=None,
+                )
+
+            # Register long-poll waiter
+            wait_event = threading.Event()
+            self._instruction_waiters[task_id].append(wait_event)
+
+        # 2. Long Polling wait (outside the global lock so others are not blocked)
+        wait_event.wait(timeout=wait_timeout)
+
+        # 3. Re-acquire lock and check again
+        with self._lock:
+            waiters = self._instruction_waiters.get(task_id, [])
+            if wait_event in waiters:
+                waiters.remove(wait_event)
+
+            task = self._get_or_create(task_id)
+            if task.pending_instruction and task.pending_instruction.ready:
+                instruction = task.pending_instruction
+                if pop:
+                    task.pending_instruction = None
+                    task.state = TaskState.RECOVERING
+                    task.updated_at = utc_now_iso()
+                    task.latest_instruction = {
+                        "instruction_id": instruction.instruction_id,
+                        "action": instruction.action,
+                        "payload": instruction.payload,
+                        "decision_by": instruction.decision_by,
+                        "popped_at": task.updated_at,
+                    }
+                    if self._storage:
+                        try:
+                            self._storage.save_task(task)
+                        except Exception as e:
+                            logger.error("Failed to update pop state in SQLite: %s", e)
+                    logger.info("Task %s (long-polled) obtained instruction %s (%s) -> RECOVERING",
                                 task_id, instruction.instruction_id, instruction.action)
                 return instruction
 
@@ -287,7 +410,6 @@ class TaskMailboxManager:
         """Confirm execution of a recovery instruction and transition state back to RUNNING."""
         with self._lock:
             task = self._get_or_create(task_id)
-            # Validate against last consumed instruction to catch stale/duplicate ACKs.
             if task.latest_instruction and instruction_id:
                 expected = task.latest_instruction.get("instruction_id")
                 if expected and instruction_id != expected:
@@ -314,7 +436,38 @@ class TaskMailboxManager:
                 logger.warning("Task %s failed executing instruction %s -> WAITING: %s",
                                task_id, instruction_id, message)
 
+            if self._storage:
+                try:
+                    self._storage.save_task(task)
+                except Exception as e:
+                    logger.error("Failed to persist ack to SQLite: %s", e)
+
             return task.state
+
+    def set_task_feishu_message_id(self, task_id: str, message_id: str) -> None:
+        """Store the Feishu message_id in memory and SQLite (survives restarts)."""
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task:
+                task.feishu_message_id = message_id
+            if self._storage:
+                try:
+                    self._storage.set_task_feishu_message_id(task_id, message_id)
+                except Exception as e:
+                    logger.error("Failed to set feishu_message_id in storage: %s", e)
+
+    def get_task_feishu_message_id(self, task_id: str) -> Optional[str]:
+        """Fetch the Feishu message_id for updating interactive cards."""
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task and task.feishu_message_id:
+                return task.feishu_message_id
+            if self._storage:
+                try:
+                    return self._storage.get_task_feishu_message_id(task_id)
+                except Exception as e:
+                    logger.error("Failed to get feishu_message_id from storage: %s", e)
+            return None
 
     def get_task(self, task_id: str) -> Optional[TaskSummary]:
         """Get summary of a specific task."""
@@ -327,17 +480,22 @@ class TaskMailboxManager:
     def get_events(self, task_id: str, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
         """Paginated chronological event history."""
         with self._lock:
-            task = self._tasks.get(task_id)
-            if not task:
-                return []
-            return list(task.events[offset:offset + limit])
+            if self._storage:
+                return self._storage.get_events(task_id, limit=limit, offset=offset)
+            events = self._fallback_memory_events.get(task_id, [])
+            return list(events[offset:offset + limit])
 
     def get_events_count(self, task_id: str) -> Optional[int]:
         with self._lock:
-            task = self._tasks.get(task_id)
-            if not task:
+            if self._storage:
+                cnt = self._storage.get_events_count(task_id)
+                # If 0 but task not exists, return None
+                if cnt == 0 and task_id not in self._tasks:
+                    return None
+                return cnt
+            if task_id not in self._tasks:
                 return None
-            return len(task.events)
+            return len(self._fallback_memory_events.get(task_id, []))
 
     def list_tasks(
         self,
@@ -377,7 +535,6 @@ class TaskMailboxManager:
             return False
         last = _parse_iso(task.last_heartbeat_at)
         if last is None:
-            # Never heartbeated: use updated_at; brand-new tasks (<timeout) are not stale.
             last = _parse_iso(task.updated_at)
         if last is None:
             return False
@@ -388,8 +545,21 @@ class TaskMailboxManager:
         """Reset all tasks (mainly for testing)."""
         with self._lock:
             self._tasks.clear()
+            self._fallback_memory_events.clear()
+            self._instruction_waiters.clear()
+            if self._storage:
+                try:
+                    self._storage.reset()
+                except Exception as e:
+                    logger.warning("Failed to reset SQLite storage: %s", e)
 
     def _build_summary(self, task: TaskRecord) -> TaskSummary:
+        count = task.events_count
+        if count == 0:
+            if self._storage:
+                count = self._storage.get_events_count(task.task_id)
+            else:
+                count = len(self._fallback_memory_events.get(task.task_id, []))
         return TaskSummary(
             task_id=task.task_id,
             state=task.state,
@@ -401,7 +571,7 @@ class TaskMailboxManager:
             latest_metrics=task.latest_metrics,
             latest_message=task.latest_message,
             pending_instruction=task.pending_instruction,
-            events_count=len(task.events),
+            events_count=count,
         )
 
 

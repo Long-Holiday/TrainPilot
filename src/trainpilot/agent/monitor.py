@@ -23,7 +23,7 @@ class TrainingGuardian:
         self,
         client: TrainPilotClient,
         poll_interval: float = 2.0,
-        poll_timeout: Optional[float] = 30.0,
+        poll_timeout: Optional[float] = 60.0,
         loss_spike_threshold: Optional[float] = 1e4,
         timeout_fallback_action: Optional[str] = "self_resolve",
     ):
@@ -229,26 +229,15 @@ class TrainingGuardian:
         try:
             result = handler(payload)
 
-            # 当执行 self_resolve 动作时，Agent 发送卡片告知解决方法，让用户知道问题已经解决任务恢复正常
             solution_summary = None
             if action == "self_resolve":
                 solution_summary = self._generate_solution_summary(result, payload, anomaly_context)
-                try:
-                    step = anomaly_context.get("step") if anomaly_context else None
-                    epoch = anomaly_context.get("epoch") if anomaly_context else None
-                    metrics = anomaly_context.get("metrics") if anomaly_context else None
-                    extra = {"anomaly_message": anomaly_context.get("message")} if anomaly_context else None
-                    self.client.notify_recovery(
-                        solution=solution_summary,
-                        step=step,
-                        epoch=epoch,
-                        metrics=metrics,
-                        extra=extra,
-                    )
-                except Exception as exc:
-                    logger.warning("Failed to dispatch recovery card: %s", exc)
 
-            # 4. Acknowledge success to reset state to RUNNING
+            step = anomaly_context.get("step") if anomaly_context else None
+            epoch = anomaly_context.get("epoch") if anomaly_context else None
+            metrics = anomaly_context.get("metrics") if anomaly_context else None
+
+            # 4. Acknowledge success to reset state to RUNNING (server dispatches Feishu card from ACK)
             ack_msg = (
                 f"Action '{action}' executed successfully. Solution: {solution_summary}"
                 if solution_summary
@@ -259,6 +248,10 @@ class TrainingGuardian:
                 instruction_id=instruction_id,
                 status="success",
                 message=ack_msg,
+                solution=solution_summary,
+                step=step,
+                epoch=epoch,
+                metrics=metrics,
             )
             return result
         except StopTrainingException:

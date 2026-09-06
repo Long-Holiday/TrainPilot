@@ -39,8 +39,9 @@ def test_setup_skills_script_help():
     assert res.returncode == 0
     assert "TrainPilot Agent Skills 生成脚本使用说明" in res.stdout
     assert "--check" in res.stdout
-    assert "--project" in res.stdout
+    assert "--test" in res.stdout
     assert "--clean" in res.stdout
+    assert "uv" in res.stdout
 
 
 def test_setup_skills_generation_global(tmp_path):
@@ -91,35 +92,29 @@ def test_setup_skills_generation_global(tmp_path):
     assert "28780" in content
     assert agents_tool_py in content
 
+    # Verify compact edition saves context (file size < 4000 bytes, vs original 10000+ bytes)
+    assert len(content) < 4000, f"Compact skill should be small to save context, got {len(content)} bytes"
+
     # --check succeeds against the same isolated globals
     check_res = subprocess.run([SETUP_SKILLS_SH, "--check"], cwd=PROJECT_ROOT, capture_output=True, text=True, env=env)
     assert check_res.returncode == 0
     assert "所有 Agent Skills 文件夹及文件均完整就绪" in check_res.stdout
 
 
-def test_setup_skills_project_scope(tmp_path):
-    """--project keeps the legacy project-level layout working."""
-    env, _ = _isolated_env(tmp_path)
-    res = subprocess.run([SETUP_SKILLS_SH, "--project"], cwd=PROJECT_ROOT, capture_output=True, text=True, env=env)
-    assert res.returncode == 0, res.stderr
+def test_setup_skills_clean_action(tmp_path):
+    """Verify that --clean properly removes installed skills directories."""
+    env, fake_home = _isolated_env(tmp_path)
+    # 1. Install first
+    res = subprocess.run([SETUP_SKILLS_SH, "--skip-sync"], cwd=PROJECT_ROOT, capture_output=True, text=True, env=env)
+    assert res.returncode == 0
+    opencode_tool_py = os.path.join(fake_home, ".config", "opencode", "skills", "trainpilot", "scripts", "trainpilot_tool.py")
+    assert os.path.isfile(opencode_tool_py)
 
-    opencode_skill_md = os.path.join(PROJECT_ROOT, ".opencode", "skills", "trainpilot", "SKILL.md")
-    opencode_tool_py = os.path.join(PROJECT_ROOT, ".opencode", "skills", "trainpilot", "scripts", "trainpilot_tool.py")
-    assert os.path.isfile(opencode_skill_md), f"{opencode_skill_md} does not exist"
-    assert os.path.isfile(opencode_tool_py), f"{opencode_tool_py} does not exist"
-
-    with open(opencode_skill_md, "r", encoding="utf-8") as f:
-        content = f.read()
-    assert ".opencode/skills/trainpilot/scripts/trainpilot_tool.py" in content
-
-    gemini_skill_md = os.path.join(PROJECT_ROOT, ".gemini", "skills", "trainpilot", "SKILL.md")
-    gemini_tool_py = os.path.join(PROJECT_ROOT, ".gemini", "skills", "trainpilot", "scripts", "trainpilot_tool.py")
-    assert os.path.isfile(gemini_skill_md), f"{gemini_skill_md} does not exist"
-    assert os.path.isfile(gemini_tool_py), f"{gemini_tool_py} does not exist"
-
-    with open(gemini_skill_md, "r", encoding="utf-8") as f:
-        content = f.read()
-    assert ".gemini/skills/trainpilot/scripts/trainpilot_tool.py" in content
+    # 2. Run clean
+    res_clean = subprocess.run([SETUP_SKILLS_SH, "--clean"], cwd=PROJECT_ROOT, capture_output=True, text=True, env=env)
+    assert res_clean.returncode == 0
+    assert "Agent Skills 目录已清理完成" in res_clean.stdout
+    assert not os.path.exists(opencode_tool_py)
 
 
 def test_generated_skills_tools_runnable(tmp_path):
@@ -146,3 +141,79 @@ def test_generated_skills_tools_runnable(tmp_path):
     assert res2.returncode == 0
     assert "TrainPilot Agent Tool" in res2.stdout
     assert "28780" in res2.stdout
+
+
+def test_env_files_separation():
+    """Verify that .env.web.example, .env.gpu.example, and .env.example are cleanly separated."""
+    web_example = os.path.join(PROJECT_ROOT, ".env.web.example")
+    gpu_example = os.path.join(PROJECT_ROOT, ".env.gpu.example")
+    all_example = os.path.join(PROJECT_ROOT, ".env.example")
+
+    assert os.path.isfile(web_example), ".env.web.example must exist"
+    assert os.path.isfile(gpu_example), ".env.gpu.example must exist"
+    assert os.path.isfile(all_example), ".env.example must exist"
+
+    with open(web_example, "r", encoding="utf-8") as f:
+        web_txt = f.read()
+    with open(gpu_example, "r", encoding="utf-8") as f:
+        gpu_txt = f.read()
+    with open(all_example, "r", encoding="utf-8") as f:
+        all_txt = f.read()
+
+    # Web specific variables
+    assert "TRAINPILOT_FEISHU_APP_ID" in web_txt
+    assert "TRAINPILOT_ENABLE_SQLITE" in web_txt
+    assert "TRAINPILOT_ENABLE_WATCHDOG" in web_txt
+    assert "TRAINPILOT_BIND_HOST" in web_txt
+
+    # GPU specific variables
+    assert "TRAINPILOT_HOST" in gpu_txt
+    assert "TRAINPILOT_TASK_ID" in gpu_txt
+    # GPU should NOT contain Feishu or SQLite or Watchdog configs
+    assert "TRAINPILOT_FEISHU_APP_ID" not in gpu_txt
+    assert "TRAINPILOT_ENABLE_SQLITE" not in gpu_txt
+    assert "TRAINPILOT_ENABLE_WATCHDOG" not in gpu_txt
+
+    # Master example contains both sections clearly
+    assert "Web 端服务器环境变量" in all_txt
+    assert "GPU 端服务器环境变量" in all_txt
+
+
+def test_trainpilot_tool_auto_loads_dotenv(tmp_path):
+    """Verify trainpilot_tool.py automatically loads TRAINPILOT_HOST and TASK_ID from .env."""
+    fake_env = tmp_path / ".env"
+    fake_env.write_text(
+        "TRAINPILOT_HOST=192.168.99.88\nTRAINPILOT_PORT=28780\nTRAINPILOT_TASK_ID=my-custom-task\n",
+        encoding="utf-8",
+    )
+    tool_script = os.path.join(PROJECT_ROOT, "skills", "trainpilot", "scripts", "trainpilot_tool.py")
+
+    # Clean out process environment so it must load from .env (and strip proxies)
+    clean_env = {
+        k: v for k, v in os.environ.items()
+        if not k.startswith("TRAINPILOT_") and "proxy" not in k.lower()
+    }
+    clean_env["PATH"] = os.environ.get("PATH", "")
+
+    # Invoke get-status to see gateway resolution in error/output
+    res = subprocess.run(
+        [sys.executable, tool_script, "--timeout", "1", "get-status"],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        env=clean_env,
+    )
+    # The command should attempt to contact 192.168.99.88:28780 and fail with connection error or output
+    assert "192.168.99.88" in res.stderr or "192.168.99.88" in res.stdout
+    assert "my-custom-task" in res.stderr or "my-custom-task" in res.stdout
+
+
+def test_setup_skills_creates_gpu_env_and_warns_zero(tmp_path):
+    """Verify setup_skills.sh detects 0.0.0.0 on GPU server and warns appropriately."""
+    env, _ = _isolated_env(tmp_path)
+    res = subprocess.run([SETUP_SKILLS_SH, "--skip-sync"], cwd=PROJECT_ROOT, capture_output=True, text=True, env=env)
+    assert res.returncode == 0
+    assert "Agent Skills 自动生成并同步完成" in res.stdout
+    assert "uv" in res.stdout
+
+

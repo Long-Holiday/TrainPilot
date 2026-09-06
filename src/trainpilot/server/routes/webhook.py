@@ -92,14 +92,16 @@ async def feishu_webhook(request: Request, background_tasks: BackgroundTasks) ->
         resolved_at=instruction.decided_at,
     )
 
-    # Also notify client tracker asynchronously (run in background task so response returns in <50ms)
-    background_tasks.add_task(
-        default_feishu_client.update_card_to_resolved,
-        task_id=task_id,
-        action=action,
-        operator=operator_name,
-        resolved_at=instruction.decided_at,
-    )
+    # Record resolution in card history for monitoring, returning card in response updates it in-place
+    record = {
+        "task_id": task_id,
+        "message_id": default_mailbox.get_task_feishu_message_id(task_id),
+        "action": action,
+        "operator": operator_name,
+        "card": resolved_card,
+        "timestamp": instruction.decided_at,
+    }
+    default_feishu_client._sent_cards_history.append({"type": "resolved_update", "data": record})
 
     # Feishu Interactive Card response format to update card on the fly:
     # Returning `card` updates the message in place.

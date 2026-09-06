@@ -91,6 +91,32 @@ class ServerSettings(BaseSettings):
         description="Max retained events per task (ring buffer, oldest dropped).",
     )
 
+    # SQLite Persistence
+    sqlite_path: str = Field(
+        default="trainpilot.db",
+        description="Path to SQLite database file for local persistence",
+    )
+    enable_sqlite: bool = Field(
+        default=True,
+        description="Enable SQLite persistence for tasks and events",
+    )
+
+    # Server-side Watchdog
+    enable_watchdog: bool = Field(
+        default=True,
+        description="Enable server-side heartbeat watchdog and periodic housekeeping",
+    )
+    watchdog_interval_seconds: int = Field(
+        default=15,
+        description="Watchdog background check interval in seconds",
+    )
+
+    # Long Polling
+    long_poll_timeout_seconds: float = Field(
+        default=20.0,
+        description="Default max timeout in seconds for server-side long polling",
+    )
+
     @property
     def effective_bind_host(self) -> str:
         """Web 侧实际用于 uvicorn --host 的绑定地址。"""

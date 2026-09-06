@@ -41,6 +41,7 @@ def _dispatch_feishu(req: EventNotifyRequest) -> None:
                 metrics=req.metrics,
                 extra=req.extra,
                 timeout_seconds=settings.alert_decision_timeout_seconds,
+                agent_note=req.agent_note,
             )
         elif req.event_type == EventType.MILESTONE:
             default_feishu_client.send_milestone(
@@ -132,18 +133,28 @@ def notify_event(req: EventNotifyRequest, background_tasks: BackgroundTasks) -> 
 def poll_instruction(
     task_id: str,
     pop: bool = Query(default=True, description="Whether to consume and transition state to RECOVERING"),
+    wait_timeout: float = Query(
+        default=0.0,
+        ge=0.0,
+        le=60.0,
+        description="Long-polling timeout in seconds. Blocks until decision is ready or timeout occurs. 0 for immediate response.",
+    ),
 ) -> InstructionResponse:
     """Poll for pending human instructions for a given task.
 
-    NOTE: pop=True consumes the instruction (RECOVERING). Use pop=false / status
-    endpoint for read-only inspection.
+    Supports Long Polling: specify wait_timeout > 0 to hold connection until
+    human decision arrives or timeout expires.
     """
-    instruction = default_mailbox.get_instruction(task_id, pop=pop)
+    instruction = default_mailbox.get_instruction(task_id, pop=pop, wait_timeout=wait_timeout)
     return instruction
 
 
 @router.post("/{task_id}/ack", status_code=status.HTTP_200_OK)
-def ack_instruction(task_id: str, req: InstructionAckRequest) -> dict:
+def ack_instruction(
+    task_id: str,
+    req: InstructionAckRequest,
+    background_tasks: BackgroundTasks,
+) -> dict:
     """Acknowledge execution of an instruction by the GPU Agent."""
     if req.task_id != task_id:
         raise HTTPException(
@@ -160,6 +171,19 @@ def ack_instruction(task_id: str, req: InstructionAckRequest) -> dict:
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+
+    # If successfully resolved, dispatch Feishu recovery card directly from ACK (eliminating duplicate notify)
+    if req.status.lower() == "success" and (req.action == "self_resolve" or req.solution):
+        solution_text = req.solution or req.message or "已完成现场自愈检查并恢复正常训练。"
+        background_tasks.add_task(
+            default_feishu_client.send_recovery,
+            task_id=task_id,
+            solution=solution_text,
+            step=req.step,
+            epoch=req.epoch,
+            metrics=req.metrics,
+        )
+
     return {
         "success": True,
         "task_id": task_id,
@@ -181,7 +205,9 @@ def heartbeat(task_id: str, req: HeartbeatRequest) -> dict:
 
 
 @router.post("/{task_id}/decision", response_model=InstructionResponse)
-def submit_decision(task_id: str, req: TaskDecisionRequest) -> InstructionResponse:
+def submit_decision(
+    task_id: str, req: TaskDecisionRequest, background_tasks: BackgroundTasks
+) -> InstructionResponse:
     """Directly submit a human decision for a task (via Web UI, CLI, or test automation)."""
     if req.task_id != task_id:
         raise HTTPException(
@@ -197,15 +223,14 @@ def submit_decision(task_id: str, req: TaskDecisionRequest) -> InstructionRespon
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
-    # Update Feishu card if active
-    try:
-        default_feishu_client.update_card_to_resolved(
-            task_id=task_id,
-            action=req.action,
-            operator=req.operator or "API Operator",
-        )
-    except Exception as exc:
-        logger.warning("Failed to patch card after direct decision: %s", exc)
+
+    # Update Feishu card asynchronously in background to avoid blocking API latency
+    background_tasks.add_task(
+        default_feishu_client.update_card_to_resolved,
+        task_id=task_id,
+        action=req.action,
+        operator=req.operator or "API Operator",
+    )
 
     return instruction
 

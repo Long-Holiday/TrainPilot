@@ -24,6 +24,12 @@ TrainPilot 专为大规模深度学习分布式训练（PyTorch / DeepSpeed / Sl
    - GPU 节点 Agent 保持**零外网凭据、零飞书依赖、仅用原生 `requests`**。
 5. **项目级别 AI Agent Skills（适配 `agy`、`opencode`）**：
    - 提炼出符合 Agent 技能规范的项目级 Skill（`skills/trainpilot`），供智能体自主上报指标、捕获异常、轮询信箱和执行自动化运维。
+6. **HTTP 长轮询（Long Polling）毫秒级唤醒**：
+   - 客户端拉取指令时支持服务端长轮询挂起（默认 20s），一旦人类工程师在飞书端或 API 提交决策，服务端即刻唤醒挂起连接并毫秒级下发，网络空轮询请求骤降 90% 以上。
+7. **SQLite 本地持久化与超长事件自动淘汰（Pruning）**：
+   - 引入零配置 SQLite WAL 模式本地持久化，控制面服务重启无缝恢复任务状态与信箱上下文；同时内置单任务事件上限与全局修剪机制，杜绝内存和磁盘无界膨胀。
+8. **服务端主动失联看门狗（Watchdog）**：
+   - 内置后台守护巡检线程，每隔指定周期（默认 15s）巡检长时间无心跳的僵死/失联训练任务，自动向飞书群推送失联预警卡片，并定期执行数据库健康维护。
 
 ---
 
@@ -100,31 +106,74 @@ uv sync
 uv sync --extra feishu
 ```
 
-### 2. Web 服务启动 (仅 Web 服务器) 与 Skills 安装 (仅 GPU 服务器)
-本项目已将 Web 服务与 Skills 解耦为两个独立脚本, 请按机器角色分别执行:
+### 2. 双端分离部署流程与脚本运行 (Web 端 vs GPU 端)
 
-```bash
-# Web 服务器 (控制面网关, 如公网云主机): 仅启动服务, 不创建任何 Skill
-./start.sh
-# 支持常用参数:
-./start.sh --daemon   # 后台守护进程启动
-./start.sh --status   # 查看运行状态与健康检查
-./start.sh --stop     # 停止后台服务
-./start.sh -p 29580   # 临时指定其它端口
-./start.sh --host 127.0.0.1  # 临时指定绑定地址 (默认 0.0.0.0)
+TrainPilot 采用双端解耦架构，两端均基于 `uv` 作为统一的高性能环境管理器：
 
-# GPU 服务器 (训练内网机): 按需手动安装 Agent Skill (默认全局安装, 任意目录均可发现)
-./setup_skills.sh
+```text
+TrainPilot/
+├── start.sh              # 【Web 端服务器入口】一键启动控制面网关 (uv 环境)
+├── setup_skills.sh       # 【GPU 端服务器入口】一键同步依赖并安装 Agent Skills (uv 环境)
+├── .env.example          # 【总环境变量模板】包含 Web/GPU 双端所有配置项，清晰按模块分离
+├── .env.web.example      # 【Web 端专属模板】轻量控制面配置，仅需在 Web 服务器部署
+├── .env.gpu.example      # 【GPU 端专属模板】训练节点与 Agent 客户端配置，仅需在 GPU 服务器部署
+├── pyproject.toml        # uv / PEP 621 统一依赖声明
+├── src/                  # 核心源码 (server / agent / common)
+└── skills/               # Agent Skills 标准定义与工具
 ```
 
-> 环境变量 `TRAINPILOT_HOST` 必须按机器分别配置 (不可共用同一 `.env`):
-> - Web 侧 (绑定地址): `TRAINPILOT_HOST=0.0.0.0`, `TRAINPILOT_PORT=28780`
->   (如需覆盖绑定可单独设置 `TRAINPILOT_BIND_HOST`, 优先级更高)
-> - GPU 侧 (网关地址): `TRAINPILOT_HOST=<Web公网IP/域名>` (如 `35.202.16.245`),
->   或直接设置完整 `TRAINPILOT_GATEWAY_URL=http://<Web公网IP>:28780` (优先级最高)。
-> 网关地址解析优先级: `$TRAINPILOT_GATEWAY_URL` > `http://$TRAINPILOT_HOST:$TRAINPILOT_PORT` > 默认 `http://127.0.0.1:28780`。
+#### 🖥️ A. Web 端服务器 (轻量公网云主机)
+> 职责：运行控制面网关，接收请求、维持状态机、对接飞书卡片 Webhook。
 
-### 3. 运行开发服务与测试
+```bash
+# 1. 初始化 Web 端专属配置文件
+cp .env.web.example .env
+# (按需填写飞书凭证、TRAINPILOT_API_TOKEN 等)
+
+# 2. 启动控制面网关 (自动利用 uv 同步环境并启动 uvicorn)
+./start.sh
+
+# 常用运维参数:
+./start.sh --daemon   # 后台守护进程启动
+./start.sh --status   # 查看运行状态与健康检查接口
+./start.sh --stop     # 停止后台服务
+./start.sh -p 28780   # 临时指定监听端口
+```
+
+#### ⚡ B. GPU 端服务器 (训练内网集群)
+> 职责：运行 PyTorch / DeepSpeed 训练任务与 AI Agent，零飞书凭证。
+
+```bash
+# 1. 初始化 GPU 端专属配置文件
+cp .env.gpu.example .env
+# 核心设置: 将 TRAINPILOT_HOST 设置为 Web 服务器的真实公网 IP 或域名 (千万不要写 0.0.0.0)
+# TRAINPILOT_HOST=35.202.16.245
+
+# 2. 运行环境准备并一键全局安装 Agent Skills (基于 uv)
+./setup_skills.sh
+
+# 常用参数:
+./setup_skills.sh --test     # 测试与 Web 控制面网关的网络连通性
+./setup_skills.sh --check    # 检查技能目录及文件完整性
+./setup_skills.sh --clean    # 清理已安装技能
+```
+
+---
+
+### 3. 环境变量分离设计 (.env)
+
+为了防止在两台机器上互相混淆配置，TrainPilot 在环境变量设计上严格分离：
+
+| 服务器角色 | 部署脚本 | 推荐模板 | 核心需要填写的环境变量 |
+| :--- | :--- | :--- | :--- |
+| **Web 端服务器**<br>(控制面公网网关) | `./start.sh` | `.env.web.example` | `TRAINPILOT_BIND_HOST=0.0.0.0`<br>`TRAINPILOT_PORT=28780`<br>`TRAINPILOT_FEISHU_APP_ID`<br>`TRAINPILOT_FEISHU_APP_SECRET`<br>`TRAINPILOT_FEISHU_RECEIVER_ID`<br>`TRAINPILOT_API_TOKEN`<br>`TRAINPILOT_ENABLE_SQLITE=true` |
+| **GPU 端服务器**<br>(训练节点 / Agent 客户端) | `./setup_skills.sh` | `.env.gpu.example` | `TRAINPILOT_HOST=<Web公网IP/域名>`<br>`TRAINPILOT_PORT=28780`<br>*(或 `TRAINPILOT_GATEWAY_URL`)*<br>`TRAINPILOT_TASK_ID`<br>`TRAINPILOT_API_TOKEN` |
+
+> ⚠️ **关键注意**：GPU 端是**客户端**，`TRAINPILOT_HOST` 必须配置为 Web 端公网 IP/域名，绝不能填写 `0.0.0.0`；Web 端默认监听 `0.0.0.0`。
+
+---
+
+### 4. 运行开发与测试
 ```bash
 # 启动控制面公网网关服务
 uv run python examples/run_server.py
