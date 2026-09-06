@@ -7,11 +7,16 @@ requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.115.0",
     "lark-oapi>=1.2.0",
+    "mcp>=2.1.1",
     "pydantic>=2.8.0",
     "pydantic-settings>=2.4.0",
     "requests>=2.31.0",
     "uvicorn[standard]>=0.30.0",
 ]
+
+[project.scripts]
+trainpilot-server = "trainpilot.server.main:start"
+trainpilot-cli = "trainpilot.agent.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.11.26,<0.12.0"]

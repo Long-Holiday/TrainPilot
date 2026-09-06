@@ -12,8 +12,8 @@
 - Web 侧示例: ``TRAINPILOT_HOST=0.0.0.0`` (或留空取默认)
 - GPU 侧示例: ``TRAINPILOT_HOST=35.202.16.245`` (Web 公网 IP/域名, 不要写 0.0.0.0)
 
-本模块被 server (bind 解析)、agent/client (网关 URL 解析)
-以及 skills/trainpilot/scripts/trainpilot_tool.py (CLI 工具) 共同复用。
+本模块被 server (bind 解析)、agent/client (网关与 MCP 客户端)
+以及 agent/cli.py (CLI 工具) 共同复用。
 """
 
 import os
@@ -99,7 +99,7 @@ def resolve_gateway_url(
     host: str | None = None,
     port: str | int | None = None,
 ) -> str:
-    """解析 GPU 侧网关访问地址 (Agent/Skill/Example 通用)。
+    """解析 GPU 侧网关与 MCP Server 访问地址 (Agent/Client/CLI 通用)。
 
     优先级:
     1. 显式传入的 ``gateway_url`` 参数 (非空即用)

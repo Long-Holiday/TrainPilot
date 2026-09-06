@@ -2,9 +2,10 @@
 
 import logging
 import math
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Union
 
 from trainpilot.agent.client import TrainPilotClient, _coerce_to_float
+from trainpilot.agent.mcp_client import TrainPilotMCPClient
 
 logger = logging.getLogger("trainpilot.agent.guardian")
 
@@ -21,7 +22,7 @@ class TrainingGuardian:
 
     def __init__(
         self,
-        client: TrainPilotClient,
+        client: Union[TrainPilotClient, TrainPilotMCPClient, Any],
         poll_interval: float = 2.0,
         poll_timeout: Optional[float] = None,
         loss_spike_threshold: Optional[float] = 1e4,

@@ -1,4 +1,4 @@
-"""FastAPI application entrypoint for TrainPilot Control Plane."""
+"""FastAPI application entrypoint for TrainPilot Control Plane and MCP Server."""
 
 import logging
 from contextlib import asynccontextmanager
@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from trainpilot import __version__
 from trainpilot.server.config import settings
 from trainpilot.server.mailbox import default_mailbox
+from trainpilot.server.mcp_server import mcp_server
 from trainpilot.server.routes.tasks import router as tasks_router
 from trainpilot.server.routes.webhook import router as webhook_router
 from trainpilot.server.watchdog import default_watchdog
@@ -22,24 +23,22 @@ logger = logging.getLogger("trainpilot.server")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup and shutdown hooks."""
-    logger.info("Starting TrainPilot Control Plane Gateway...")
+    logger.info("Starting TrainPilot Control Plane MCP Gateway...")
     logger.info("Feishu configured: %s (Receiver: %s)", settings.is_feishu_configured, settings.feishu_receiver_id)
     default_watchdog.start()
     yield
     default_watchdog.stop()
-    logger.info("TrainPilot Control Plane Gateway stopped.")
+    logger.info("TrainPilot Control Plane MCP Gateway stopped.")
 
 
 app = FastAPI(
-    title="TrainPilot Control Plane",
-    description="Centralized HITL Control Gateway for GPU Distributed Training with Feishu Card Integration",
+    title="TrainPilot Control Plane (MCP Server)",
+    description="Centralized Model Context Protocol (MCP) Server and HITL Control Gateway for GPU Distributed Training with Feishu Card Integration",
     version=__version__,
     lifespan=lifespan,
 )
 
 # Cross-Origin Resource Sharing
-# NOTE: single-worker in-memory mailbox; do not run with --workers>1 (see README).
-# '*' cannot be combined with credentials per Fetch spec, enforced in config.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.parsed_cors_origins,
@@ -48,7 +47,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount routes
+# Mount HTTP routes
 app.include_router(tasks_router)
 app.include_router(webhook_router)
 
@@ -66,6 +65,7 @@ def health_check():
     return {
         "status": "healthy",
         "service": "trainpilot-control-plane",
+        "mcp_enabled": True,
         "version": __version__,
         "feishu_ready": settings.is_feishu_configured,
         "auth_enforced": settings.is_api_token_configured,
@@ -81,7 +81,7 @@ def readiness_check():
     """Readiness probe: mailbox accessible."""
     try:
         default_mailbox.list_tasks(limit=1, offset=0)
-        return {"ready": True, "service": "trainpilot-control-plane", "version": __version__}
+        return {"ready": True, "service": "trainpilot-control-plane", "mcp_enabled": True, "version": __version__}
     except Exception as exc:
         logger.error("Readiness check failed: %s", exc)
         return {"ready": False, "error": str(exc)}
@@ -91,10 +91,15 @@ def readiness_check():
 def root():
     """Root info endpoint."""
     return {
-        "message": "Welcome to TrainPilot Control Plane Gateway",
+        "message": "Welcome to TrainPilot Control Plane MCP Server",
         "docs_url": "/docs",
         "health_url": "/health",
+        "mcp_sse_url": "/sse",
     }
+
+
+# Mount MCP Server SSE transport at root so /sse and /messages/ endpoints are exposed
+app.mount("/", mcp_server.sse_app(transport_security=None))
 
 
 def start():

@@ -1,22 +1,16 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# TrainPilot Control Plane Gateway Web 服务启动脚本 (仅 Web 侧使用)
+# TrainPilot Control Plane Gateway & MCP Server 启动脚本 (公网服务端)
 #
-# 职责 (v0.2+ 精简版):
-# 1. 纯 Web 服务启停: 前台 / 后台守护进程 / 状态检查 / 一键停止, 不再触碰 Skills
-# 2. 自动配置小众高位端口 (默认 28780), 进行智能端口防冲突检测与指引
+# 职责:
+# 1. 公网 MCP Server / Web 控制面服务启停: 前台 / 后台守护进程 / 状态检查 / 一键停止
+# 2. 自动配置端口 (默认 28780), 进行智能端口防冲突检测与指引
 # 3. Web 绑定地址解析: --host > $TRAINPILOT_BIND_HOST > $TRAINPILOT_HOST(仅本地值有效) > 0.0.0.0
 # 4. 自动同步/检查 Python 虚拟环境与依赖 (优先使用 .venv / uv)
 #
-# 环境变量 Web/GPU 区分约定:
-# - Web 服务器 (.env 在本机): TRAINPILOT_HOST=0.0.0.0 (绑定地址), TRAINPILOT_PORT=28780
-#   如需覆盖绑定可单独设置 TRAINPILOT_BIND_HOST (优先级更高)。
-# - GPU 服务器 (训练内网机): TRAINPILOT_HOST=<Web公网IP/域名> (如 35.202.16.245),
-#   或直接设置完整 TRAINPILOT_GATEWAY_URL=http://<Web公网IP>:28780。
-#   两台机器不可共用同一 .env, 必须分别配置 TRAINPILOT_HOST。
-#
-# Skills 说明: 本脚本不再创建/同步任何 Skill。
-# GPU 侧如需 Agent Skill, 请在 GPU 机器上手动执行一次 ./setup_skills.sh (独立脚本)。
+# 架构约定:
+# - 公网服务器运行本脚本启动 MCP Server + FastAPI 网关。
+# - 内网 GPU 训练节点作为客户端 (MCP Client) 通过网络主动调用，无需公网 IP。
 # ==============================================================================
 
 set -eo pipefail
@@ -170,22 +164,20 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --help|-h)
-            echo "TrainPilot Web 服务启动脚本使用说明 (仅 Web 侧, 不创建 Skills):"
-            echo "  ./start.sh                 前台交互式启动控制面网关 (默认)"
+            echo "TrainPilot 控制面网关 & MCP Server 启动脚本使用说明 (公网服务端):"
+            echo "  ./start.sh                 前台交互式启动 MCP 服务端网关 (默认)"
             echo "  ./start.sh --daemon, -d    后台守护进程模式启动"
             echo "  ./start.sh --stop          停止后台运行的网关进程"
             echo "  ./start.sh --status        查看网关运行状态及健康检查"
             echo "  ./start.sh -p <PORT>       临时指定监听端口 (默认: 28780)"
             echo "  ./start.sh --host <HOST>   临时指定绑定地址 (默认: 0.0.0.0)"
             echo ""
-            echo "环境变量 (Web 侧 .env):"
-            echo "  TRAINPILOT_BIND_HOST       Web 绑定地址 (最高优先级, 默认 0.0.0.0)"
-            echo "  TRAINPILOT_HOST            Web 绑定地址 (兼容旧配置, 仅本地值有效; GPU 侧含义不同)"
+            echo "环境变量 (公网服务端 .env):"
+            echo "  TRAINPILOT_BIND_HOST       服务端绑定地址 (最高优先级, 默认 0.0.0.0)"
             echo "  TRAINPILOT_PORT            监听端口 (默认 28780)"
             echo ""
-            echo "GPU 侧请勿使用本脚本, 只需配置:"
-            echo "  TRAINPILOT_HOST=<Web公网IP/域名> 或 TRAINPILOT_GATEWAY_URL=http://<Web公网IP>:28780"
-            echo "  并按需手动执行 ./setup_skills.sh 安装 Agent Skill (独立脚本)。"
+            echo "内网 GPU 节点作为客户端调用:"
+            echo "  配置 TRAINPILOT_GATEWAY_URL=http://<公网IP>:28780 或通过 MCP 协议连接 /sse"
             exit 0
             ;;
         *)
@@ -276,7 +268,7 @@ if [ "${RUN_MODE}" = "status" ]; then
 fi
 
 # ------------------------------------------------------------------------------
-# 步骤 1: 环境配置与端口冲突防范 (纯 Web, 不触碰 Skills)
+# 步骤 1: 环境配置与端口冲突防范 (MCP 服务端)
 # ------------------------------------------------------------------------------
 # 自动清理失效的旧 PID 文件
 if [ -f "${PID_FILE}" ]; then
@@ -289,13 +281,11 @@ fi
 # 1. 检查并初始化 .env
 if [ ! -f "${PROJECT_ROOT}/.env" ]; then
     log_info "未检测到 .env 文件，正在为 Web 控制面自动初始化配置..."
-    if [ -f "${PROJECT_ROOT}/.env.web.example" ]; then
-        cp "${PROJECT_ROOT}/.env.web.example" "${PROJECT_ROOT}/.env"
-    else
+    if [ -f "${PROJECT_ROOT}/.env.example" ]; then
         cp "${PROJECT_ROOT}/.env.example" "${PROJECT_ROOT}/.env"
     fi
     sed -i "s/^TRAINPILOT_PORT=.*/TRAINPILOT_PORT=${DEFAULT_PORT}/" "${PROJECT_ROOT}/.env" 2>/dev/null || true
-    log_success "Web 控制面专属 .env 文件已创建并设定 TRAINPILOT_PORT=${DEFAULT_PORT}。"
+    log_success "服务端 .env 文件已创建并设定 TRAINPILOT_PORT=${DEFAULT_PORT}。"
 fi
 
 # 2. 获取最终端口与绑定地址
@@ -369,14 +359,15 @@ cat << 'EOF'
 ======================================================================
 EOF
 echo -e "${NC}"
-echo -e "${BOLD}TrainPilot Control Plane Gateway 启动信息 (Web 侧, 不创建 Skills):${NC}"
+echo -e "${BOLD}TrainPilot Control Plane & MCP Server 启动信息 (公网服务端):${NC}"
 echo -e "  - ${CYAN}绑定地址:${NC}      ${GREEN}${TARGET_BIND_HOST}${NC}"
 echo -e "  - ${CYAN}监听端口:${NC}      ${GREEN}${TARGET_PORT}${NC} (已采用小众高位端口规避冲突)"
 echo -e "  - ${CYAN}网关服务地址:${NC}  http://${TARGET_BIND_HOST}:${TARGET_PORT}"
+echo -e "  - ${CYAN}MCP SSE 端点:${NC}  ${GREEN}http://${TARGET_DISPLAY_HOST}:${TARGET_PORT}/sse${NC}"
 echo -e "  - ${CYAN}API 交互文档:${NC}  http://${TARGET_DISPLAY_HOST}:${TARGET_PORT}/docs"
 echo -e "  - ${CYAN}健康检查接口:${NC}  http://${TARGET_DISPLAY_HOST}:${TARGET_PORT}/health"
 echo -e "  - ${CYAN}运行模式:${NC}      ${RUN_MODE}"
-echo -e "  - ${CYAN}Skills 说明:${NC}   本脚本不再同步 Skills；GPU 侧请手动执行 ./setup_skills.sh"
+echo -e "  - ${CYAN}客户端调用:${NC}    内网 GPU 节点通过 MCP SSE 或 HTTP 作为客户端主动连接"
 echo "----------------------------------------------------------------------"
 
 if [ "${RUN_MODE}" = "daemon" ]; then
