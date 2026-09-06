@@ -77,43 +77,6 @@ graph TB
     class Human_Agent_Loop clusterStyle;
 ```
 
-### HITL 闭环时序与双向 ACK
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor GPU as 🖥️ GPU 节点 (TrainingGuardian)
-    participant CP as ☁️ 公网控制面 (FastAPI / MCP)
-    actor Expert as 👨‍💻 人类专家 (飞书卡片)
-
-    Note over GPU,CP: 阶段一：异常捕获与现场就地冻结
-    GPU->>CP: report_alert (Loss NaN / OOM / 激增)
-    activate CP
-    CP-->>GPU: 确认入库，状态置为 WAITING (冻结现场)
-    deactivate CP
-    CP->>Expert: 异步推送【🔴 异常告警卡片】(带操作按钮 & Agent研判)
-
-    Note over GPU,CP: 阶段二：长轮询挂起与 HITL 决策
-    GPU->>CP: poll_instruction (长连接挂起等待)
-    alt 人工点击决策 (30s 窗口期内)
-        Expert->>CP: 点击【自行解决】(Webhook 回调)
-        CP->>Expert: 就地回写【🟦 决策已闭环】卡片 (按钮收起防呆)
-    else 超过 30s 无人工干预
-        CP->>CP: 单点超时自动决策兜底 (self_resolve)
-    end
-    CP-->>GPU: 毫秒级唤醒返回指令 (action: self_resolve)
-
-    Note over GPU,CP: 阶段三：执行自愈与双向 ACK 闭环
-    GPU->>GPU: 执行现场自愈恢复 (回退 Checkpoint / 学习率衰减)
-    GPU->>CP: ack_instruction (status: success, 携带 solution 方案)
-    CP->>CP: 校验指令有效性，状态原子流转回 RUNNING
-    CP->>Expert: 异步推送【🟢 自愈成功卡片】(通报解决方案及恢复状态)
-
-    Note over GPU,CP: 阶段四：巡航监控与智能点评
-    GPU->>CP: report_milestone (携带步数指标 & Agent 智能点评)
-    CP->>Expert: 异步推送【🟢 里程碑卡片】(展示 AI 收敛研判)
-```
-
 ### 任务生命周期状态机
 
 ```mermaid
@@ -340,28 +303,6 @@ TrainPilot 为深度学习生命周期的不同场景精心设计了视觉分明
 
 > [!NOTE]
 > 若尚未配置飞书应用，系统默认开启安全 Mock 模式：所有卡片均会在服务端控制台以格式化日志完整打印，绝不阻断训练流程。
-
----
-
-## 💾 存储架构与失联看门狗
-
-### SQLite WAL 存储与冷热内存驱逐
-
-TrainPilot 采用专门针对边缘与低配服务器调优的轻量存储架构：
-- **WAL 模式与事务隔离**：启动时执行 `PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;`，实现高并发读写互不阻塞。
-- **冷热数据分离与内存释放**：
-  - 内存仅常驻处于活跃状态（`RUNNING`、`WAITING`、`RECOVERING`）的任务；
-  - 一旦任务进入终态（`COMPLETED`、`FAILED`），自动从 RAM 中驱逐，释放 Python 进程内存；
-  - 历史任务查询直接走 SQLite 分页 (`LIMIT / OFFSET`)，保证无论累积多少万条记录，内存占用均恒定在 50MB 以内。
-- **环形事件修剪与磁盘压缩**：单任务事件超过 `TRAINPILOT_MAX_EVENTS_PER_TASK`（默认 500 条）时自动裁剪旧记录，看门狗后台定期执行 `PRAGMA incremental_vacuum` 与 `wal_checkpoint(TRUNCATE)`，避免磁盘膨胀。
-
-### 失联看门狗 (`Server Watchdog`)
-
-在多机多卡分布式训练中，节点由于硬件过热死机、CUDA 驱动异常崩溃或 NCCL 通信挂死并不少见：
-1. **静默周期扫描**：后台守护线程以可配置周期（默认 15s）巡检所有非终态任务。
-2. **阈值判定**：若当前时间与 `last_heartbeat_at` 差值超过 `TRAINPILOT_TASK_HEARTBEAT_TIMEOUT_SECONDS`（默认 300s），判定为失联。
-3. **状态持久化防抖**：在 SQLite 的 `stale_alerted` 字段中打标防抖，**同一失联周期只推送一次报警**，杜绝卡片刷屏；当节点恢复心跳后自动解禁防抖。
-4. **生命周期自动回收**：自动清理 7 天前已结束的历史终态任务。
 
 ---
 
