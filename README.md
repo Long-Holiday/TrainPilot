@@ -36,30 +36,46 @@ TrainPilot 彻底终结了内网 GPU 训练集群“无公网 IP”、“无法�
 ```mermaid
 flowchart LR
     %% 样式定义
-    classDef gpuCluster fill:#F8FAFC,stroke:#3B82F6,stroke-width:2px;
-    classDef serverStyle fill:#EFF6FF,stroke:#2563EB,stroke-width:2px;
-    classDef userStyle fill:#F0FDF4,stroke:#16A34A,stroke-width:2px;
+    classDef compStyle fill:#FFFFFF,stroke:#3B82F6,stroke-width:1.5px;
+    classDef serverCompStyle fill:#FFFFFF,stroke:#2563EB,stroke-width:1.5px;
+    classDef userCompStyle fill:#FFFFFF,stroke:#16A34A,stroke-width:1.5px;
+    classDef subStyle fill:#F8FAFC,stroke:#94A3B8,stroke-width:1.5px,stroke-dasharray: 4 4;
 
     subgraph GPU_Side["内网 GPU 训练集群【无公网 IP】"]
         direction TB
-        Agent["🤖 GPU 端 AI Agent / 训练进程<br/>Claude Code / OpenCode / 训练脚本<br/>• 执行 PyTorch / DeepSpeed 训练任务<br/>• 监测 Loss / 显存 / 异常指标"]:::gpuCluster
+        TrainingJob["🚀 PyTorch / DeepSpeed<br/>模型分布式训练主循环"]:::compStyle
+        Guardian["🛡️ TrainingGuardian<br/>浮点安全清洗与现场冻结"]:::compStyle
+        GPUAgent["🤖 GPU 端 AI Agent<br/>Claude Code / OpenCode / 脚本"]:::compStyle
+
+        TrainingJob -->|"监测 Loss 与显存"| Guardian
+        Guardian -->|"异常研判与状态同步"| GPUAgent
     end
 
     subgraph Control_Plane["公网云服务器【TrainPilot Control Plane】"]
         direction TB
-        MCPServer["🌐 公网 MCP Server 网关<br/>/mcp 端点 - Streamable HTTP<br/>• 接收 Agent 上报的状态与指标<br/>• 维护任务状态机与长轮询信箱<br/>• SQLite WAL 本地轻量持久化"]:::serverStyle
+        MCPServer["🌐 公网 MCP Server 网关<br/>Streamable HTTP /mcp 端点"]:::serverCompStyle
+        Mailbox["📬 任务信箱与调度器<br/>毫秒级长轮询挂起唤醒"]:::serverCompStyle
+        Storage[("💾 SQLite WAL 存储引擎<br/>冷热任务分离 / 极低内存")]:::serverCompStyle
+
+        MCPServer <-->|"状态同步与指令收发"| Mailbox
+        Mailbox <-->|"本地落盘与恢复"| Storage
     end
 
     subgraph User_Side["人类专家【Human-in-the-Loop】"]
         direction TB
-        FeishuUser["👨‍💻 算法工程师 / 运维用户<br/>移动端 / 桌面端 飞书客户端<br/>• 接收里程碑卡片与 Agent 智能点评<br/>• 接收异常告警并一键点击闭环决策"]:::userStyle
+        FeishuCard["💬 飞书交互卡片<br/>里程碑展示 / 告警推送"]:::userCompStyle
+        Human["👨‍💻 算法工程师 / 运维专家<br/>实时掌控进展 / 一键决策闭环"]:::userCompStyle
+
+        FeishuCard <-->|"卡片推送与交互"| Human
     end
 
-    %% 核心数据流
-    Agent ==> |"1. 执行任务，调用 MCP 工具上报状态与指标"| MCPServer
-    MCPServer ==> |"2. 异步下发飞书卡片通知用户"| FeishuUser
-    FeishuUser -.-> |"3. 点击决策 - Webhook 交互"| MCPServer
-    MCPServer -.-> |"4. 长轮询毫秒唤醒，Agent 执行自愈"| Agent
+    %% 跨端通信数据流
+    GPUAgent ==> |"1. 调用 MCP 工具主动上报状态"| MCPServer
+    MCPServer ==> |"2. 异步下发飞书卡片通知用户"| FeishuCard
+    Human -.-> |"3. 点击飞书按钮 - Webhook 决策"| MCPServer
+    Mailbox -.-> |"4. 长轮询毫秒返回指令 - Agent 自愈"| GPUAgent
+
+    class GPU_Side,Control_Plane,User_Side subStyle;
 ```
 
 ### 任务生命周期状态机
