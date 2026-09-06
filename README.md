@@ -8,14 +8,15 @@ TrainPilot 彻底解决了内网 GPU 集群无公网 IP 与无外网凭据的痛
 
 ## ✨ 核心特性
 
-- 🛡️ **异常安全上报**：内置浮点递归清洗机制，自动转换 `NaN` / `Inf`，杜绝 JSON 序列化崩溃，确保告警 100% 可靠送达。
-- 🔄 **双向 ACK 状态机**：严格的 `RUNNING -> WAITING -> RESOLVED -> RECOVERING -> RUNNING` 状态流转与原子消费，杜绝重复执行与重放。
-- ⚡ **长轮询毫秒唤醒**：客户端指令拉取支持服务端挂起（默认 20s），一旦人类决策提交毫秒级唤醒下发，空轮询减少 90% 以上。
-- 📱 **飞书卡片就地防呆**：Webhook 3 秒内即刻响应，点击后立即就地更新卡片为【已处理】状态并收起按钮，防止多人误触。
-- 💾 **轻量持久化与自修剪**：内置 SQLite WAL 模式，控制面重启无缝恢复；自动淘汰历史事件，防内存与磁盘无界膨胀。
+- 🛡️ **浮点安全与异常拦截**：内置浮点递归清洗机制，自动转换 `NaN` / `Inf`，杜绝 JSON 序列化崩溃；`TrainingGuardian` 自动拦截 Loss 突增或发散，就地冻结训练。
+- 🔄 **双向 ACK 与自愈闭环**：严格的 `RUNNING -> WAITING -> RESOLVED -> RECOVERING -> RUNNING` 状态机。客户端执行自愈后在 ACK 中携带 `solution` 方案，控制面原子流转回 `RUNNING` 并自动向飞书推送【自愈成功】卡片，全链路闭环透明。
+- ⏱️ **服务端单点超时决策**：告警触发后，支持飞书端人类专家即时介入；若超过预设时间（默认 30s）未决策或处于 Mock 模式，控制面统一派发自动决策，彻底消除客户端本地多端竞态抢跑。
+- ⚡ **长轮询毫秒唤醒**：客户端指令拉取支持服务端长连接挂起（默认 20s），一旦人类决策提交毫秒级唤醒下发，空轮询减少 90% 以上。
+- 📱 **飞书卡片就地防呆**：Webhook 3 秒内即刻响应，点击后立即就地更新卡片为【已处理】状态并收起按钮，防止多人误触与重放。
+- 💾 **纯净 SQLite WAL 持久化**：任务与事件统一由 SQLite (WAL 模式) 存储，支持重启无损恢复与自修剪淘汰，彻底剔除双轨内存字典，保证单机百万级事件的稳定性。
 - 🐕 **失联看门狗 (Watchdog)**：后台守护巡检线程定时检测长时间无心跳的僵死/失联任务，主动向飞书群推送失联预警。
-- 🤖 **Agent 原生友好**：内置标准项目级 Skill（[`skills/trainpilot`](skills/trainpilot/SKILL.md)），无缝接入 `agy`、`opencode`、`claude-code` 等。
-- 🪶 **GPU 节点零凭证依赖**：内网 GPU 节点仅依赖原生 `requests`，无需任何飞书凭据与公网 IP。
+- 🪶 **GPU 节点零外部依赖**：内网 GPU 节点仅依赖原生 `requests`，无需任何飞书 Token/Secret 凭据，更无需暴露公网 IP。
+- 🤖 **Agent 原生友好**：内置标准项目级 Skill（[`skills/trainpilot`](skills/trainpilot/SKILL.md)），无缝接入 `agy`、`opencode`、`claude-code` 等外部代码智能体。
 
 ---
 
@@ -27,11 +28,30 @@ TrainPilot 彻底解决了内网 GPU 集群无公网 IP 与无外网凭据的痛
         │                                  │                                  │
   PyTorch 训练 ─── 1. POST /notify ───────►│                                  │
   (Guardian 监控)   (上报异常或里程碑)       │─── 2. 发送富文本/交互卡片 ───────►│
-        │                                  │        (带停止训练/自行解决按钮)     │ (展示异常与按钮)
+        │                                  │        (带停止训练/自行解决按钮)     │ (展示异常与操作卡片)
         │                                  │◄── 3. 点击按钮 (Webhook) ─────────│ (人工点击决策)
-        │                                  │    (写入信箱并就地置为“已处理”)
-  GPU Agent ◄─── 4. Long-poll /instruction ┤
-   (执行恢复) ─── 5. POST /ack ────────────►│ (确认恢复，重回 RUNNING)
+        │                                  │    (或服务端 30s 自动决策闭环)    │ (卡片就地置为“已处理”)
+        │                                  │                                  │
+  GPU Agent ◄─── 4. Long-poll /instruction ┤                                  │
+   (执行恢复) ─── 5. POST /ack ────────────►│ (流转回 RUNNING)                 │
+        │          (携带 solution 方案)     │─── 6. 异步推送自愈卡片 ──────────►│ (展示已自愈与方案详情)
+```
+
+---
+
+## 📂 项目结构
+
+```text
+TrainPilot/
+├── src/trainpilot/
+│   ├── agent/               # GPU 边缘轻量端 (TrainPilotClient / TrainingGuardian)
+│   ├── server/              # 公网控制面网关 (FastAPI / Mailbox 状态机 / Feishu 适配器)
+│   │   ├── storage/         # SQLite WAL 单一持久化与自动修剪
+│   │   └── routes/          # 任务管理、信箱消费与 Webhook 路由
+│   └── common/              # 核心协议模型与网关通用配置
+├── skills/trainpilot/       # 标准 Agent Skill 规范与 CLI 工具脚本
+├── examples/                # 极简模拟与真实 GPU 训练范例
+└── tests/                   # 50+ 项单元、集成与端到端闭环模拟测试套件
 ```
 
 ---
@@ -63,33 +83,42 @@ TrainPilot 将公网控制面与内网训练节点物理解耦，两端独立配
 
 ### 1. Python 训练脚本接入 (零外部凭据)
 
-在 PyTorch 训练主循环中注入 `TrainingGuardian`，当检测到 `NaN` / `Inf` / 数值突增时自动冻结现场并等待飞书端处理：
+在 PyTorch 训练主循环中引入 `TrainingGuardian`，当检测到 `NaN` / `Inf` / 数值突发飞升时自动冻结现场并阻塞等待服务端指令：
 
 ```python
-from trainpilot.agent import TrainPilotClient, TrainingGuardian
+from trainpilot.agent import (
+    TrainPilotClient,
+    TrainingGuardian,
+    StopTrainingException,
+)
 
 client = TrainPilotClient(
     gateway_url="http://<Web公网IP>:28780",
     task_id="llama3-8b-lora",
 )
+
+# 初始化守卫（默认内置 stop_training 与 self_resolve 处理）
 guardian = TrainingGuardian(client=client)
 
-# 注册飞书卡片决策处理回调 (stop_training / self_resolve)
-guardian.register_action_handler("self_resolve", lambda payload: print("自行解决：继续训练..."))
+# 可选：自定义或覆盖特定决策的处理回调
+# guardian.register_action_handler("self_resolve", lambda payload: print("执行自定义自愈逻辑..."))
 
-for step, batch in enumerate(dataloader):
-    loss = model(batch)
-    
-    # 自动监测异常：冻结现场 -> 飞书告警 -> 轮询决策 -> 执行回调 -> ACK 恢复
-    guardian.check_and_handle_loss(loss.item(), step=step)
-    
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
+try:
+    for step, batch in enumerate(dataloader):
+        loss = model(batch)
+        
+        # 核心监控：检测异常 -> 冻结现场 -> 飞书告警 -> 长轮询决策 -> 执行恢复 -> 自动携带 solution 发送 ACK
+        guardian.check_and_handle_loss(loss.item(), step=step)
+        
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+except StopTrainingException:
+    print("收到飞书人工停止决策，安全保存 Checkpoint 并退出训练。")
 
-# 上报里程碑（支持外部 AI Agent 自主点评）
+# 阶段上报（支持外部 AI Agent 自主点评）
 client.notify_milestone(
-    message="Epoch 1 finished",
+    message="Epoch 1 completed",
     step=1000,
     epoch=1,
     metrics={"loss": 0.41, "val_loss": 0.43},
@@ -111,9 +140,9 @@ python3 skills/trainpilot/scripts/trainpilot_tool.py report-milestone \
 python3 skills/trainpilot/scripts/trainpilot_tool.py report-alert \
   --task-id "task-01" --step 1450 --message "Loss NaN" --metrics "loss=NaN"
 
-# 3. 阻塞长轮询信箱等待决策，执行后向网关发送 ACK 确认并恢复训练
+# 3. 阻塞长轮询信箱等待决策，执行后向网关发送 ACK 确认并触发自愈卡片
 python3 skills/trainpilot/scripts/trainpilot_tool.py poll-instruction --task-id "task-01" --wait
-python3 skills/trainpilot/scripts/trainpilot_tool.py ack-instruction --task-id "task-01" --action self_resolve --status success
+python3 skills/trainpilot/scripts/trainpilot_tool.py ack-instruction --task-id "task-01" --action self_resolve --status success --solution "回退并调整学习率"
 ```
 
 ---
@@ -123,11 +152,11 @@ python3 skills/trainpilot/scripts/trainpilot_tool.py ack-instruction --task-id "
 | 接口路径 | 方法 | 调用方 | 功能说明 |
 |---|---|---|---|
 | `/api/tasks/notify` | `POST` | GPU Agent | 上报事件（`alert` 告警、`milestone` 里程碑、`completed` 完成） |
-| `/api/tasks/{task_id}/instruction` | `GET` | GPU Agent | 长轮询信箱获取决策（`pop=true` 消费并进入 `RECOVERING`） |
-| `/api/tasks/{task_id}/ack` | `POST` | GPU Agent | 确认指令执行结果，任务状态恢复为 `RUNNING` |
+| `/api/tasks/{task_id}/instruction` | `GET` | GPU Agent | 阻塞长轮询信箱获取决策（`wait_timeout` 支持长挂起，`pop=true` 消费并进入 `RECOVERING`） |
+| `/api/tasks/{task_id}/ack` | `POST` | GPU Agent | 确认指令执行结果并提交 `solution`，流转回 `RUNNING` 并自动下发飞书自愈卡片 |
 | `/api/tasks/{task_id}/heartbeat` | `POST` | GPU Agent | 运行时心跳保活与资源利用率上报 |
 | `/api/tasks/{task_id}/status` | `GET` | GPU / 运维 | 查询任务当前状态详情与信箱概况 |
-| `/api/tasks/{task_id}/decision` | `POST` | 控制台/测试 | 直接注入人工决策（支持本地开发或 Web 控制台） |
+| `/api/tasks/{task_id}/decision` | `POST` | 控制台/测试 | 直接注入人工决策（支持 Web 控制台或测试模拟） |
 | `/webhook/feishu` | `POST` | 飞书客户端 | 飞书 URL 握手校验与卡片交互点击回调（`card.action.trigger`） |
 
 ---
@@ -135,9 +164,9 @@ python3 skills/trainpilot/scripts/trainpilot_tool.py ack-instruction --task-id "
 ## 🧪 自动化测试
 
 ```bash
-# 运行全量单元与集成测试套件
+# 运行全量单元与集成测试套件 (53 项全部通过)
 uv run pytest -v
 
-# 运行完整的“遇异常 -> 冻结 -> 飞书决策 -> 恢复”端到端闭环模拟
+# 运行完整的“遇异常 -> 冻结 -> 飞书决策 -> 自愈 ACK”端到端闭环模拟
 uv run pytest tests/test_e2e_simulation.py -v -s
 ```
