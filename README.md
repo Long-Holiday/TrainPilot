@@ -34,16 +34,16 @@ TrainPilot 彻底终结了内网 GPU 训练集群“无公网 IP”、“无法�
 ### 网络拓扑架构
 
 ```mermaid
-flowchart LR
+flowchart TB
     %% 样式定义
     classDef compStyle fill:#FFFFFF,stroke:#3B82F6,stroke-width:1.5px;
     classDef serverCompStyle fill:#FFFFFF,stroke:#2563EB,stroke-width:1.5px;
     classDef userCompStyle fill:#FFFFFF,stroke:#16A34A,stroke-width:1.5px;
     classDef subStyle fill:#F8FAFC,stroke:#94A3B8,stroke-width:1.5px,stroke-dasharray: 4 4;
 
-    subgraph GPU_Side["内网 GPU 训练集群【无公网 IP】"]
-        direction TB
-        TrainingJob["🚀 PyTorch / DeepSpeed<br/>模型分布式训练主循环"]:::compStyle
+    subgraph GPU_Side["🏢 内网 GPU 训练集群【无公网 IP / 纯客户端】"]
+        direction LR
+        TrainingJob["🚀 PyTorch / DeepSpeed<br/>分布式模型训练主循环"]:::compStyle
         Guardian["🛡️ TrainingGuardian<br/>浮点安全清洗与现场冻结"]:::compStyle
         GPUAgent["🤖 GPU 端 AI Agent<br/>Claude Code / OpenCode / 脚本"]:::compStyle
 
@@ -51,8 +51,8 @@ flowchart LR
         Guardian -->|"异常研判与状态同步"| GPUAgent
     end
 
-    subgraph Control_Plane["公网云服务器【TrainPilot Control Plane】"]
-        direction TB
+    subgraph Control_Plane["☁️ 公网云服务器【TrainPilot Control Plane 控制面】"]
+        direction LR
         MCPServer["🌐 公网 MCP Server 网关<br/>Streamable HTTP /mcp 端点"]:::serverCompStyle
         Mailbox["📬 任务信箱与调度器<br/>毫秒级长轮询挂起唤醒"]:::serverCompStyle
         Storage[("💾 SQLite WAL 存储引擎<br/>冷热任务分离 / 极低内存")]:::serverCompStyle
@@ -61,16 +61,16 @@ flowchart LR
         Mailbox <-->|"本地落盘与恢复"| Storage
     end
 
-    subgraph User_Side["人类专家【Human-in-the-Loop】"]
-        direction TB
-        FeishuCard["💬 飞书交互卡片<br/>里程碑展示 / 告警推送"]:::userCompStyle
+    subgraph User_Side["📱 人类专家与协作端【Human-in-the-Loop】"]
+        direction LR
+        FeishuCard["💬 飞书交互卡片<br/>里程碑展示 / 异常告警推送"]:::userCompStyle
         Human["👨‍💻 算法工程师 / 运维专家<br/>实时掌控进展 / 一键决策闭环"]:::userCompStyle
 
         FeishuCard <-->|"卡片推送与交互"| Human
     end
 
-    %% 跨端通信数据流
-    GPUAgent ==> |"1. 调用 MCP 工具主动上报状态"| MCPServer
+    %% 纵向跨端数据流与控制流
+    GPUAgent ==> |"1. 调用 MCP 工具主动上报状态与指标"| MCPServer
     MCPServer ==> |"2. 异步下发飞书卡片通知用户"| FeishuCard
     Human -.-> |"3. 点击飞书按钮 - Webhook 决策"| MCPServer
     Mailbox -.-> |"4. 长轮询毫秒返回指令 - Agent 自愈"| GPUAgent
