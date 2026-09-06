@@ -5,7 +5,6 @@
   <img src="https://img.shields.io/badge/Protocol-Model%20Context%20Protocol%20(MCP)-orange" alt="MCP Protocol" />
   <img src="https://img.shields.io/badge/Framework-FastAPI%20%7C%20PyTorch-green" alt="Framework" />
   <img src="https://img.shields.io/badge/Storage-SQLite%20WAL%20(Zero--RAM)-brightgreen" alt="Storage" />
-  <img src="https://img.shields.io/badge/Tests-56%20Passed-success" alt="Tests" />
   <img src="https://img.shields.io/badge/License-MIT-purple" alt="License" />
 </p>
 
@@ -15,55 +14,16 @@ TrainPilot 彻底终结了内网 GPU 训练集群“无公网 IP”、“无法�
 
 ---
 
-## 📑 目录
-
-- [✨ 核心特性](#-核心特性)
-- [🏛 系统架构与交互原理](#-系统架构与交互原理)
-  - [网络拓扑架构](#网络拓扑架构)
-  - [HITL 闭环时序与双向 ACK](#hitl-闭环时序与双向-ack)
-  - [任务生命周期状态机](#任务生命周期状态机)
-- [📂 项目结构](#-项目结构)
-- [🚀 快速上手](#-快速上手)
-  - [1. 安装与依赖同步](#1-安装与依赖同步)
-  - [2. 服务端一键启停 (start.sh)](#2-服务端一键启停-startsh)
-  - [3. 极速端到端模拟演练](#3-极速端到端模拟演练)
-- [💻 客户端接入指南](#-客户端接入指南)
-  - [方式一：PyTorch 训练主循环轻量守卫 (TrainingGuardian)](#方式一pytorch-训练主循环轻量守卫-trainingguardian)
-  - [方式二：CUDA OOM 显存感知与自定义自愈 Handler](#方式二cuda-oom-显存感知与自定义自愈-handler)
-  - [方式三：原生 MCP 客户端 (TrainPilotMCPClient)](#方式三原生-mcp-客户端-trainpilotmcpclient)
-  - [方式四：GPU 节点命令行工具 (trainpilot-cli)](#方式四gpu-节点命令行工具-trainpilot-cli)
-  - [方式五：外部 AI 智能体接入 (Claude Code / Cursor / OpenCode 等)](#方式五外部-ai-智能体接入-claude-code--cursor--opencode-等)
-- [📡 MCP 核心接口契约](#-mcp-核心接口契约)
-  - [MCP Tools (8 大标准工具)](#mcp-tools-8-大标准工具)
-  - [MCP Resources (只读资源)](#mcp-resources-只读资源)
-- [📱 飞书交互卡片与 HITL 闭环体系](#-飞书交互卡片与-hitl-闭环体系)
-  - [5 类卡片矩阵](#5-类卡片矩阵)
-  - [卡片防呆与幂等保障](#卡片防呆与幂等保障)
-  - [飞书自建应用配置流程](#飞书自建应用配置流程)
-- [💾 存储架构与失联看门狗](#-存储架构与失联看门狗)
-  - [SQLite WAL 存储与冷热内存驱逐](#sqlite-wal-存储与冷热内存驱逐)
-  - [失联看门狗 (Server Watchdog)](#失联看门狗-server-watchdog)
-- [⚙️ 部署与环境配置速查](#️-部署与环境配置速查)
-  - [启动脚本高级参数](#启动脚本高级参数)
-  - [Docker 容器化部署](#docker-容器化部署)
-  - [环境变量完全参考表](#环境变量完全参考表)
-- [🧪 自动化测试](#-自动化测试)
-- [📄 开源协议](#-开源协议)
-
----
-
 ## ✨ 核心特性
 
-- 🌐 **MCP 原生标准协议驱动**：基于 Model Context Protocol (MCP) 2.x 最新 **Streamable HTTP** 规范暴露 `/mcp` 端点，任何兼容 MCP 的外部智能体（Claude Code、Cursor、Gemini CLI 等）开箱即用，无需在本地编写或安装定制 Skills 脚本。
-- 🪶 **内网 GPU 节点纯客户端**：内网 GPU 集群（NAT/防火墙后）不需要公网 IP，不开放任何入站端口，无需存储飞书 App Secret 等敏感凭据，只需以客户端身份主动连接公网控制面。
-- 🛡️ **浮点安全与数值免疫**：内置递归浮点清洗模块，自动处理 PyTorch Tensor、NumPy Scalar/Array、Python Decimal 以及 `NaN`、`Inf`、`-Inf`，保证 JSON 序列化 100% 安全，杜绝因数值发散导致的进程崩溃。
-- 🔄 **严格双向 ACK 与自愈闭环**：基于 `RUNNING -> WAITING -> RESOLVED -> RECOVERING -> RUNNING` 的可靠状态机，客户端完成自愈后在 ACK 中上报 `solution` 方案，控制面原子流转状态并自动下发飞书【自愈恢复】卡片。
-- ⚡ **服务端长轮询毫秒唤醒**：客户端拉取指令支持服务端长连接挂起（默认 20s），一旦人类决策提交或超时决策触发，毫秒级唤醒下发，空轮询网络开销直降 90% 以上。
-- ⏱️ **单点超时自动兜底**：异常告警触发后，支持飞书端专家人工干预；若在设定窗口（默认 30s）内无人响应，控制面统一判定自动自愈（如 `self_resolve`），消除分布式抢跑与死锁。
-- 📱 **飞书卡片防呆防误触**：Webhook 3 秒内即刻响应，用户点击后立即就地回写卡片为【已处理】状态并收起按钮，阻断团队多人并发误触与请求重放。
-- 🤖 **Agent 智能点评原生支持**：上报里程碑或告警时，支持附带 AI 智能体针对收敛趋势、调优方向的 `agent_note` 自主研判分析，卡片独立分区呈现。
-- 💾 **SQLite WAL 持久化与极低内存**：零外部数据库依赖，全事件落盘存储；支持冷热数据分离，终态任务自动从 RAM 驱逐，具备磁盘增量压缩与历史自动修剪，小规格云服务器（如 1C1G/1C2G）即可平稳运行。
-- 🐕 **失联看门狗 (Watchdog)**：服务端常驻守护巡检线程，实时扫描心跳中断的任务（防范节点硬件断电、Slurm 杀进程、NCCL 通信死锁），主动向飞书推送失联预警卡片并自动防抖。
+- 🌐 **公网 MCP 原生驱动**：暴露标准 Streamable HTTP `/mcp` 端点，外部智能体（Claude Code、Cursor、OpenCode、Gemini CLI 等）开箱即用。
+- 🪶 **内网 GPU 纯客户端**：无公网 IP、无入站端口、零外网凭据存储，训练节点作为纯客户端主动出站连接控制面。
+- 🛡️ **浮点安全与就地冻结**：递归清洗 `NaN` / `Inf` 与 PyTorch Tensor / NumPy 标量，杜绝 JSON 崩溃；异常时就地冻结训练现场。
+- 🔄 **双向 ACK 与自愈闭环**：严格的生命周期状态机，客户端完成自愈后携带 `solution` 上报 ACK，控制面原子流转回 `RUNNING` 并通知飞书。
+- ⚡ **毫秒唤醒与单点超时**：支持长轮询挂起（空轮询减少 90%+）；告警超过 30s 无人干预由服务端统一自动决策兜底，消除分布式死锁。
+- 📱 **飞书卡片就地防呆**：Webhook 秒级响应，点击后即刻将卡片更新为【已处理】状态并收起操作按钮，防范多人并发误触与重放。
+- 🤖 **Agent 智能点评原生支持**：支持 AI 智能体在里程碑或异常上报时附带对收敛趋势、调参建议的 `agent_note` 自主研判分析。
+- 💾 **轻量持久化与失联看门狗**：SQLite WAL 冷热内存分离（运行内存 <50MB）；Watchdog 后台线程实时侦测进程挂死与 NCCL 死锁。
 
 ---
 
@@ -71,69 +31,87 @@ TrainPilot 彻底终结了内网 GPU 训练集群“无公网 IP”、“无法�
 
 ### 网络拓扑架构
 
-```text
-┌────────────────────────────────────────────────────────┐
-│               内网 GPU 训练集群 (私网 / NAT)             │
-│                                                        │
-│  ┌───────────────────────┐   ┌──────────────────────┐  │
-│  │   GPU 节点 01 (PyTorch) │   │  GPU 节点 02 (DeepSpeed)│  │
-│  │  ┌──────────────────┐ │   │  ┌─────────────────┐ │  │
-│  │  │ TrainingGuardian │ │   │  │  trainpilot-cli │ │  │
-│  │  └────────┬─────────┘ │   │  └────────┬────────┘ │  │
-│  │           │           │   │           │          │  │
-│  │  ┌────────▼─────────┐ │   │  ┌────────▼────────┐ │  │
-│  │  │ TrainPilotClient │ │   │  │ TrainPilotMCP...│ │  │
-│  │  └────────┬─────────┘ │   │  └────────┬────────┘ │  │
-└──────────────┼───────────────────────────┼─────────────┘
-               │  出站主动连接 (HTTP / /mcp)   │  (无须公网 IP)
-               ▼                           ▼
-┌────────────────────────────────────────────────────────┐
-│             公网云服务器 (Control Plane Gateway)        │
-│                                                        │
-│  ┌──────────────────────────────────────────────────┐  │
-│  │ FastAPI + MCP Server (/mcp Streamable HTTP)      │  │
-│  ├──────────────────────────────────────────────────┤  │
-│  │ • Mailbox 任务信箱与长轮询挂起调度器              │  │
-│  │ • 任务生命周期状态机 (RUNNING/WAITING/RESOLVED...) │  │
-│  │ • 浮点安全转换器 (_sanitize_for_json)             │  │
-│  │ • SQLite WAL 存储引擎 (本地持久化与冷热驱逐)       │  │
-│  │ • Watchdog 任务失联守护看门狗                     │  │
-│  └───────────────────────┬──────────────────────────┘  │
-└──────────────────────────┼─────────────────────────────┘
-                           │ 飞书 Webhook 交互
-                           ▼
-┌────────────────────────────────────────────────────────┐
-│               移动端 / 桌面端 飞书客户端                 │
-│                                                        │
-│   👨‍💻 人类专家 (HITL) ── 收到异常卡片 ──> 一键决策处置    │
-│   🤖 算法团队 ─────────> 查阅 Agent 智能点评与自愈报告    │
-└────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    %% 样式定义
+    classDef clusterStyle fill:#F8FAFC,stroke:#94A3B8,stroke-width:2px,stroke-dasharray: 4 4;
+    classDef nodeStyle fill:#FFFFFF,stroke:#3B82F6,stroke-width:2px,rx:6px,ry:6px;
+    classDef serverStyle fill:#EFF6FF,stroke:#2563EB,stroke-width:2px,rx:6px,ry:6px;
+    classDef userStyle fill:#F0FDF4,stroke:#16A34A,stroke-width:2px,rx:6px,ry:6px;
+
+    subgraph GPU_Cluster["🏢 内网 GPU 训练集群 (私网 / NAT / 无公网 IP)"]
+        direction LR
+        GPU1["🖥️ GPU 训练节点 01<br/><b>TrainingGuardian 守卫</b>"]:::nodeStyle
+        GPU2["🖥️ GPU 训练节点 02<br/><b>PyTorch / DeepSpeed</b>"]:::nodeStyle
+        GPUN["🖥️ GPU 训练节点 N<br/><b>trainpilot-cli / SDK</b>"]:::nodeStyle
+    end
+
+    subgraph Control_Plane["☁️ 公网云服务器 (Control Plane Gateway)"]
+        direction TB
+        MCP_GW["🌐 <b>FastAPI + MCP Server</b><br/><code>/mcp (Streamable HTTP)</code> & <code>/api/tasks</code>"]:::serverStyle
+        MB["📬 <b>Mailbox 任务信箱 & 调度器</b><br/>毫秒级长轮询唤醒挂起机制"]:::serverStyle
+        DB[("💾 <b>SQLite WAL 存储引擎</b><br/>冷热任务分离 / 终态内存驱逐")]:::serverStyle
+        WD["🐕 <b>Server Watchdog</b><br/>心跳监测 / 失联预警 / 自动瘦身"]:::serverStyle
+        
+        MCP_GW --> MB
+        MB <--> DB
+        MB <--> WD
+    end
+
+    subgraph Human_Agent_Loop["📱 人类在回路与智能协作 (HITL & Agents)"]
+        direction TB
+        FS["💬 <b>飞书协作客户端</b><br/>交互式告警卡片 / 就地防呆闭环"]:::userStyle
+        AI_AGENT["🤖 <b>外部 AI 智能体</b><br/>Claude Code / Cursor / OpenCode"]:::userStyle
+    end
+
+    %% 连接关系
+    GPU1 ==>|主动出站长轮询 / 异常上报| MCP_GW
+    GPU2 ==>|主动出站保活 / 纯客户端 Pull| MCP_GW
+    GPUN ==>|双向 ACK / 里程碑同步| MCP_GW
+
+    MCP_GW <==>|Webhook 交互 / 推送卡片| FS
+    AI_AGENT <==>|MCP 远程协议 / 监控与决策| MCP_GW
+
+    class GPU_Cluster clusterStyle;
+    class Control_Plane clusterStyle;
+    class Human_Agent_Loop clusterStyle;
 ```
 
 ### HITL 闭环时序与双向 ACK
 
-```text
-[ 内网 GPU 客户端 ]               [ 公网控制面 Gateway ]            [ 飞书互动卡片 ]
-        │                                  │                              │
-        │─── 1. report_alert (Loss NaN) ──►│                              │
-        │    (训练就地挂起，等待指令)       │─── 2. 推送红色交互告警卡片 ─►│
-        │                                  │        (展示指标/带操作按钮) │
-        │                                  │                              │
-        │─── 3. poll_instruction(wait) ───►│ (挂起长连接，等待决策)       │
-        │                                  │                              │
-        │                                  │◄── 4. 点击【自行解决】 ──────│ (人工点击)
-        │                                  │    (或 30s 超时自动决策)     │ (卡片就地防呆变灰)
-        │                                  │                              │
-        │◄── 5. 毫秒级唤醒返回指令 ─────────┤ (返回 action: self_resolve)  │
-        │                                  │                              │
-  执行自愈措施 (回退ckpt/重置优化器)        │                              │
-        │                                  │                              │
-        │─── 6. ack_instruction ──────────►│ (校验指令ID，流转回 RUNNING) │
-        │      (携带 solution 方案)        │─── 7. 推送【自愈成功】卡片 ──►│
-        │                                  │                              │ (告知团队已自愈)
-        │ 恢复正常迭代训练                 │                              │
-        │─── 8. report_milestone ─────────►│─── 9. 推送绿色里程碑卡片 ────►│
-        │      (携带 Agent 智能点评)       │                              │ (展示 AI 趋势研判)
+```mermaid
+sequenceDiagram
+    autonumber
+    actor GPU as 🖥️ GPU 节点 (TrainingGuardian)
+    participant CP as ☁️ 公网控制面 (FastAPI / MCP)
+    actor Expert as 👨‍💻 人类专家 (飞书卡片)
+
+    Note over GPU,CP: 阶段一：异常捕获与现场就地冻结
+    GPU->>CP: report_alert (Loss NaN / OOM / 激增)
+    activate CP
+    CP-->>GPU: 确认入库，状态置为 WAITING (冻结现场)
+    deactivate CP
+    CP->>Expert: 异步推送【🔴 异常告警卡片】(带操作按钮 & Agent研判)
+
+    Note over GPU,CP: 阶段二：长轮询挂起与 HITL 决策
+    GPU->>CP: poll_instruction (长连接挂起等待)
+    alt 人工点击决策 (30s 窗口期内)
+        Expert->>CP: 点击【自行解决】(Webhook 回调)
+        CP->>Expert: 就地回写【🟦 决策已闭环】卡片 (按钮收起防呆)
+    else 超过 30s 无人工干预
+        CP->>CP: 单点超时自动决策兜底 (self_resolve)
+    end
+    CP-->>GPU: 毫秒级唤醒返回指令 (action: self_resolve)
+
+    Note over GPU,CP: 阶段三：执行自愈与双向 ACK 闭环
+    GPU->>GPU: 执行现场自愈恢复 (回退 Checkpoint / 学习率衰减)
+    GPU->>CP: ack_instruction (status: success, 携带 solution 方案)
+    CP->>CP: 校验指令有效性，状态原子流转回 RUNNING
+    CP->>Expert: 异步推送【🟢 自愈成功卡片】(通报解决方案及恢复状态)
+
+    Note over GPU,CP: 阶段四：巡航监控与智能点评
+    GPU->>CP: report_milestone (携带步数指标 & Agent 智能点评)
+    CP->>Expert: 异步推送【🟢 里程碑卡片】(展示 AI 收敛研判)
 ```
 
 ### 任务生命周期状态机
@@ -161,38 +139,13 @@ stateDiagram-v2
 ```text
 TrainPilot/
 ├── src/trainpilot/
-│   ├── common/                  # 数据契约与公共基础模块
-│   │   ├── gateway.py           # 统一网关与客户端地址智能解析
-│   │   ├── schemas.py           # Pydantic 核心数据模型 (请求/响应/卡片载荷)
-│   │   └── states.py            # 任务状态机枚举 (TaskState, EventType, ActionType)
-│   ├── server/                  # 公网控制面与 MCP Server
-│   │   ├── main.py              # FastAPI 入口，挂载 /mcp Streamable HTTP 协议
-│   │   ├── mcp_server.py        # 标准 MCP Server (8 个 Tools + 2 个 Resources)
-│   │   ├── mailbox.py           # TaskMailboxManager 线程安全调度与长轮询核心
-│   │   ├── storage.py           # SQLite WAL 持久化存储与冷热数据修剪引擎
-│   │   ├── watchdog.py          # 失联看门狗守护线程 (心跳异常检测与防抖)
-│   │   ├── auth.py              # API Token 鉴权依赖 (Bearer / X-API-Token)
-│   │   ├── config.py            # 基于 pydantic-settings 的集中配置中心
-│   │   ├── routes/
-│   │   │   ├── tasks.py         # RESTful 任务上报、长轮询与控制接口
-│   │   │   └── webhook.py       # 飞书 URL 验证与卡片交互回调处理
-│   │   └── feishu/
-│   │       ├── cards.py         # 5 类飞书交互式与富文本卡片 JSON 构建器
-│   │       └── client.py        # 飞书官方 SDK 通信与 Mock 双模客户端
-│   └── agent/                   # 内网 GPU 训练节点客户端
-│       ├── client.py            # TrainPilotClient (纯标准库+requests的轻量客户端)
-│       ├── mcp_client.py        # TrainPilotMCPClient (原生 MCP Streamable 客户端)
-│       ├── monitor.py           # TrainingGuardian (PyTorch 训练守卫与自愈拦截器)
-│       └── cli.py               # trainpilot-cli 命令行工具 (内置 9 大子命令)
-├── examples/                    # 示例程序
-│   ├── mock_training.py         # 端到端无 GPU 纯模拟训练与自愈演示
-│   ├── real_gpu_training.py     # 真实 PyTorch GPU 训练与异常拦截范例
-│   └── run_server.py            # 便捷启动控制面服务的 Python 脚本
-├── tests/                       # 自动化测试套件 (56 项单元与集成测试)
-├── Dockerfile                   # 容器化镜像构建规范
-├── start.sh                     # 服务端控制台管理脚本 (前台/守护/状态/停止)
-├── pyproject.toml               # 项目元数据与依赖定义 (uv/pip)
-└── .env.example                 # 环境变量模板 (服务端与客户端双模块)
+│   ├── server/          # 公网 MCP Server 与控制面网关 (FastAPI / 状态机 / 飞书卡片 / SQLite WAL)
+│   ├── agent/           # GPU 客户端组件 (TrainingGuardian 守卫 / MCP Client / trainpilot-cli)
+│   └── common/          # 核心数据契约 (Schemas) 与状态机定义 (States)
+├── examples/            # 训练仿真与真实 GPU 演示范例 (mock_training.py, real_gpu_training.py)
+├── Dockerfile           # 控制面容器化镜像构建规范
+├── start.sh             # 服务端运维启停脚本 (--daemon / --status / --stop)
+└── pyproject.toml       # 项目配置与依赖说明
 ```
 
 ---
@@ -208,7 +161,7 @@ TrainPilot/
 git clone https://github.com/Long-Holiday/TrainPilot.git
 cd TrainPilot
 
-# 安装依赖 (生产环境如需推送真实飞书卡片，建议同步完整依赖)
+# 安装依赖
 uv sync
 ```
 
@@ -250,167 +203,15 @@ uv run python examples/mock_training.py
 
 ---
 
-## 💻 客户端接入指南
+## 🤖 客户端接入：外部 AI 智能体接入
 
-### 方式一：PyTorch 训练主循环轻量守卫 (`TrainingGuardian`)
+任何支持 **Model Context Protocol (MCP)** 的现代智能体（如 Claude Code、Cursor、OpenCode、Gemini CLI 等）只需配置公网 MCP Server 地址，即可无需在本地安装任何插件或写代码，直接在自然语言对话中获得全套训练集群监控、指标研判与交互决策能力。
 
-在 GPU 节点的训练代码中，只需通过 `TrainingGuardian` 包装 Loss 校验。当发生 `NaN`、`Inf` 或剧烈突增时，训练自动就地冻结，待人工确认或自愈成功后无缝继续：
+### MCP 客户端配置规范
 
-```python
-import torch
-from trainpilot.agent import (
-    TrainPilotClient,
-    TrainingGuardian,
-    StopTrainingException,
-)
+采用 MCP 2.x 标准最新的 **Streamable HTTP** 传输协议，在智能体对应的配置文件中添加公网端点：
 
-# 1. 初始化客户端 (指定公网服务器地址与当前任务标识)
-client = TrainPilotClient(
-    gateway_url="http://<公网服务器IP>:28780",
-    task_id="llama3-8b-sft",
-    api_token="your_optional_api_token",  # 若服务端开启了 TRAINPILOT_API_TOKEN
-)
-
-# 2. 初始化训练守卫
-guardian = TrainingGuardian(client=client)
-
-try:
-    for epoch in range(num_epochs):
-        for step, batch in enumerate(dataloader):
-            optimizer.zero_grad()
-            outputs = model(**batch)
-            loss = outputs.loss
-            
-            # 核心拦截：检测 NaN/Inf/突增 -> 冻结现场 -> 飞书告警 -> 等待决策 -> 自动恢复 -> ACK 闭环
-            guardian.check_and_handle_loss(loss.item(), step=step, epoch=epoch)
-            
-            loss.backward()
-            optimizer.step()
-
-            # 阶段性上报里程碑 (支持外部 Agent 智能点评)
-            if step % 500 == 0:
-                client.notify_milestone(
-                    message=f"Step {step} 迭代正常，权重梯度平稳",
-                    step=step,
-                    epoch=epoch,
-                    metrics={"loss": round(loss.item(), 4)},
-                    agent_note="收敛速率符合预期，建议维持当前学习率与 Warmup 策略。",
-                )
-except StopTrainingException:
-    print("🛑 收到飞书人工决策【停止训练】，执行紧急安全 Checkpoint 存档并退出。")
-    save_emergency_checkpoint(model)
-```
-
----
-
-### 方式二：CUDA OOM 显存感知与自定义自愈 Handler
-
-`TrainingGuardian` 提供了便捷的显存溢出（OOM）捕获与自定义动作处理器注册机制：
-
-```python
-guardian = TrainingGuardian(client=client)
-
-# 自定义【自行解决】动作的恢复逻辑
-def custom_recovery_handler(payload):
-    print("正在执行自愈：清空显存缓存并回退至上一步 Checkpoint...")
-    torch.cuda.empty_cache()
-    model.load_state_dict(torch.load("latest_checkpoint.pt"))
-    optimizer.param_groups[0]["lr"] *= 0.5
-    # 返回明确的方案描述，该描述将自动呈现在飞书【自愈恢复】卡片中
-    return "已清空显存并回退 Checkpoint，学习率衰减 50% 后恢复训练"
-
-guardian.register_action_handler("self_resolve", custom_recovery_handler)
-
-# 在训练捕获中使用
-try:
-    loss.backward()
-except torch.cuda.OutOfMemoryError:
-    # 自动采集显存分配与保留指标并上报至控制面冻结现场
-    guardian.handle_oom(step=step, epoch=epoch)
-```
-
----
-
-### 方式三：原生 MCP 客户端 (`TrainPilotMCPClient`)
-
-如果需要在 Python 进程中直接使用 MCP 协议规范与服务端交互，可使用 `TrainPilotMCPClient`（原生支持 Async 与 Sync 两种调用风格，且与 `TrainingGuardian` 鸭子类型完全兼容）：
-
-```python
-from trainpilot.agent import TrainPilotMCPClient, TrainingGuardian
-
-# 原生基于 Streamable HTTP 协议连接 /mcp 端点
-mcp_client = TrainPilotMCPClient(
-    server_url="http://<公网服务器IP>:28780",
-    task_id="qwen2-7b-pretrain",
-)
-
-# 列出服务端暴露的所有工具
-tools = mcp_client.list_tools()
-print(f"服务端支持的工具: {tools}")
-
-# 上报里程碑
-mcp_client.report_milestone(
-    message="Epoch 2 顺利结束",
-    step=20000,
-    metrics={"loss": 0.28, "val_loss": 0.31},
-    agent_note="泛化能力良好，未发现过拟合迹象。",
-)
-
-# 传入 Guardian 中使用（完全替代 HTTP Client）
-guardian = TrainingGuardian(client=mcp_client)
-```
-
----
-
-### 方式四：GPU 节点命令行工具 (`trainpilot-cli`)
-
-适用于 Shell 脚本、Slurm 作业脚本 (`sbatch`) 或独立运维控制台，开箱即用：
-
-```bash
-# 环境变量配置 (建议写入 ~/.bashrc 或作业脚本)
-export TRAINPILOT_GATEWAY_URL="http://<公网服务器IP>:28780"
-export TRAINPILOT_TASK_ID="slurm-job-9527"
-
-# 1. 查看公网服务端所有可用 MCP 工具
-uv run trainpilot-cli list-tools
-
-# 2. 上报训练阶段里程碑 (飞书绿色卡片 + Agent 智能点评)
-uv run trainpilot-cli report-milestone \
-  --step 5000 --epoch 1 --metrics "loss=0.385,gpu_mem=82%" \
-  --message "第一阶段预热完成" \
-  --agent-note "学习率已达峰值，梯度范数正常，可继续推进。"
-
-# 3. 异常主动告警并冻结训练现场 (飞书红色交互卡片)
-uv run trainpilot-cli report-alert \
-  --step 5420 --metrics "loss=NaN" \
-  --message "检测到 Loss 突变为 NaN" \
-  --agent-note "怀疑由于特定 Batch 异常长文本引起梯度溢出。"
-
-# 4. 阻塞长轮询信箱，等待专家或系统决策 (毫秒级唤醒)
-uv run trainpilot-cli poll-instruction --wait --wait-timeout 30
-
-# 5. 执行恢复方案后上报 ACK 确认 (状态流转回 RUNNING 并推送自愈卡片)
-uv run trainpilot-cli ack-instruction \
-  --action self_resolve --status success \
-  --solution "已丢弃脏数据样本，并重置优化器动量"
-
-# 6. 发送 GPU 节点健康心跳 (供 Watchdog 看门狗巡检)
-uv run trainpilot-cli send-heartbeat --step 5500 --metrics "gpu_util=98%"
-
-# 7. 查看指定任务当前状态及未决指令
-uv run trainpilot-cli get-status
-
-# 8. 查看集群所有跟踪任务
-uv run trainpilot-cli list-tasks --limit 20
-```
-
----
-
-### 方式五：外部 AI 智能体接入 (Claude Code / Cursor / OpenCode 等)
-
-任何支持 **Model Context Protocol (MCP)** 的现代编程助手或自主 Agent，只需配置公网 MCP Server 地址，即可无需编写代码直接在对话中巡检训练、下发决策与研判指标。
-
-在对应客户端的 MCP 配置文件（如 `~/.claude.json`、Cursor MCP 配置或 Claude Desktop 设定）中追加：
+#### 1. Claude Code / Claude Desktop 配置 (`~/.claude.json` 或 `claude_desktop_config.json`)
 
 ```json
 {
@@ -422,10 +223,54 @@ uv run trainpilot-cli list-tasks --limit 20
 }
 ```
 
-配置完成后，Agent 在对话上下文中将直接获得所有 TrainPilot 训练控制与状态查询能力，例如向 Agent 提问：
-- *“查看当前正在运行的训练任务状态”* -> Agent 自动调用 `list_tasks` 或读取 `tasks://list`
-- *“给 llama3-8b 任务下发自行解决指令”* -> Agent 自动调用 `submit_decision`
-- *“帮我分析当前损失并上报一个里程碑”* -> Agent 自动调用 `report_milestone` 附带分析点评
+#### 2. Cursor IDE 配置 (`.cursor/mcp.json`)
+
+```json
+{
+  "mcpServers": {
+    "trainpilot": {
+      "url": "http://<公网服务器IP>:28780/mcp"
+    }
+  }
+}
+```
+
+#### 3. 环境变量可选认证
+
+若公网服务端配置了 `TRAINPILOT_API_TOKEN`，MCP 客户端可配置携带 HTTP Header：
+
+```json
+{
+  "mcpServers": {
+    "trainpilot": {
+      "url": "http://<公网服务器IP>:28780/mcp",
+      "headers": {
+        "Authorization": "Bearer your_secret_token"
+      }
+    }
+  }
+}
+```
+
+---
+
+### 常见智能体交互场景
+
+接入后，AI 智能体将自动在其上下文工具栏中获得全部 8 项标准工具与只读资源，用户可在对话框中直接发起如下交互：
+
+```text
+💬 "帮我查看一下当前有哪些训练任务处于失联或异常状态？"
+🤖 Agent 自动调用: list_tasks(stale_only=True) / list_tasks(state="WAITING")
+
+💬 "llama3-8b-lora 任务当前进度如何？最新的 Loss 和学习率是多少？"
+🤖 Agent 自动读取: tasks://status/llama3-8b-lora 或调用 get_task_status
+
+💬 "针对正在等待决策的 qwen2-7b 任务，下发【自行解决】决策，并让节点回退上一个 Checkpoint。"
+🤖 Agent 自动调用: submit_decision(task_id="qwen2-7b", action="self_resolve", operator="Claude-Code")
+
+💬 "为 task-01 上报一个第 10000 步的里程碑，并附加你的调优点评意见。"
+🤖 Agent 自动调用: report_milestone(task_id="task-01", step=10000, agent_note="梯度范数平稳收敛，未出现震荡...")
+```
 
 ---
 
@@ -494,7 +339,7 @@ TrainPilot 为深度学习生命周期的不同场景精心设计了视觉分明
    - 个人推送：获取用户的 `open_id`（如 `ou_xxxx`）。
 
 > [!NOTE]
-> 若尚未配置飞书应用，系统默认开启安全 Mock 模式：所有卡片均会在服务端控制台以格式化日志完整打印，绝不阻断训练流程或测试执行。
+> 若尚未配置飞书应用，系统默认开启安全 Mock 模式：所有卡片均会在服务端控制台以格式化日志完整打印，绝不阻断训练流程。
 
 ---
 
@@ -598,26 +443,6 @@ docker run -d \
 | `TRAINPILOT_PORT` | `28780` | 公网控制面监听端口 |
 | `TRAINPILOT_TASK_ID` | `llama3-8b-lora` | 当前训练任务的唯一标识字符串 |
 | `TRAINPILOT_API_TOKEN` | - | 与服务端一致的访问鉴权 Token |
-
----
-
-## 🧪 自动化测试
-
-TrainPilot 拥有健全严密的自动化测试套件，涵盖单元测试、并发锁、状态机迁移、长轮询、SQLite 持久化、飞书卡片组装与 MCP 传输集成：
-
-```bash
-# 运行完整自动化测试套件 (56 项全部通过)
-uv run pytest -v
-
-# 仅运行 MCP Server 与 MCP Client 专项协议测试
-uv run pytest tests/test_mcp_server.py tests/test_mcp_client.py -v
-
-# 测试长轮询与并发状态机
-uv run pytest tests/test_long_polling.py tests/test_mailbox.py -v
-
-# 测试看门狗与持久化存储
-uv run pytest tests/test_watchdog.py tests/test_sqlite_storage.py -v
-```
 
 ---
 
