@@ -1,6 +1,5 @@
 """Simulation script of a PyTorch training task encountering Loss NaN and recovering via TrainPilot HITL."""
 
-import math
 import os
 import sys
 import threading
@@ -12,21 +11,19 @@ import requests
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
 from trainpilot.agent import TrainPilotClient, TrainingGuardian
+from trainpilot.common.gateway import resolve_gateway_url
 
 
 def run_mock_training(gateway_url: Optional[str] = None, task_id: str = "demo-llm-pretrain"):
     if gateway_url is None:
-        from trainpilot.common.gateway import resolve_gateway_url
-
         gateway_url = resolve_gateway_url()
-    print(f"\n==========================================")
+    print("\n==========================================")
     print(f"🚀 Starting Simulated Training for Task: {task_id}")
     print(f"🔗 Gateway: {gateway_url}")
-    print(f"==========================================\n")
+    print("==========================================\n")
 
     client = TrainPilotClient(gateway_url=gateway_url, task_id=task_id)
-    guardian = TrainingGuardian(client=client, poll_interval=1.0, poll_timeout=30.0,
-                                timeout_fallback_action="self_resolve")
+    guardian = TrainingGuardian(client=client, poll_interval=1.0, poll_timeout=30.0)
 
     # Simulated training state
     training_state = {
@@ -34,8 +31,6 @@ def run_mock_training(gateway_url: Optional[str] = None, task_id: str = "demo-ll
         "step": 0,
         "loss": 2.5,
     }
-
-    # 自行解决：无需复杂恢复逻辑，默认 handler 直接继续训练，Agent 将自动发送卡片概括解决方法并告知任务恢复正常。
 
     # Simulate steps
     total_steps = 10
@@ -107,8 +102,6 @@ def run_mock_training(gateway_url: Optional[str] = None, task_id: str = "demo-ll
 
 
 if __name__ == "__main__":
-    from trainpilot.common.gateway import resolve_gateway_url
-
     url = sys.argv[1] if len(sys.argv) > 1 else resolve_gateway_url()
     task = sys.argv[2] if len(sys.argv) > 2 else "demo-llm-pretrain"
     run_mock_training(url, task)

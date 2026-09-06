@@ -13,105 +13,19 @@ Provides command-line actions to interact with the TrainPilot Gateway:
 
 import argparse
 import json
-import math
 import os
 import sys
 import time
 from typing import Any, Dict, Optional
-try:
-    import requests
-except ImportError:
-    # 若系统环境中无 requests，尝试利用 uv 创建的 .venv/bin/python 重新执行
-    _script_dir = os.path.dirname(os.path.abspath(__file__))
-    _candidates = [
-        os.path.join(os.getcwd(), ".venv", "bin", "python"),
-        os.path.abspath(os.path.join(_script_dir, "..", "..", "..", ".venv", "bin", "python")),
-        os.path.abspath(os.path.join(_script_dir, "..", "..", ".venv", "bin", "python")),
-    ]
-    for _cand in _candidates:
-        if os.path.isfile(_cand) and os.access(_cand, os.X_OK) and _cand != sys.executable:
-            os.execv(_cand, [_cand] + sys.argv)
-    raise
+import requests
 
+# Ensure src is on python path
+_src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "src"))
+if _src_path not in sys.path:
+    sys.path.insert(0, _src_path)
 
-def _load_dotenv_if_present() -> None:
-    """自动加载当前目录或上级目录中的 .env 文件中的环境变量（不覆盖已有环境变量）。"""
-    dirs_to_check = [os.getcwd()]
-    try:
-        s_dir = os.path.dirname(os.path.abspath(__file__))
-        dirs_to_check.extend([
-            s_dir,
-            os.path.abspath(os.path.join(s_dir, "..")),
-            os.path.abspath(os.path.join(s_dir, "..", "..")),
-            os.path.abspath(os.path.join(s_dir, "..", "..", "..")),
-        ])
-    except Exception:
-        pass
-
-    seen = set()
-    for d in dirs_to_check:
-        if d in seen:
-            continue
-        seen.add(d)
-        env_path = os.path.join(d, ".env")
-        if os.path.isfile(env_path):
-            try:
-                with open(env_path, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line or line.startswith("#"):
-                            continue
-                        if line.startswith("export "):
-                            line = line[len("export "):].strip()
-                        if "=" in line:
-                            k, v = line.split("=", 1)
-                            k = k.strip()
-                            v = v.strip().strip("'\"")
-                            if k and k not in os.environ:
-                                os.environ[k] = v
-                break
-            except Exception:
-                pass
-
-
-_load_dotenv_if_present()
-
-
-try:
-    from trainpilot.agent.client import _sanitize_for_json
-    from trainpilot.common.gateway import resolve_gateway_url as get_default_gateway
-except ImportError:
-    def _sanitize_for_json(obj: Any) -> Any:
-        """Recursively convert float('nan') and float('inf') into JSON-compliant representations."""
-        if isinstance(obj, float):
-            if math.isnan(obj):
-                return "NaN"
-            if math.isinf(obj):
-                return "Infinity" if obj > 0 else "-Infinity"
-            return obj
-        if isinstance(obj, dict):
-            return {k: _sanitize_for_json(v) for k, v in obj.items()}
-        if isinstance(obj, (list, tuple)):
-            return [_sanitize_for_json(x) for x in obj]
-        return obj
-
-    def get_default_gateway() -> str:
-        env_url = os.environ.get("TRAINPILOT_GATEWAY_URL", "").strip()
-        if env_url:
-            return env_url.rstrip("/")
-        raw_host = (os.environ.get("TRAINPILOT_HOST", "") or "").strip()
-        host = raw_host
-        for prefix in ("http://", "https://"):
-            if host.lower().startswith(prefix):
-                host = host[len(prefix):]
-                break
-        host = host.split("/")[0].strip()
-        if host:
-            if host in ("0.0.0.0", "::"):
-                host = "127.0.0.1"
-            port = os.environ.get("TRAINPILOT_PORT", "28780")
-            return f"http://{host}:{port}"
-        return "http://127.0.0.1:28780"
+from trainpilot.agent.client import _sanitize_for_json
+from trainpilot.common.gateway import resolve_gateway_url
 
 
 def get_default_task_id() -> str:
@@ -324,7 +238,7 @@ def main():
         description="TrainPilot Agent Tool - Bridge GPU Training with Control Plane Gateway",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--gateway", default=get_default_gateway(), help="Control Plane Gateway URL")
+    parser.add_argument("--gateway", default=resolve_gateway_url(), help="Control Plane Gateway URL")
     parser.add_argument("--task-id", default=get_default_task_id(), help="Unique Training Task ID")
     parser.add_argument("--timeout", type=int, default=10, help="HTTP request timeout in seconds")
     parser.add_argument("--api-token", default=os.environ.get("TRAINPILOT_API_TOKEN"), help="API token when gateway enforces auth")
