@@ -53,15 +53,6 @@ def _dispatch_feishu(req: EventNotifyRequest) -> None:
                 agent_note=req.agent_note,
                 extra=req.extra,
             )
-        elif req.event_type == EventType.RECOVERY:
-            default_feishu_client.send_recovery(
-                task_id=req.task_id,
-                solution=req.message,
-                step=req.step,
-                epoch=req.epoch,
-                metrics=req.metrics,
-                extra=req.extra,
-            )
     except Exception as exc:
         logger.error("Failed to forward event %s to Feishu: %s", req.event_type, exc)
 

@@ -135,32 +135,54 @@ def test_feishu_webhook_flow(client: TestClient):
     assert inst["decision_by"] == "ou_feishu_engineer"
 
 
-def test_notify_recovery_event(client: TestClient):
+def test_ack_recovery_card_flow(client: TestClient):
     from trainpilot.server.feishu.client import default_feishu_client
 
-    task_id = "recovery-test-task"
-    # First notify alert
-    client.post("/api/tasks/notify", json={
-        "task_id": task_id,
-        "event_type": "alert",
-        "message": "Loss exploded",
-    })
+    task_id = "ack-recovery-test-task"
 
-    # Agent reports recovery with solution summary
-    resp = client.post("/api/tasks/notify", json={
-        "task_id": task_id,
-        "event_type": "recovery",
-        "message": "已跳过异常批次并重置优化器梯度状态，Loss 恢复正常，训练继续进行。",
-        "step": 60,
-        "epoch": 1,
-    })
+    # 1. 触发告警
+    alert_resp = client.post(
+        "/api/tasks/notify",
+        json={
+            "task_id": task_id,
+            "event_type": "alert",
+            "message": "Loss exploded",
+        },
+    )
+    assert alert_resp.status_code == 200
+    assert alert_resp.json()["state"] == "WAITING"
+
+    # 2. 模拟下发决策
+    dec_resp = client.post(
+        f"/api/tasks/{task_id}/decision",
+        json={
+            "task_id": task_id,
+            "action": "self_resolve",
+        },
+    )
+    assert dec_resp.status_code == 200
+    assert dec_resp.json()["action"] == "self_resolve"
+
+    # 3. 客户端消费指令并 ACK (携带 solution)
+    resp = client.post(
+        f"/api/tasks/{task_id}/ack",
+        json={
+            "task_id": task_id,
+            "action": "self_resolve",
+            "status": "success",
+            "solution": "已跳过异常 Batch 并恢复正常训练。",
+            "step": 60,
+            "epoch": 1,
+        },
+    )
     assert resp.status_code == 200
     assert resp.json()["state"] == "RUNNING"
 
-    # Verify Feishu client received recovery card
+    # 4. 验证 FeishuClient 接收到恢复卡片
     history = default_feishu_client.sent_cards_history
     rec_cards = [c for c in history if c.get("type") == "recovery" and c.get("task_id") == task_id]
     assert len(rec_cards) == 1
     card_dict = rec_cards[0]["card"]
     assert "【异常已自行解决】" in card_dict["header"]["title"]["content"]
+
 

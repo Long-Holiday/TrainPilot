@@ -77,40 +77,38 @@ class TaskMailboxManager:
     def __init__(self, max_events_per_task: int = 500, storage: Optional[Any] = None):
         self._lock = threading.Lock()
         self._tasks: Dict[str, TaskRecord] = {}
-        self._fallback_memory_events: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         self._max_events = max(1, int(max_events_per_task))
         self._instruction_waiters: Dict[str, List[threading.Event]] = defaultdict(list)
 
-        # Initialize SQLite Storage if enabled
-        self._storage = storage
-        if self._storage is None:
+        # Initialize SQLite Storage
+        if storage is not None:
+            self._storage = storage
+        else:
             try:
                 from trainpilot.server.config import settings as _s
-                if getattr(_s, "enable_sqlite", True):
-                    from trainpilot.server.storage import SQLiteStorage
-                    db_path = getattr(_s, "sqlite_path", "trainpilot.db")
-                    self._storage = SQLiteStorage(db_path)
+                db_path = getattr(_s, "sqlite_path", "trainpilot.db")
+                from trainpilot.server.storage import SQLiteStorage
+                self._storage = SQLiteStorage(db_path)
             except Exception as e:
-                logger.warning("Failed to initialize SQLiteStorage: %s", e)
-                self._storage = None
+                logger.error("Failed to initialize SQLiteStorage from config: %s", e)
+                from trainpilot.server.storage import SQLiteStorage
+                self._storage = SQLiteStorage("trainpilot.db")
 
-        # Warm up tasks from SQLite storage if available
-        if self._storage:
-            try:
-                persisted_tasks = self._storage.load_all_tasks()
-                for tid, rec in persisted_tasks.items():
-                    rec.events_count = self._storage.get_events_count(tid)
-                    self._tasks[tid] = rec
-                logger.info("Restored %d tasks from SQLite storage", len(persisted_tasks))
-            except Exception as e:
-                logger.error("Failed to restore tasks from SQLite: %s", e)
+        # Warm up tasks from SQLite storage
+        try:
+            persisted_tasks = self._storage.load_all_tasks()
+            for tid, rec in persisted_tasks.items():
+                rec.events_count = self._storage.get_events_count(tid)
+                self._tasks[tid] = rec
+            logger.info("Restored %d tasks from SQLite storage", len(persisted_tasks))
+        except Exception as e:
+            logger.error("Failed to restore tasks from SQLite: %s", e)
 
     def _get_or_create(self, task_id: str) -> TaskRecord:
         """Internal helper without lock acquisition."""
         if task_id not in self._tasks:
             self._tasks[task_id] = TaskRecord(task_id=task_id)
-            if self._storage:
-                self._storage.save_task(self._tasks[task_id])
+            self._storage.save_task(self._tasks[task_id])
             logger.info("Initialized new task in mailbox: %s", task_id)
         return self._tasks[task_id]
 
@@ -155,10 +153,6 @@ class TaskMailboxManager:
                 if task.state != TaskState.WAITING:
                     task.state = TaskState.RUNNING
                 logger.info("Task %s recorded milestone at step %s", req.task_id, req.step)
-            elif req.event_type == EventType.RECOVERY:
-                if task.state not in TERMINAL_STATES:
-                    task.state = TaskState.RUNNING
-                logger.info("Task %s self-recovered: %s", req.task_id, req.message)
             elif req.event_type == EventType.HEARTBEAT:
                 task.last_heartbeat_at = req.timestamp or utc_now_iso()
             elif req.event_type == EventType.COMPLETED:
@@ -170,17 +164,12 @@ class TaskMailboxManager:
                 task.pending_instruction = None
                 logger.error("Task %s marked as FAILED", req.task_id)
 
-            # Persist to SQLite (primary) or fallback to bounded memory (when storage disabled)
-            if self._storage:
-                try:
-                    self._storage.save_task(task)
-                    self._storage.append_event(req.task_id, event_entry, max_events=self._max_events)
-                except Exception as e:
-                    logger.error("Failed to persist event to SQLite: %s", e)
-            else:
-                self._fallback_memory_events[req.task_id].append(event_entry)
-                if len(self._fallback_memory_events[req.task_id]) > self._max_events:
-                    self._fallback_memory_events[req.task_id] = self._fallback_memory_events[req.task_id][-self._max_events:]
+            # Persist to SQLite
+            try:
+                self._storage.save_task(task)
+                self._storage.append_event(req.task_id, event_entry, max_events=self._max_events)
+            except Exception as e:
+                logger.error("Failed to persist event to SQLite: %s", e)
 
             return task.state
 
@@ -198,11 +187,10 @@ class TaskMailboxManager:
             if req.metrics is not None:
                 task.latest_metrics = req.metrics
 
-            if self._storage:
-                try:
-                    self._storage.save_task(task, stale_alerted=False)
-                except Exception as e:
-                    logger.error("Failed to update heartbeat in SQLite: %s", e)
+            try:
+                self._storage.save_task(task, stale_alerted=False)
+            except Exception as e:
+                logger.error("Failed to update heartbeat in SQLite: %s", e)
 
     def _notify_instruction_waiters(self, task_id: str) -> None:
         """Wake up any pending long-polling requests waiting for this task's decision."""
@@ -239,11 +227,10 @@ class TaskMailboxManager:
             task.state = TaskState.RESOLVED
             task.updated_at = now_iso
 
-            if self._storage:
-                try:
-                    self._storage.save_task(task)
-                except Exception as e:
-                    logger.error("Failed to persist decision to SQLite: %s", e)
+            try:
+                self._storage.save_task(task)
+            except Exception as e:
+                logger.error("Failed to persist decision to SQLite: %s", e)
 
             logger.info("Decision submitted for task %s by %s: action=%s, id=%s",
                         task_id, operator, action, inst_id)
@@ -295,11 +282,10 @@ class TaskMailboxManager:
             task.state = TaskState.RESOLVED
             task.updated_at = now_iso
 
-            if self._storage:
-                try:
-                    self._storage.save_task(task)
-                except Exception as e:
-                    logger.error("Failed to persist auto-resolve to SQLite: %s", e)
+            try:
+                self._storage.save_task(task)
+            except Exception as e:
+                logger.error("Failed to persist auto-resolve to SQLite: %s", e)
 
             logger.warning("Task %s auto-resolved to '%s' after %.1fs without human decision",
                            task_id, action, timeout_seconds)
@@ -333,11 +319,10 @@ class TaskMailboxManager:
                         "decision_by": instruction.decision_by,
                         "popped_at": task.updated_at,
                     }
-                    if self._storage:
-                        try:
-                            self._storage.save_task(task)
-                        except Exception as e:
-                            logger.error("Failed to update pop state in SQLite: %s", e)
+                    try:
+                        self._storage.save_task(task)
+                    except Exception as e:
+                        logger.error("Failed to update pop state in SQLite: %s", e)
                     logger.info("Task %s polled instruction %s (%s), transitioned to RECOVERING",
                                 task_id, instruction.instruction_id, instruction.action)
                 return instruction
@@ -380,11 +365,10 @@ class TaskMailboxManager:
                         "decision_by": instruction.decision_by,
                         "popped_at": task.updated_at,
                     }
-                    if self._storage:
-                        try:
-                            self._storage.save_task(task)
-                        except Exception as e:
-                            logger.error("Failed to update pop state in SQLite: %s", e)
+                    try:
+                        self._storage.save_task(task)
+                    except Exception as e:
+                        logger.error("Failed to update pop state in SQLite: %s", e)
                     logger.info("Task %s (long-polled) obtained instruction %s (%s) -> RECOVERING",
                                 task_id, instruction.instruction_id, instruction.action)
                 return instruction
@@ -436,11 +420,10 @@ class TaskMailboxManager:
                 logger.warning("Task %s failed executing instruction %s -> WAITING: %s",
                                task_id, instruction_id, message)
 
-            if self._storage:
-                try:
-                    self._storage.save_task(task)
-                except Exception as e:
-                    logger.error("Failed to persist ack to SQLite: %s", e)
+            try:
+                self._storage.save_task(task)
+            except Exception as e:
+                logger.error("Failed to persist ack to SQLite: %s", e)
 
             return task.state
 
@@ -450,11 +433,10 @@ class TaskMailboxManager:
             task = self._tasks.get(task_id)
             if task:
                 task.feishu_message_id = message_id
-            if self._storage:
-                try:
-                    self._storage.set_task_feishu_message_id(task_id, message_id)
-                except Exception as e:
-                    logger.error("Failed to set feishu_message_id in storage: %s", e)
+            try:
+                self._storage.set_task_feishu_message_id(task_id, message_id)
+            except Exception as e:
+                logger.error("Failed to set feishu_message_id in storage: %s", e)
 
     def get_task_feishu_message_id(self, task_id: str) -> Optional[str]:
         """Fetch the Feishu message_id for updating interactive cards."""
@@ -462,11 +444,10 @@ class TaskMailboxManager:
             task = self._tasks.get(task_id)
             if task and task.feishu_message_id:
                 return task.feishu_message_id
-            if self._storage:
-                try:
-                    return self._storage.get_task_feishu_message_id(task_id)
-                except Exception as e:
-                    logger.error("Failed to get feishu_message_id from storage: %s", e)
+            try:
+                return self._storage.get_task_feishu_message_id(task_id)
+            except Exception as e:
+                logger.error("Failed to get feishu_message_id from storage: %s", e)
             return None
 
     def get_task(self, task_id: str) -> Optional[TaskSummary]:
@@ -480,22 +461,15 @@ class TaskMailboxManager:
     def get_events(self, task_id: str, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
         """Paginated chronological event history."""
         with self._lock:
-            if self._storage:
-                return self._storage.get_events(task_id, limit=limit, offset=offset)
-            events = self._fallback_memory_events.get(task_id, [])
-            return list(events[offset:offset + limit])
+            return self._storage.get_events(task_id, limit=limit, offset=offset)
 
     def get_events_count(self, task_id: str) -> Optional[int]:
         with self._lock:
-            if self._storage:
-                cnt = self._storage.get_events_count(task_id)
-                # If 0 but task not exists, return None
-                if cnt == 0 and task_id not in self._tasks:
-                    return None
-                return cnt
-            if task_id not in self._tasks:
+            cnt = self._storage.get_events_count(task_id)
+            # If 0 but task not exists, return None
+            if cnt == 0 and task_id not in self._tasks:
                 return None
-            return len(self._fallback_memory_events.get(task_id, []))
+            return cnt
 
     def list_tasks(
         self,
@@ -545,21 +519,16 @@ class TaskMailboxManager:
         """Reset all tasks (mainly for testing)."""
         with self._lock:
             self._tasks.clear()
-            self._fallback_memory_events.clear()
             self._instruction_waiters.clear()
-            if self._storage:
-                try:
-                    self._storage.reset()
-                except Exception as e:
-                    logger.warning("Failed to reset SQLite storage: %s", e)
+            try:
+                self._storage.reset()
+            except Exception as e:
+                logger.warning("Failed to reset SQLite storage: %s", e)
 
     def _build_summary(self, task: TaskRecord) -> TaskSummary:
         count = task.events_count
         if count == 0:
-            if self._storage:
-                count = self._storage.get_events_count(task.task_id)
-            else:
-                count = len(self._fallback_memory_events.get(task.task_id, []))
+            count = self._storage.get_events_count(task.task_id)
         return TaskSummary(
             task_id=task.task_id,
             state=task.state,
