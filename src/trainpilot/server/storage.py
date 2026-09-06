@@ -41,6 +41,8 @@ class SQLiteStorage:
             cur = self._conn.cursor()
             cur.execute("PRAGMA journal_mode=WAL;")
             cur.execute("PRAGMA synchronous=NORMAL;")
+            cur.execute("PRAGMA auto_vacuum=INCREMENTAL;")
+            cur.execute("PRAGMA wal_autocheckpoint=1000;")
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS tasks (
@@ -439,11 +441,63 @@ class SQLiteStorage:
             rows = cur.fetchall()
             return [self._row_to_task_record(r) for r in rows]
 
-    def load_all_tasks(self) -> Dict[str, Any]:
-        """Load all task records from SQLite for server warmup/recovery."""
+    def get_tasks_count(self, state: Optional[TaskState] = None) -> int:
+        """Fast SQL COUNT(*) without materializing task objects in memory."""
         with self._lock:
             cur = self._conn.cursor()
-            cur.execute("SELECT * FROM tasks")
+            if state is not None:
+                st_val = state.value if hasattr(state, "value") else str(state)
+                cur.execute("SELECT COUNT(*) as cnt FROM tasks WHERE state = ?", (st_val,))
+            else:
+                cur.execute("SELECT COUNT(*) as cnt FROM tasks")
+            row = cur.fetchone()
+            return row["cnt"] if row else 0
+
+    def checkpoint_and_vacuum(self) -> Dict[str, Any]:
+        """Perform WAL checkpoint and incremental vacuum to reclaim disk space."""
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+            ckpt_res = cur.fetchone()
+            cur.execute("PRAGMA incremental_vacuum;")
+            self._conn.commit()
+            return {
+                "checkpoint": list(ckpt_res) if ckpt_res else None,
+            }
+
+    def clean_expired_tasks(self, max_age_seconds: int = 86400 * 7) -> int:
+        """Clean up old finished tasks (COMPLETED/FAILED) older than max_age_seconds to free disk space."""
+        from datetime import datetime, timezone, timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)).isoformat()
+        with self._lock:
+            cur = self._conn.cursor()
+            terminal_states = (TaskState.COMPLETED.value, TaskState.FAILED.value)
+            cur.execute(
+                """
+                SELECT task_id FROM tasks
+                WHERE state IN (?, ?) AND updated_at < ?
+                """,
+                (terminal_states[0], terminal_states[1], cutoff),
+            )
+            old_tasks = [r["task_id"] for r in cur.fetchall()]
+            if not old_tasks:
+                return 0
+            for tid in old_tasks:
+                cur.execute("DELETE FROM events WHERE task_id = ?", (tid,))
+                cur.execute("DELETE FROM tasks WHERE task_id = ?", (tid,))
+            self._conn.commit()
+            logger.info("Cleaned %d expired finished tasks older than %ds", len(old_tasks), max_age_seconds)
+            return len(old_tasks)
+
+    def load_all_tasks(self, active_only: bool = False) -> Dict[str, Any]:
+        """Load task records from SQLite. If active_only=True, only non-terminal tasks are loaded."""
+        with self._lock:
+            cur = self._conn.cursor()
+            if active_only:
+                terminal_states = (TaskState.COMPLETED.value, TaskState.FAILED.value)
+                cur.execute("SELECT * FROM tasks WHERE state NOT IN (?, ?)", terminal_states)
+            else:
+                cur.execute("SELECT * FROM tasks")
             rows = cur.fetchall()
             tasks: Dict[str, Any] = {}
             for r in rows:

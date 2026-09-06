@@ -94,21 +94,42 @@ class TaskMailboxManager:
                 from trainpilot.server.storage import SQLiteStorage
                 self._storage = SQLiteStorage("trainpilot.db")
 
-        # Warm up tasks from SQLite storage
+        # Warm up active tasks from SQLite storage (save RAM by not loading terminated tasks)
         try:
-            persisted_tasks = self._storage.load_all_tasks()
+            persisted_tasks = self._storage.load_all_tasks(active_only=True)
             for tid, rec in persisted_tasks.items():
                 rec.events_count = self._storage.get_events_count(tid)
                 self._tasks[tid] = rec
-            logger.info("Restored %d tasks from SQLite storage", len(persisted_tasks))
+            logger.info("Restored %d active tasks into memory from SQLite storage", len(persisted_tasks))
         except Exception as e:
             logger.error("Failed to restore tasks from SQLite: %s", e)
 
+    def _evict_cold_tasks_locked(self, max_allowed: int = 150) -> None:
+        """Evict completed or failed tasks from RAM when memory task count exceeds threshold."""
+        if len(self._tasks) <= max_allowed:
+            return
+        to_evict = [
+            tid for tid, rec in self._tasks.items()
+            if rec.state in TERMINAL_STATES
+        ]
+        for tid in to_evict:
+            if len(self._tasks) <= max_allowed:
+                break
+            self._tasks.pop(tid, None)
+
     def _get_or_create(self, task_id: str) -> TaskRecord:
-        """Internal helper without lock acquisition."""
+        """Internal helper without lock acquisition, with SQLite lazy restoration."""
         if task_id not in self._tasks:
+            # Lazy restore from SQLite if present to save continuous RAM
+            if self._storage:
+                existing = self._storage.get_task(task_id)
+                if existing:
+                    existing.events_count = self._storage.get_events_count(task_id)
+                    self._tasks[task_id] = existing
+                    return existing
             self._tasks[task_id] = TaskRecord(task_id=task_id)
-            self._storage.save_task(self._tasks[task_id])
+            if self._storage:
+                self._storage.save_task(self._tasks[task_id])
             logger.info("Initialized new task in mailbox: %s", task_id)
         return self._tasks[task_id]
 
@@ -170,6 +191,9 @@ class TaskMailboxManager:
                 self._storage.append_event(req.task_id, event_entry, max_events=self._max_events)
             except Exception as e:
                 logger.error("Failed to persist event to SQLite: %s", e)
+
+            if req.event_type in (EventType.COMPLETED, EventType.FAILED):
+                self._evict_cold_tasks_locked()
 
             return task.state
 
@@ -451,12 +475,25 @@ class TaskMailboxManager:
             return None
 
     def get_task(self, task_id: str) -> Optional[TaskSummary]:
-        """Get summary of a specific task."""
+        """Get summary of a specific task with lazy fallback to SQLite."""
         with self._lock:
             task = self._tasks.get(task_id)
             if not task:
+                if self._storage:
+                    record = self._storage.get_task(task_id)
+                    if record:
+                        return self._build_summary(record)
                 return None
             return self._build_summary(task)
+
+    def get_tasks_count(self, state: Optional[TaskState] = None) -> int:
+        """Fast count of total tasks from storage without instantiating objects in memory."""
+        with self._lock:
+            if self._storage:
+                return self._storage.get_tasks_count(state=state)
+            if state is not None:
+                return sum(1 for t in self._tasks.values() if t.state == state)
+            return len(self._tasks)
 
     def get_events(self, task_id: str, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
         """Paginated chronological event history."""
@@ -479,13 +516,31 @@ class TaskMailboxManager:
         stale_only: bool = False,
         heartbeat_timeout_seconds: Optional[int] = None,
     ) -> List[TaskSummary]:
-        """List summaries with pagination and optional state/stale filters."""
+        """List summaries with pagination and optional state/stale filters.
+
+        Uses SQLite pagination directly when available to keep RAM consumption flat (O(limit) instead of O(N)).
+        """
         with self._lock:
+            if stale_only:
+                # Stale tasks are strictly candidate non-terminal states tracked in memory
+                tasks = [t for t in self._tasks.values() if self._is_stale_locked(t, heartbeat_timeout_seconds)]
+                tasks = tasks[offset:offset + limit]
+                return [self._build_summary(t) for t in tasks]
+
+            # Storage pagination path: only loads current page rows into RAM
+            if self._storage:
+                records = self._storage.list_tasks(limit=limit, offset=offset, state=state)
+                summaries = []
+                for rec in records:
+                    active = self._tasks.get(rec.task_id)
+                    target = active if active else rec
+                    summaries.append(self._build_summary(target))
+                return summaries
+
+            # Memory-only fallback (e.g. tests without storage)
             tasks = list(self._tasks.values())
             if state is not None:
                 tasks = [t for t in tasks if t.state == state]
-            if stale_only:
-                tasks = [t for t in tasks if self._is_stale_locked(t, heartbeat_timeout_seconds)]
             tasks = tasks[offset:offset + limit]
             return [self._build_summary(t) for t in tasks]
 

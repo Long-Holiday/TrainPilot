@@ -142,16 +142,36 @@ class ServerWatchdog:
 
         # Retention trimming on SQLite database
         trimmed = 0
+        cleaned_tasks = 0
+        vacuum_reclaimed = False
         if self.mailbox._storage:
             try:
                 trimmed = self.mailbox._storage.trim_all_events(max_events=self.settings.max_events_per_task)
             except Exception as exc:
                 logger.error("Failed to trim excess events during watchdog run: %s", exc)
 
+            # Periodic disk and WAL space reclamation (every 10 sweeps or when events were trimmed)
+            if self._checks_count % 10 == 0 or trimmed > 0:
+                try:
+                    if hasattr(self.mailbox._storage, "checkpoint_and_vacuum"):
+                        self.mailbox._storage.checkpoint_and_vacuum()
+                        vacuum_reclaimed = True
+                    if hasattr(self.mailbox._storage, "clean_expired_tasks"):
+                        cleaned_tasks = self.mailbox._storage.clean_expired_tasks()
+                except Exception as exc:
+                    logger.debug("Storage checkpoint/vacuum maintenance: %s", exc)
+
+        # Evict inactive terminal tasks from memory to prevent RAM accumulation
+        if hasattr(self.mailbox, "_evict_cold_tasks_locked"):
+            with self.mailbox._lock:
+                self.mailbox._evict_cold_tasks_locked()
+
         return {
             "stale_count": len(stale_tasks),
             "alerts_sent": alerts_sent_this_round,
             "events_trimmed": trimmed,
+            "tasks_expired": cleaned_tasks,
+            "vacuum_reclaimed": vacuum_reclaimed,
             "checked_at": self._last_check_at,
         }
 

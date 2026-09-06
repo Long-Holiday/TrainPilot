@@ -150,3 +150,55 @@ def test_mailbox_integrated_with_sqlite_storage(temp_db):
     assert summary2.state == TaskState.RECOVERING
     assert summary2.latest_step == 50
     assert summary2.events_count == 1
+
+
+def test_storage_checkpoint_and_vacuum(temp_db):
+    """Verify PRAGMA wal_checkpoint and vacuum execution."""
+    storage = SQLiteStorage(temp_db)
+    res = storage.checkpoint_and_vacuum()
+    assert "checkpoint" in res
+    storage.close()
+
+
+def test_storage_tasks_count_and_active_only(temp_db):
+    """Verify get_tasks_count and active_only loading for memory saving."""
+    storage = SQLiteStorage(temp_db)
+    t1 = TaskRecord(task_id="active-task-1", state=TaskState.RUNNING)
+    t2 = TaskRecord(task_id="completed-task-1", state=TaskState.COMPLETED)
+    t3 = TaskRecord(task_id="failed-task-1", state=TaskState.FAILED)
+    storage.save_task(t1)
+    storage.save_task(t2)
+    storage.save_task(t3)
+
+    assert storage.get_tasks_count() == 3
+    assert storage.get_tasks_count(TaskState.RUNNING) == 1
+    assert storage.get_tasks_count(TaskState.COMPLETED) == 1
+
+    active_tasks = storage.load_all_tasks(active_only=True)
+    assert "active-task-1" in active_tasks
+    assert "completed-task-1" not in active_tasks
+    assert "failed-task-1" not in active_tasks
+    storage.close()
+
+
+def test_storage_clean_expired_tasks(temp_db):
+    """Verify clean_expired_tasks deletes old completed/failed tasks."""
+    storage = SQLiteStorage(temp_db)
+    t_old = TaskRecord(
+        task_id="old-completed",
+        state=TaskState.COMPLETED,
+        updated_at="2020-01-01T00:00:00+00:00",
+    )
+    t_new = TaskRecord(
+        task_id="recent-completed",
+        state=TaskState.COMPLETED,
+        updated_at="2099-01-01T00:00:00+00:00",
+    )
+    storage.save_task(t_old)
+    storage.save_task(t_new)
+
+    deleted = storage.clean_expired_tasks(max_age_seconds=3600)
+    assert deleted == 1
+    assert storage.get_task("old-completed") is None
+    assert storage.get_task("recent-completed") is not None
+    storage.close()

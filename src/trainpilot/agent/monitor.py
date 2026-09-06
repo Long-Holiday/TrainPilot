@@ -105,18 +105,28 @@ class TrainingGuardian:
         epoch: Optional[int] = None,
         extra: Optional[Dict[str, Any]] = None,
     ) -> Any:
-        """Convenience wrapper: report CUDA OOM through the same HITL pipeline."""
+        """Convenience wrapper: report CUDA OOM through the same HITL pipeline with VRAM metrics."""
+        allocated_mb = None
+        reserved_mb = None
         try:
             import torch  # type: ignore
             if torch.cuda.is_available():
+                allocated_mb = round(torch.cuda.memory_allocated() / (1024 * 1024), 2)
+                reserved_mb = round(torch.cuda.memory_reserved() / (1024 * 1024), 2)
                 torch.cuda.empty_cache()
         except Exception:
             pass
+
+        oom_metrics: Dict[str, Any] = {"error": "CUDA_OOM"}
+        if allocated_mb is not None:
+            oom_metrics["allocated_mb"] = allocated_mb
+            oom_metrics["reserved_mb"] = reserved_mb
+
         return self.handle_anomaly(
             message=f"CUDA out of memory at step {step}",
             step=step,
             epoch=epoch,
-            metrics={"error": "CUDA_OOM"},
+            metrics=oom_metrics,
             extra=extra,
         )
 

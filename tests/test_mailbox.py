@@ -98,3 +98,29 @@ def test_heartbeat_updates_metadata(mailbox: TaskMailboxManager):
     assert task.latest_step == 25
     assert task.latest_metrics["gpu_mem"] == 0.85
     assert task.last_heartbeat_at is not None
+
+
+def test_mailbox_tasks_count(mailbox: TaskMailboxManager):
+    """Verify get_tasks_count behaves consistently."""
+    initial_count = mailbox.get_tasks_count()
+    mailbox._get_or_create("count-task-1")
+    mailbox._get_or_create("count-task-2")
+    assert mailbox.get_tasks_count() == initial_count + 2
+
+
+def test_mailbox_lazy_load_from_storage(mailbox: TaskMailboxManager):
+    """Verify get_task can lazily retrieve a task from storage even if evicted from RAM."""
+    task_id = "test-lazy-evicted-task"
+    rec = mailbox._get_or_create(task_id)
+    rec.state = TaskState.COMPLETED
+    mailbox._storage.save_task(rec)
+
+    # Manually remove from RAM
+    mailbox._tasks.pop(task_id, None)
+    assert task_id not in mailbox._tasks
+
+    # get_task should lazily restore summary from SQLite
+    summary = mailbox.get_task(task_id)
+    assert summary is not None
+    assert summary.task_id == task_id
+    assert summary.state == TaskState.COMPLETED

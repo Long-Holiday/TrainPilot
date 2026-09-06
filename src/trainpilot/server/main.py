@@ -87,7 +87,7 @@ def health_check():
     try:
         stale = default_mailbox.get_stale_tasks(timeout_seconds=settings.task_heartbeat_timeout_seconds)
         stale_count = len(stale)
-        tasks_count = len(default_mailbox.list_tasks(limit=100000, offset=0))
+        tasks_count = default_mailbox.get_tasks_count()
     except Exception:
         stale_count = 0
         tasks_count = -1
