@@ -20,13 +20,42 @@ logging.basicConfig(
 logger = logging.getLogger("trainpilot.server")
 
 
+# Initialize MCP Server Streamable HTTP transport (latest MCP standard)
+streamable_mcp_app = mcp_server.streamable_http_app(
+    streamable_http_path="/mcp",
+    transport_security=settings.mcp_transport_security,
+)
+
+# Extract ASGI endpoint to support safe session_manager reload across test/process lifespans
+_streamable_asgi_handler = None
+for _r in streamable_mcp_app.routes:
+    if hasattr(_r, "endpoint") and hasattr(_r.endpoint, "session_manager"):
+        _streamable_asgi_handler = _r.endpoint
+        break
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup and shutdown hooks."""
-    logger.info("Starting TrainPilot Control Plane MCP Gateway...")
+    logger.info("Starting TrainPilot Control Plane MCP Gateway (Streamable HTTP)...")
     logger.info("Feishu configured: %s (Receiver: %s)", settings.is_feishu_configured, settings.feishu_receiver_id)
     default_watchdog.start()
-    yield
+
+    # Ensure clean StreamableHTTPSessionManager instance for each lifespan cycle
+    sm = getattr(mcp_server._lowlevel_server, "_session_manager", None)
+    if sm is not None and getattr(sm, "_has_started", False):
+        from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+        sm = StreamableHTTPSessionManager(
+            app=mcp_server._lowlevel_server,
+            security_settings=settings.mcp_transport_security,
+        )
+        mcp_server._lowlevel_server._session_manager = sm
+        if _streamable_asgi_handler is not None:
+            _streamable_asgi_handler.session_manager = sm
+
+    async with sm.run():
+        yield
+
     default_watchdog.stop()
     logger.info("TrainPilot Control Plane MCP Gateway stopped.")
 
@@ -66,6 +95,8 @@ def health_check():
         "status": "healthy",
         "service": "trainpilot-control-plane",
         "mcp_enabled": True,
+        "mcp_transport": "streamable_http",
+        "mcp_endpoint": "/mcp",
         "version": __version__,
         "feishu_ready": settings.is_feishu_configured,
         "auth_enforced": settings.is_api_token_configured,
@@ -94,12 +125,13 @@ def root():
         "message": "Welcome to TrainPilot Control Plane MCP Server",
         "docs_url": "/docs",
         "health_url": "/health",
-        "mcp_sse_url": "/sse",
+        "mcp_url": "/mcp",
+        "transport": "streamable_http",
     }
 
 
-# Mount MCP Server SSE transport at root so /sse and /messages/ endpoints are exposed
-app.mount("/", mcp_server.sse_app(transport_security=None))
+# Mount MCP Server Streamable HTTP transport at root so /mcp endpoint is exposed
+app.mount("/", streamable_mcp_app)
 
 
 def start():

@@ -177,7 +177,7 @@ while [[ $# -gt 0 ]]; do
             echo "  TRAINPILOT_PORT            监听端口 (默认 28780)"
             echo ""
             echo "内网 GPU 节点作为客户端调用:"
-            echo "  配置 TRAINPILOT_GATEWAY_URL=http://<公网IP>:28780 或通过 MCP 协议连接 /sse"
+            echo "  配置 TRAINPILOT_GATEWAY_URL=http://<公网IP>:28780 或通过 MCP Streamable HTTP 协议连接 /mcp"
             exit 0
             ;;
         *)
@@ -363,11 +363,11 @@ echo -e "${BOLD}TrainPilot Control Plane & MCP Server 启动信息 (公网服务
 echo -e "  - ${CYAN}绑定地址:${NC}      ${GREEN}${TARGET_BIND_HOST}${NC}"
 echo -e "  - ${CYAN}监听端口:${NC}      ${GREEN}${TARGET_PORT}${NC} (已采用小众高位端口规避冲突)"
 echo -e "  - ${CYAN}网关服务地址:${NC}  http://${TARGET_BIND_HOST}:${TARGET_PORT}"
-echo -e "  - ${CYAN}MCP SSE 端点:${NC}  ${GREEN}http://${TARGET_DISPLAY_HOST}:${TARGET_PORT}/sse${NC}"
+echo -e "  - ${CYAN}MCP 端点:${NC}      ${GREEN}http://${TARGET_DISPLAY_HOST}:${TARGET_PORT}/mcp${NC} (Streamable HTTP)"
 echo -e "  - ${CYAN}API 交互文档:${NC}  http://${TARGET_DISPLAY_HOST}:${TARGET_PORT}/docs"
 echo -e "  - ${CYAN}健康检查接口:${NC}  http://${TARGET_DISPLAY_HOST}:${TARGET_PORT}/health"
 echo -e "  - ${CYAN}运行模式:${NC}      ${RUN_MODE}"
-echo -e "  - ${CYAN}客户端调用:${NC}    内网 GPU 节点通过 MCP SSE 或 HTTP 作为客户端主动连接"
+echo -e "  - ${CYAN}客户端调用:${NC}    内网 GPU 节点通过 MCP Streamable HTTP (/mcp) 或 HTTP 作为客户端主动连接"
 echo "----------------------------------------------------------------------"
 
 if [ "${RUN_MODE}" = "daemon" ]; then

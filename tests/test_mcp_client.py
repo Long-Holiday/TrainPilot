@@ -186,3 +186,20 @@ def test_cli_parser_and_subcommands(live_mcp_server):
         "get-status",
     ])
     assert code_st == 0
+
+
+def test_external_host_header_streamable_http_connection(live_mcp_server):
+    """Verify that remote/external Host header (e.g. 35.202.16.245:28780) works over Streamable HTTP."""
+    import asyncio
+    import httpx2
+    from mcp.client.streamable_http import streamable_http_client
+    from mcp.client.session import ClientSession
+
+    async def _test():
+        async with httpx2.AsyncClient(headers={"Host": "35.202.16.245:28780"}) as http_client:
+            async with streamable_http_client(f"{live_mcp_server}/mcp", http_client=http_client) as (read, write):
+                async with ClientSession(read, write) as session:
+                    init_res = await session.initialize()
+                    assert init_res.server_info.name == "TrainPilot"
+
+    asyncio.run(_test())

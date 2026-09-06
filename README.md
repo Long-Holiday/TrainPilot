@@ -52,7 +52,7 @@ TrainPilot/
 ├── src/trainpilot/
 │   ├── server/              # 公网控制面与 MCP Server
 │   │   ├── mcp_server.py    # 标准 MCP Server 实现 (Tools & Resources)
-│   │   ├── main.py          # FastAPI 服务端入口 (挂载 /sse 与 Webhook)
+│   │   ├── main.py          # FastAPI 服务端入口 (挂载 /mcp 与 Webhook)
 │   │   ├── mailbox.py       # Mailbox 状态机核心调度
 │   │   ├── watchdog.py      # 失联看门狗守护线程
 │   │   ├── storage/         # SQLite WAL 单一持久化与自动修剪
@@ -85,7 +85,7 @@ uv sync --extra feishu
 
 | 节点角色 | 部署位置 | 配置文件模板 | 启动方式 | 核心说明 |
 | :--- | :--- | :--- | :--- | :--- |
-| **MCP 服务端** | 公网云服务器 (有公网 IP) | `.env.example`<br>(配置模块一) | `./start.sh`<br>(`--daemon` 后台守护) | 监听 `0.0.0.0:28780`，暴露 `/sse` MCP 远程端点与飞书回调 |
+| **MCP 服务端** | 公网云服务器 (有公网 IP) | `.env.example`<br>(配置模块一) | `./start.sh`<br>(`--daemon` 后台守护) | 监听 `0.0.0.0:28780`，暴露 `/mcp` Streamable HTTP 端点与飞书回调 |
 | **GPU 客户端** | 内网训练集群 (无公网 IP) | `.env.example`<br>(配置模块二) | Python 代码直接调用或 CLI | 配置公网服务端 IP/域名，作为客户端主动发起连接 |
 
 ---
@@ -139,13 +139,13 @@ client.notify_milestone(
 
 ### 2. 外部 AI Agent 接入 (作为 MCP Client)
 
-任何支持 MCP 协议的智能体（如 Claude Code、Cursor、OpenCode、Gemini CLI 等）可直接在配置文件中添加公网 MCP Server：
+任何支持 MCP 协议的智能体（如 Claude Code、Cursor、OpenCode、Gemini CLI 等）可直接在配置文件中添加公网 MCP Server (采用最新的 Streamable HTTP 协议)：
 
 ```json
 {
   "mcpServers": {
     "trainpilot": {
-      "url": "http://<公网服务器IP>:28780/sse"
+      "url": "http://<公网服务器IP>:28780/mcp"
     }
   }
 }

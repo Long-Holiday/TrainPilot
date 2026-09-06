@@ -117,6 +117,16 @@ class ServerSettings(BaseSettings):
         description="Default max timeout in seconds for server-side long polling",
     )
 
+    # MCP Transport Security (DNS rebinding protection)
+    mcp_enable_dns_rebinding_protection: bool = Field(
+        default=False,
+        description="Whether to enable DNS rebinding protection for MCP transport (default False to allow remote cluster access)",
+    )
+    mcp_allowed_hosts: str = Field(
+        default="*",
+        description="Comma-separated allowed Host headers when DNS rebinding protection is enabled",
+    )
+
     @property
     def effective_bind_host(self) -> str:
         """Web 侧实际用于 uvicorn --host 的绑定地址。"""
@@ -164,6 +174,32 @@ class ServerSettings(BaseSettings):
         if self.parsed_cors_origins == ["*"]:
             return False
         return self.cors_allow_credentials
+
+    @property
+    def mcp_transport_security(self):
+        """MCP transport security settings for DNS rebinding protection."""
+        from mcp.server.transport_security import TransportSecuritySettings
+
+        if not self.mcp_enable_dns_rebinding_protection:
+            return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+
+        raw = (self.mcp_allowed_hosts or "*").strip()
+        if raw == "*":
+            allowed = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+            if self.host and self.host != "0.0.0.0":
+                allowed.append(f"{self.host}:*")
+            return TransportSecuritySettings(
+                enable_dns_rebinding_protection=True,
+                allowed_hosts=allowed,
+                allowed_origins=["*"],
+            )
+
+        allowed = [h.strip() for h in raw.split(",") if h.strip()]
+        return TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=allowed,
+            allowed_origins=["*"],
+        )
 
 
 settings = ServerSettings()

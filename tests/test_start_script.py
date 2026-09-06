@@ -16,7 +16,7 @@ def test_start_script_help():
     assert "--daemon" in res.stdout
     assert "28780" in res.stdout
     assert "--host" in res.stdout
-    assert "/sse" in res.stdout
+    assert "/mcp" in res.stdout
     assert "setup_skills.sh" not in res.stdout
 
 

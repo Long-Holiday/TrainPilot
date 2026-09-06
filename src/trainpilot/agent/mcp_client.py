@@ -15,7 +15,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from mcp.client.session import ClientSession
-from mcp.client.sse import sse_client
+from mcp.client.streamable_http import streamable_http_client
 
 logger = logging.getLogger("trainpilot.agent.mcp_client")
 
@@ -129,13 +129,17 @@ class TrainPilotMCPClient:
             raw_url = f"http://{host}:{port}"
 
         raw_url = raw_url.rstrip("/")
-        if not raw_url.endswith("/sse"):
-            self.sse_url = f"{raw_url}/sse"
-            self.base_url = raw_url
-        else:
-            self.sse_url = raw_url
+        if raw_url.endswith("/sse"):
+            raw_url = raw_url[:-4]
+        if raw_url.endswith("/mcp"):
+            self.mcp_url = raw_url
             self.base_url = raw_url[:-4]
+        else:
+            self.mcp_url = f"{raw_url}/mcp"
+            self.base_url = raw_url
 
+        # Backwards compatibility alias
+        self.sse_url = self.mcp_url
         self.default_task_id = task_id or os.getenv("TRAINPILOT_TASK_ID", "default-task")
         self.timeout = timeout
 
@@ -146,9 +150,9 @@ class TrainPilotMCPClient:
         return tid
 
     async def call_tool_async(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
-        """Call a tool on the remote TrainPilot MCP Server asynchronously."""
+        """Call a tool on the remote TrainPilot MCP Server asynchronously over Streamable HTTP."""
         sanitized_args = _sanitize_for_json(arguments)
-        async with sse_client(self.sse_url, timeout=self.timeout) as (read, write):
+        async with streamable_http_client(self.mcp_url) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 response = await session.call_tool(tool_name, sanitized_args)
@@ -166,8 +170,8 @@ class TrainPilotMCPClient:
         return _run_coroutine_sync(self.call_tool_async(tool_name, arguments))
 
     async def list_tools_async(self) -> List[str]:
-        """List all available tools on the remote MCP Server asynchronously."""
-        async with sse_client(self.sse_url, timeout=self.timeout) as (read, write):
+        """List all available tools on the remote MCP Server asynchronously over Streamable HTTP."""
+        async with streamable_http_client(self.mcp_url) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 tools_res = await session.list_tools()
