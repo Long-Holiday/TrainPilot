@@ -1,5 +1,6 @@
 """Thread-safe task mailbox and state machine management with SQLite persistence and Long Polling."""
 
+import asyncio
 import json
 import logging
 import threading
@@ -79,6 +80,7 @@ class TaskMailboxManager:
         self._tasks: Dict[str, TaskRecord] = {}
         self._max_events = max(1, int(max_events_per_task))
         self._instruction_waiters: Dict[str, List[threading.Event]] = defaultdict(list)
+        self._async_instruction_waiters: Dict[str, List[asyncio.Event]] = defaultdict(list)
 
         # Initialize SQLite Storage
         if storage is not None:
@@ -217,10 +219,26 @@ class TaskMailboxManager:
                 logger.error("Failed to update heartbeat in SQLite: %s", e)
 
     def _notify_instruction_waiters(self, task_id: str) -> None:
-        """Wake up any pending long-polling requests waiting for this task's decision."""
-        waiters = list(self._instruction_waiters.get(task_id, []))
-        for ev in waiters:
-            ev.set()
+        """Wake up any pending long-polling requests (sync or async) waiting for this task's decision."""
+        # 1. Wake up synchronous waiters
+        sync_waiters = list(self._instruction_waiters.get(task_id, []))
+        for ev in sync_waiters:
+            try:
+                ev.set()
+            except Exception as e:
+                logger.debug("Failed setting sync event for %s: %s", task_id, e)
+
+        # 2. Wake up AsyncIO waiters
+        async_waiters = list(self._async_instruction_waiters.get(task_id, []))
+        for a_ev in async_waiters:
+            try:
+                loop = getattr(a_ev, "_loop", None)
+                if loop and loop.is_running():
+                    loop.call_soon_threadsafe(a_ev.set)
+                else:
+                    a_ev.set()
+            except Exception as e:
+                logger.debug("Failed setting async event for %s: %s", task_id, e)
 
     def submit_decision(
         self,
@@ -407,6 +425,98 @@ class TaskMailboxManager:
                 decided_at=None,
             )
 
+    async def get_instruction_async(
+        self, task_id: str, pop: bool = True, wait_timeout: float = 0.0
+    ) -> InstructionResponse:
+        """Poll instructions for a task with native AsyncIO Long Polling.
+
+        Does NOT block any OS thread or FastAPI/AnyIO thread pool.
+        Wakes up immediately when submit_decision or try_auto_resolve is called.
+        """
+        # 1. Fast path: check if instruction is already ready
+        with self._lock:
+            task = self._get_or_create(task_id)
+            if task.pending_instruction and task.pending_instruction.ready:
+                instruction = task.pending_instruction
+                if pop:
+                    task.pending_instruction = None
+                    task.state = TaskState.RECOVERING
+                    task.updated_at = utc_now_iso()
+                    task.latest_instruction = {
+                        "instruction_id": instruction.instruction_id,
+                        "action": instruction.action,
+                        "payload": instruction.payload,
+                        "decision_by": instruction.decision_by,
+                        "popped_at": task.updated_at,
+                    }
+                    try:
+                        self._storage.save_task(task)
+                    except Exception as e:
+                        logger.error("Failed to update pop state in SQLite: %s", e)
+                    logger.info("Task %s polled instruction %s (%s), transitioned to RECOVERING",
+                                task_id, instruction.instruction_id, instruction.action)
+                return instruction
+
+            if wait_timeout <= 0.0:
+                return InstructionResponse(
+                    ready=False,
+                    status=task.state,
+                    instruction_id=None,
+                    action=None,
+                    payload=None,
+                    decision_by=None,
+                    decided_at=None,
+                )
+
+            # Register async long-poll waiter
+            wait_event = asyncio.Event()
+            self._async_instruction_waiters[task_id].append(wait_event)
+
+        # 2. Native AsyncIO wait (outside the lock, zero threadpool consumption!)
+        try:
+            await asyncio.wait_for(wait_event.wait(), timeout=wait_timeout)
+        except (asyncio.TimeoutError, TimeoutError):
+            pass
+        finally:
+            with self._lock:
+                waiters = self._async_instruction_waiters.get(task_id, [])
+                if wait_event in waiters:
+                    waiters.remove(wait_event)
+
+        # 3. Re-acquire lock and check again
+        with self._lock:
+            task = self._get_or_create(task_id)
+            if task.pending_instruction and task.pending_instruction.ready:
+                instruction = task.pending_instruction
+                if pop:
+                    task.pending_instruction = None
+                    task.state = TaskState.RECOVERING
+                    task.updated_at = utc_now_iso()
+                    task.latest_instruction = {
+                        "instruction_id": instruction.instruction_id,
+                        "action": instruction.action,
+                        "payload": instruction.payload,
+                        "decision_by": instruction.decision_by,
+                        "popped_at": task.updated_at,
+                    }
+                    try:
+                        self._storage.save_task(task)
+                    except Exception as e:
+                        logger.error("Failed to update pop state in SQLite: %s", e)
+                    logger.info("Task %s (async long-polled) obtained instruction %s (%s) -> RECOVERING",
+                                task_id, instruction.instruction_id, instruction.action)
+                return instruction
+
+            return InstructionResponse(
+                ready=False,
+                status=task.state,
+                instruction_id=None,
+                action=None,
+                payload=None,
+                decision_by=None,
+                decided_at=None,
+            )
+
     def ack_instruction(
         self,
         task_id: str,
@@ -575,6 +685,7 @@ class TaskMailboxManager:
         with self._lock:
             self._tasks.clear()
             self._instruction_waiters.clear()
+            self._async_instruction_waiters.clear()
             try:
                 self._storage.reset()
             except Exception as e:

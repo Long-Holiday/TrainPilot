@@ -52,7 +52,8 @@ def test_report_milestone_tool():
     assert task.latest_epoch == 1
 
 
-def test_report_alert_and_decision_lifecycle():
+@pytest.mark.asyncio
+async def test_report_alert_and_decision_lifecycle():
     """Test report_alert, submit_decision, poll_instruction, and ack_instruction tools."""
     task_id = "test-mcp-alert-cycle"
 
@@ -82,7 +83,7 @@ def test_report_alert_and_decision_lifecycle():
     assert instruction_id is not None
 
     # 3. Poll instruction with pop=True -> transitions to RECOVERING
-    poll_res = poll_instruction(task_id=task_id, wait_timeout=0.0, pop=True)
+    poll_res = await poll_instruction(task_id=task_id, wait_timeout=0.0, pop=True)
     assert poll_res["has_instruction"] is True
     assert poll_res["action"] == "self_resolve"
     assert poll_res["instruction_id"] == instruction_id

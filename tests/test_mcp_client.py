@@ -39,6 +39,15 @@ def live_mcp_server():
     server.should_exit = True
 
 
+@pytest.fixture(scope="module", autouse=True)
+def decouple_env_auth():
+    from trainpilot.server.config import settings
+    old_token = settings.api_token
+    settings.api_token = None
+    yield
+    settings.api_token = old_token
+
+
 @pytest.fixture(autouse=True)
 def clean_mailbox():
     default_mailbox.reset()

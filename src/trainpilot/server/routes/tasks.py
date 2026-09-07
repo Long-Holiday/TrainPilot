@@ -121,7 +121,7 @@ def notify_event(req: EventNotifyRequest, background_tasks: BackgroundTasks) -> 
 
 
 @router.get("/{task_id}/instruction", response_model=InstructionResponse)
-def poll_instruction(
+async def poll_instruction(
     task_id: str,
     pop: bool = Query(default=True, description="Whether to consume and transition state to RECOVERING"),
     wait_timeout: float = Query(
@@ -133,10 +133,10 @@ def poll_instruction(
 ) -> InstructionResponse:
     """Poll for pending human instructions for a given task.
 
-    Supports Long Polling: specify wait_timeout > 0 to hold connection until
-    human decision arrives or timeout expires.
+    Supports native AsyncIO Long Polling: specify wait_timeout > 0 to hold connection
+    without consuming AnyIO thread pool workers until human decision arrives or timeout expires.
     """
-    instruction = default_mailbox.get_instruction(task_id, pop=pop, wait_timeout=wait_timeout)
+    instruction = await default_mailbox.get_instruction_async(task_id, pop=pop, wait_timeout=wait_timeout)
     return instruction
 
 

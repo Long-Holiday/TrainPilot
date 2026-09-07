@@ -65,6 +65,10 @@ def main(argv=None) -> int:
         "-t",
         help="Task ID (default: $TRAINPILOT_TASK_ID)",
     )
+    parser.add_argument(
+        "--api-token",
+        help="API token for Bearer authorization (default: $TRAINPILOT_API_TOKEN)",
+    )
 
     subparsers = parser.add_subparsers(dest="subcommand", required=True, help="Available subcommands")
 
@@ -127,6 +131,7 @@ def main(argv=None) -> int:
     client = TrainPilotMCPClient(
         server_url=args.server_url,
         task_id=args.task_id,
+        api_token=args.api_token,
     )
 
     try:

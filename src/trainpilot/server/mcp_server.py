@@ -204,22 +204,22 @@ def report_alert(
 
 
 @mcp_server.tool()
-def poll_instruction(
+async def poll_instruction(
     task_id: str,
     wait_timeout: float = 20.0,
     pop: bool = True,
 ) -> Dict[str, Any]:
     """Poll for pending human-in-the-loop instructions for a training task.
 
-    Supports long-polling: holds connection up to wait_timeout seconds until a
-    decision arrives or timeout expires.
+    Supports native AsyncIO long-polling: holds connection up to wait_timeout seconds
+    without consuming thread pool workers until a decision arrives or timeout expires.
 
     Args:
         task_id: Unique identifier for the training task.
         wait_timeout: Long-polling timeout in seconds (0 for immediate non-blocking return).
         pop: If true, consumes the instruction and transitions state to RECOVERING.
     """
-    instruction = default_mailbox.get_instruction(task_id, pop=pop, wait_timeout=wait_timeout)
+    instruction = await default_mailbox.get_instruction_async(task_id, pop=pop, wait_timeout=wait_timeout)
     res = instruction.model_dump()
     res["has_instruction"] = res.get("ready", False)
     return res

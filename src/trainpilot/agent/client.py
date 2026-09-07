@@ -3,8 +3,10 @@
 import logging
 import math
 import os
+import threading
 import time
-from typing import Any, Dict, Optional
+from collections import deque
+from typing import Any, Dict, List, Optional
 import requests
 
 logger = logging.getLogger("trainpilot.agent.client")
@@ -120,6 +122,8 @@ class TrainPilotClient:
         task_id: Optional[str] = None,
         timeout: int = 10,
         api_token: Optional[str] = None,
+        enable_offline_buffering: bool = True,
+        max_offline_buffer_size: int = 1000,
     ):
         if gateway_url is None:
             # 延迟导入避免循环依赖; 解析逻辑收敛到 common.gateway
@@ -134,9 +138,47 @@ class TrainPilotClient:
         self.task_id = task_id
         self.timeout = timeout
         self.api_token = api_token
+        self.enable_offline_buffering = enable_offline_buffering
+        self.max_offline_buffer_size = max(1, int(max_offline_buffer_size))
+        self._offline_buffer: deque = deque(maxlen=self.max_offline_buffer_size)
+        self._buffer_lock = threading.Lock()
         self.session = requests.Session()
         if api_token:
             self.session.headers.update({"Authorization": f"Bearer {api_token}"})
+
+    def get_buffered_count(self) -> int:
+        """Return the number of events currently buffered offline."""
+        with self._buffer_lock:
+            return len(self._offline_buffer)
+
+    def flush_offline_buffer(self) -> int:
+        """Attempt to flush buffered offline events in chronological order to the gateway.
+
+        Stops at the first network failure to preserve strict causal ordering.
+        Returns the number of successfully delivered events.
+        """
+        flushed_count = 0
+        url = f"{self.gateway_url}/api/tasks/notify"
+        while True:
+            with self._buffer_lock:
+                if not self._offline_buffer:
+                    break
+                payload = self._offline_buffer[0]
+
+            try:
+                resp = self.session.post(url, json=payload, timeout=self.timeout)
+                resp.raise_for_status()
+                with self._buffer_lock:
+                    if self._offline_buffer and self._offline_buffer[0] is payload:
+                        self._offline_buffer.popleft()
+                flushed_count += 1
+            except requests.RequestException as exc:
+                logger.debug("[%s] Offline buffer flush paused: %s", self.task_id, exc)
+                break
+
+        if flushed_count > 0:
+            logger.info("[%s] Flushed %d buffered offline events to gateway", self.task_id, flushed_count)
+        return flushed_count
 
     def notify_event(
         self,
@@ -147,8 +189,29 @@ class TrainPilotClient:
         metrics: Optional[Dict[str, Any]] = None,
         extra: Optional[Dict[str, Any]] = None,
         agent_note: Optional[str] = None,
+        fail_silently: Optional[bool] = None,
+        max_retries: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Report any event (alert, milestone, completed, failed) to the gateway."""
+        """Report any event (alert, milestone, completed, failed) to the gateway.
+
+        Resilience features:
+        - Automatic offline buffering: network outages buffer events instead of crashing training.
+        - Auto-flush: draining pending offline events when network recovers.
+        - Exponential backoff retry: for critical alerts and states.
+        """
+        is_routine = event_type.lower() in ("milestone", "heartbeat")
+        if fail_silently is None:
+            fail_silently = is_routine
+        if max_retries is None:
+            max_retries = 0 if is_routine else 3
+
+        # Drain queued offline buffer if online
+        if self.enable_offline_buffering and self.get_buffered_count() > 0:
+            try:
+                self.flush_offline_buffer()
+            except Exception:
+                pass
+
         url = f"{self.gateway_url}/api/tasks/notify"
         raw_payload = {
             "task_id": self.task_id,
@@ -161,15 +224,41 @@ class TrainPilotClient:
             "agent_note": agent_note,
         }
         payload = _sanitize_for_json(raw_payload)
-        try:
-            resp = self.session.post(url, json=payload, timeout=self.timeout)
-            resp.raise_for_status()
-            data = resp.json()
-            logger.info("[%s] Event '%s' reported successfully: %s", self.task_id, event_type, message)
-            return data
-        except requests.RequestException as exc:
-            logger.error("[%s] Failed to report event '%s': %s", self.task_id, event_type, exc)
-            raise
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(max_retries + 1):
+            if attempt > 0:
+                backoff = min(6.0, 0.4 * (2 ** (attempt - 1)))
+                time.sleep(backoff)
+            try:
+                resp = self.session.post(url, json=payload, timeout=self.timeout)
+                resp.raise_for_status()
+                data = resp.json()
+                logger.info("[%s] Event '%s' reported successfully: %s", self.task_id, event_type, message)
+                return data
+            except requests.RequestException as exc:
+                last_exc = exc
+                if attempt < max_retries:
+                    logger.warning("[%s] Retry %d/%d reporting '%s' due to network error: %s",
+                                   self.task_id, attempt + 1, max_retries, event_type, exc)
+
+        # All attempts failed: buffer offline or raise
+        if self.enable_offline_buffering and fail_silently:
+            with self._buffer_lock:
+                self._offline_buffer.append(payload)
+                buf_size = len(self._offline_buffer)
+            logger.warning("[%s] Network unavailable; buffered '%s' event (queue: %d). Error: %s",
+                           self.task_id, event_type, buf_size, last_exc)
+            return {
+                "success": True,
+                "buffered": True,
+                "task_id": self.task_id,
+                "event_type": event_type,
+                "message": f"Buffered offline ({buf_size} pending)",
+            }
+
+        logger.error("[%s] Failed to report event '%s': %s", self.task_id, event_type, last_exc)
+        raise last_exc
 
     def notify_milestone(
         self,
@@ -179,6 +268,8 @@ class TrainPilotClient:
         metrics: Optional[Dict[str, Any]] = None,
         agent_note: Optional[str] = None,
         extra: Optional[Dict[str, Any]] = None,
+        fail_silently: Optional[bool] = None,
+        max_retries: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Report a cruising milestone (e.g., epoch finished, checkpoint saved).
 
@@ -194,6 +285,8 @@ class TrainPilotClient:
             metrics=metrics,
             extra=extra,
             agent_note=agent_note,
+            fail_silently=fail_silently,
+            max_retries=max_retries,
         )
 
     def notify_alert(
@@ -204,6 +297,8 @@ class TrainPilotClient:
         metrics: Optional[Dict[str, Any]] = None,
         extra: Optional[Dict[str, Any]] = None,
         agent_note: Optional[str] = None,
+        fail_silently: Optional[bool] = None,
+        max_retries: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Report a high-priority alert (Loss NaN, OOM, loss explosion) and request HITL intervention."""
         return self.notify_event(
@@ -214,6 +309,8 @@ class TrainPilotClient:
             metrics=metrics,
             extra=extra,
             agent_note=agent_note,
+            fail_silently=fail_silently,
+            max_retries=max_retries,
         )
 
     def poll_instruction(
@@ -276,6 +373,7 @@ class TrainPilotClient:
         step: Optional[int] = None,
         epoch: Optional[int] = None,
         metrics: Optional[Dict[str, Any]] = None,
+        max_retries: int = 3,
     ) -> Dict[str, Any]:
         """Acknowledge completion of a recovery instruction to transition state back to RUNNING."""
         url = f"{self.gateway_url}/api/tasks/{self.task_id}/ack"
@@ -291,15 +389,25 @@ class TrainPilotClient:
             "metrics": metrics,
         }
         payload = _sanitize_for_json(raw_payload)
-        try:
-            resp = self.session.post(url, json=payload, timeout=self.timeout)
-            resp.raise_for_status()
-            data = resp.json()
-            logger.info("[%s] Instruction '%s' acked with status '%s'", self.task_id, action, status)
-            return data
-        except requests.RequestException as exc:
-            logger.error("[%s] Failed to acknowledge instruction: %s", self.task_id, exc)
-            raise
+        last_exc: Optional[Exception] = None
+        for attempt in range(max_retries + 1):
+            if attempt > 0:
+                backoff = min(6.0, 0.5 * (2 ** (attempt - 1)))
+                time.sleep(backoff)
+            try:
+                resp = self.session.post(url, json=payload, timeout=self.timeout)
+                resp.raise_for_status()
+                data = resp.json()
+                logger.info("[%s] Instruction '%s' acked with status '%s'", self.task_id, action, status)
+                return data
+            except requests.RequestException as exc:
+                last_exc = exc
+                if attempt < max_retries:
+                    logger.warning("[%s] Retry %d/%d acknowledging instruction '%s' due to error: %s",
+                                   self.task_id, attempt + 1, max_retries, action, exc)
+
+        logger.error("[%s] Failed to acknowledge instruction: %s", self.task_id, last_exc)
+        raise last_exc
 
     def send_heartbeat(
         self,
@@ -307,7 +415,7 @@ class TrainPilotClient:
         epoch: Optional[int] = None,
         metrics: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        """Send a lightweight heartbeat ping."""
+        """Send a lightweight heartbeat ping and flush any buffered offline events."""
         url = f"{self.gateway_url}/api/tasks/{self.task_id}/heartbeat"
         raw_payload = {
             "task_id": self.task_id,
@@ -321,6 +429,12 @@ class TrainPilotClient:
             if resp.status_code != 200:
                 logger.warning("[%s] Heartbeat rejected: HTTP %s %s", self.task_id, resp.status_code, resp.text[:200])
                 return False
+            # If heartbeat succeeds, network is healthy; drain offline buffer
+            if self.enable_offline_buffering and self.get_buffered_count() > 0:
+                try:
+                    self.flush_offline_buffer()
+                except Exception:
+                    pass
             return True
         except requests.RequestException as exc:
             logger.warning("[%s] Heartbeat delivery failed: %s", self.task_id, exc)

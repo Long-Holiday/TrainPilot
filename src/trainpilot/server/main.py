@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from trainpilot import __version__
+from trainpilot.server.auth import McpAuthMiddleware
 from trainpilot.server.config import settings
 from trainpilot.server.mailbox import default_mailbox
 from trainpilot.server.mcp_server import mcp_server
@@ -66,6 +67,9 @@ app = FastAPI(
     version=__version__,
     lifespan=lifespan,
 )
+
+# MCP Endpoint API Token Authentication
+app.add_middleware(McpAuthMiddleware)
 
 # Cross-Origin Resource Sharing
 app.add_middleware(

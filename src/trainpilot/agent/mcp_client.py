@@ -112,6 +112,7 @@ class TrainPilotMCPClient:
         server_url: Optional[str] = None,
         task_id: Optional[str] = None,
         timeout: float = 30.0,
+        api_token: Optional[str] = None,
     ):
         """Initialize MCP client.
 
@@ -121,6 +122,7 @@ class TrainPilotMCPClient:
                 TRAINPILOT_GATEWAY_URL or TRAINPILOT_HOST:TRAINPILOT_PORT.
             task_id: Default task identifier. Resolves from TRAINPILOT_TASK_ID if omitted.
             timeout: Default timeout in seconds for operations.
+            api_token: Optional API token for Bearer authorization. Resolves from TRAINPILOT_API_TOKEN if omitted.
         """
         raw_url = server_url or os.getenv("TRAINPILOT_GATEWAY_URL")
         if not raw_url:
@@ -142,6 +144,7 @@ class TrainPilotMCPClient:
         self.sse_url = self.mcp_url
         self.default_task_id = task_id or os.getenv("TRAINPILOT_TASK_ID", "default-task")
         self.timeout = timeout
+        self.api_token = api_token or os.getenv("TRAINPILOT_API_TOKEN")
 
     def _resolve_task_id(self, task_id: Optional[str]) -> str:
         tid = task_id or self.default_task_id
@@ -149,21 +152,34 @@ class TrainPilotMCPClient:
             raise ValueError("task_id must be provided or configured via TRAINPILOT_TASK_ID")
         return tid
 
+    def _create_http_client(self):
+        """Create an AsyncClient configured with timeouts and optional API token headers."""
+        try:
+            import httpx2 as _http_mod
+        except ImportError:
+            import httpx as _http_mod
+
+        headers = {}
+        if self.api_token:
+            headers["Authorization"] = f"Bearer {self.api_token}"
+        return _http_mod.AsyncClient(headers=headers, timeout=self.timeout)
+
     async def call_tool_async(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
         """Call a tool on the remote TrainPilot MCP Server asynchronously over Streamable HTTP."""
         sanitized_args = _sanitize_for_json(arguments)
-        async with streamable_http_client(self.mcp_url) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                response = await session.call_tool(tool_name, sanitized_args)
-                if response.content:
-                    first = response.content[0]
-                    if hasattr(first, "text"):
-                        try:
-                            return json.loads(first.text)
-                        except Exception:
-                            return first.text
-                return response
+        async with self._create_http_client() as http_client:
+            async with streamable_http_client(self.mcp_url, http_client=http_client) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    response = await session.call_tool(tool_name, sanitized_args)
+                    if response.content:
+                        first = response.content[0]
+                        if hasattr(first, "text"):
+                            try:
+                                return json.loads(first.text)
+                            except Exception:
+                                return first.text
+                    return response
 
     def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
         """Synchronously call a tool on the remote TrainPilot MCP Server."""
@@ -171,11 +187,12 @@ class TrainPilotMCPClient:
 
     async def list_tools_async(self) -> List[str]:
         """List all available tools on the remote MCP Server asynchronously over Streamable HTTP."""
-        async with streamable_http_client(self.mcp_url) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                tools_res = await session.list_tools()
-                return [t.name for t in tools_res.tools]
+        async with self._create_http_client() as http_client:
+            async with streamable_http_client(self.mcp_url, http_client=http_client) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    tools_res = await session.list_tools()
+                    return [t.name for t in tools_res.tools]
 
     def list_tools(self) -> List[str]:
         """Synchronously list all available tools on the remote MCP Server."""
@@ -192,6 +209,7 @@ class TrainPilotMCPClient:
         metrics: Optional[Dict[str, Any]] = None,
         agent_note: Optional[str] = None,
         extra: Optional[Dict[str, Any]] = None,
+        fail_silently: bool = True,
     ) -> Dict[str, Any]:
         """Report training milestone with AI note via MCP Server."""
         tid = self._resolve_task_id(task_id)
@@ -209,7 +227,13 @@ class TrainPilotMCPClient:
         if extra is not None:
             args["extra"] = extra
 
-        return self.call_tool("report_milestone", args)
+        try:
+            return self.call_tool("report_milestone", args)
+        except Exception as exc:
+            if fail_silently:
+                logger.warning("[%s] Failed to send milestone via MCP: %s (continuing training)", tid, exc)
+                return {"success": False, "task_id": tid, "error": str(exc), "fail_silently": True}
+            raise
 
     def report_alert(
         self,
@@ -329,7 +353,11 @@ class TrainPilotMCPClient:
         if metrics is not None:
             args["metrics"] = metrics
 
-        return self.call_tool("send_heartbeat", args)
+        try:
+            return self.call_tool("send_heartbeat", args)
+        except Exception as exc:
+            logger.warning("[%s] Failed to send heartbeat via MCP: %s", tid, exc)
+            return {"success": False, "task_id": tid, "error": str(exc)}
 
     def get_task_status(self, task_id: Optional[str] = None) -> Dict[str, Any]:
         """Query task state and mailbox via MCP Server."""

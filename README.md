@@ -28,7 +28,9 @@ TrainPilot thoroughly resolves the longstanding pain points of intranet GPU trai
 - 📱 **Sub-Second Feishu/Lark Card Notifications**: The MCP server automatically formats milestones, convergence metrics, and autonomous reviews reported by the Agent into interactive Feishu/Lark cards, keeping ML engineers informed at all times.
 - 🛡️ **Floating-Point Safety & Anomaly Freezing**: Recursively sanitizes `NaN`, `Inf`, and PyTorch Tensors to prevent JSON serialization crashes; automatically freezes training execution on-site upon sudden metric anomalies.
 - 🔄 **Bidirectional ACK & Self-Healing Loop**: Strict lifecycle state machine; after self-healing, the Agent confirms with a `solution`, atomically transitioning the control plane back to `RUNNING` and pushing a "Self-Healing Succeeded" card to Feishu/Lark.
-- ⚡ **Millisecond Wakeup & Single-Point Timeout**: Instruction polling supports server-side long-polling suspension (reducing empty polling by 90%+); if an alert remains unanswered for 30s, the server automatically executes a fallback decision to eliminate deadlocks.
+- ⚡ **Native AsyncIO Millisecond Wakeup**: Instruction polling is powered by pure coroutine event-driven architecture (`asyncio.Event`), zero AnyIO thread pool worker consumption, completely eliminating thread exhaustion under large-scale long-polling.
+- 🛡️ **End-to-End MCP Authentication**: Both `/mcp` and REST API endpoints are protected by ASGI Bearer / X-API-Token authentication middleware with constant-time comparison against timing attacks.
+- 📦 **Client-Side Offline Buffering & Resilience**: GPU client features an in-memory FIFO ring buffer and exponential backoff retry; temporary network drops or control plane hiccups will never crash your model training.
 - 📱 **On-Site Idempotency & Foolproofing**: Sub-second webhook response; clicking an action button immediately updates the card to "Processed" and collapses interactive buttons, preventing concurrent misclicks or replay attacks across team members.
 
 ---
