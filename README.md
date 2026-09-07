@@ -25,8 +25,6 @@ TrainPilot thoroughly resolves the longstanding pain points of intranet GPU trai
 
 - 🤖 **Intranet GPU Pure-Outbound Agent**: Architected for intranet GPU clusters with no public IP, no inbound ports, and zero external credentials. The GPU-side Agent operates as a pure outbound client syncing state via standard Model Context Protocol (Streamable HTTP `/mcp`) with zero firewall configuration.
 - 📱 **Feishu/Lark HITL One-Click Self-Healing Loop**: Freezes training execution on-site upon sudden NaN or OOM anomalies and pushes interactive cards within seconds; ML engineers make one-click decisions in Feishu/Lark, and self-healing instructions are streamed back to the GPU in real time for recovery.
-- ⚡ **Native AsyncIO Zero-Thread-Overhead Polling**: Powered by pure `asyncio.Event` coroutine-driven long polling with zero OS thread pool consumption, completely eliminating thread exhaustion risks across large-scale distributed clusters while delivering millisecond-level reaction times.
-- 📦 **Client-Side Offline Buffering & Resilience**: Equipped with an in-memory FIFO ring buffer, exponential backoff retries, and float sanitization. Metric reports are buffered transparently during network drops and flushed automatically upon reconnection—never blocking or crashing the PyTorch training loop.
 
 ---
 
