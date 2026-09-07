@@ -23,15 +23,10 @@ TrainPilot thoroughly resolves the longstanding pain points of intranet GPU trai
 
 ## ✨ Key Features
 
-- 🤖 **Native GPU-Side Agent Support**: AI Agents executing training workloads on intranet GPU nodes communicate with the control plane via standard Streamable HTTP `/mcp` protocol, requiring zero proprietary API development.
-- 🪶 **Pure Outbound Client on Intranet GPU**: No public IP required, no inbound ports opened, zero external credentials stored on the GPU cluster; the GPU-side Agent acts purely as an outbound client syncing state with the public MCP server.
-- 📱 **Sub-Second Feishu/Lark Card Notifications**: The MCP server automatically formats milestones, convergence metrics, and autonomous reviews reported by the Agent into interactive Feishu/Lark cards, keeping ML engineers informed at all times.
-- 🛡️ **Floating-Point Safety & Anomaly Freezing**: Recursively sanitizes `NaN`, `Inf`, and PyTorch Tensors to prevent JSON serialization crashes; automatically freezes training execution on-site upon sudden metric anomalies.
-- 🔄 **Bidirectional ACK & Self-Healing Loop**: Strict lifecycle state machine; after self-healing, the Agent confirms with a `solution`, atomically transitioning the control plane back to `RUNNING` and pushing a "Self-Healing Succeeded" card to Feishu/Lark.
-- ⚡ **Native AsyncIO Millisecond Wakeup**: Instruction polling is powered by pure coroutine event-driven architecture (`asyncio.Event`), zero AnyIO thread pool worker consumption, completely eliminating thread exhaustion under large-scale long-polling.
-- 🛡️ **End-to-End MCP Authentication**: Both `/mcp` and REST API endpoints are protected by ASGI Bearer / X-API-Token authentication middleware with constant-time comparison against timing attacks.
-- 📦 **Client-Side Offline Buffering & Resilience**: GPU client features an in-memory FIFO ring buffer and exponential backoff retry; temporary network drops or control plane hiccups will never crash your model training.
-- 📱 **On-Site Idempotency & Foolproofing**: Sub-second webhook response; clicking an action button immediately updates the card to "Processed" and collapses interactive buttons, preventing concurrent misclicks or replay attacks across team members.
+- 🤖 **Intranet GPU Pure-Outbound Agent**: Architected for intranet GPU clusters with no public IP, no inbound ports, and zero external credentials. The GPU-side Agent operates as a pure outbound client syncing state via standard Model Context Protocol (Streamable HTTP `/mcp`) with zero firewall configuration.
+- 📱 **Feishu/Lark HITL One-Click Self-Healing Loop**: Freezes training execution on-site upon sudden NaN or OOM anomalies and pushes interactive cards within seconds; ML engineers make one-click decisions in Feishu/Lark, and self-healing instructions are streamed back to the GPU in real time for recovery.
+- ⚡ **Native AsyncIO Zero-Thread-Overhead Polling**: Powered by pure `asyncio.Event` coroutine-driven long polling with zero OS thread pool consumption, completely eliminating thread exhaustion risks across large-scale distributed clusters while delivering millisecond-level reaction times.
+- 📦 **Client-Side Offline Buffering & Resilience**: Equipped with an in-memory FIFO ring buffer, exponential backoff retries, and float sanitization. Metric reports are buffered transparently during network drops and flushed automatically upon reconnection—never blocking or crashing the PyTorch training loop.
 
 ---
 
