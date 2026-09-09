@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from trainpilot import __version__
 from trainpilot.server.auth import McpAuthMiddleware
+from trainpilot.server.background import feishu_dispatcher
 from trainpilot.server.config import settings
 from trainpilot.server.mailbox import default_mailbox
 from trainpilot.server.mcp_server import mcp_server
@@ -108,6 +109,7 @@ def health_check():
         "tasks_count": tasks_count,
         "stale_tasks_count": stale_count,
         "watchdog": default_watchdog.get_stats(),
+        "background_dispatcher": feishu_dispatcher.get_stats(),
     }
 
 

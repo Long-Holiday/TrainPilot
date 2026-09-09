@@ -381,9 +381,12 @@ Copy and customize the configuration file: `cp .env.example .env`
 | `TRAINPILOT_ALERT_DECISION_TIMEOUT_SECONDS` | `30` | int | Timeout (seconds) waiting for human decision before auto fallback |
 | `TRAINPILOT_TASK_HEARTBEAT_TIMEOUT_SECONDS` | `300` | int | Threshold (seconds) to mark a task as disconnected |
 | `TRAINPILOT_LONG_POLL_TIMEOUT_SECONDS` | `20.0` | float | Maximum server-side long-polling suspension duration (seconds) |
-| `TRAINPILOT_ENABLE_SQLITE` | `true` | bool | Enable SQLite WAL local persistence |
+| `TRAINPILOT_ENABLE_SQLITE` | `true` | bool | Enable SQLite WAL persistence; `false` uses process-local in-memory storage |
 | `TRAINPILOT_SQLITE_PATH` | `trainpilot.db` | str | SQLite database file path |
 | `TRAINPILOT_MAX_EVENTS_PER_TASK` | `500` | int | Maximum historical events retained per task (ring buffer) |
+| `TRAINPILOT_ENABLE_TASK_CLEANUP` | `true` | bool | Periodically delete expired `COMPLETED`/`FAILED` tasks and their events |
+| `TRAINPILOT_TASK_RETENTION_HOURS` | `72` | float | Retention period for terminal tasks in hours |
+| `TRAINPILOT_TASK_CLEANUP_INTERVAL_SECONDS` | `3600` | float | Interval between expired-task cleanup sweeps |
 | `TRAINPILOT_ENABLE_WATCHDOG` | `true` | bool | Enable server-side background heartbeat watchdog |
 | `TRAINPILOT_WATCHDOG_INTERVAL_SECONDS` | `15` | int | Watchdog background scan interval (seconds) |
 | `TRAINPILOT_MCP_ENABLE_DNS_REBINDING_PROTECTION` | `false` | bool | Enable MCP DNS rebinding protection (set to false for public access) |

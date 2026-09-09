@@ -58,6 +58,7 @@ class ServerSettings(BaseSettings):
     # Task Timeout
     task_heartbeat_timeout_seconds: int = Field(
         default=300,
+        gt=0,
         description="Seconds without heartbeat before marking task as potentially stalled",
     )
 
@@ -88,6 +89,7 @@ class ServerSettings(BaseSettings):
     # Reliability caps
     max_events_per_task: int = Field(
         default=500,
+        gt=0,
         description="Max retained events per task (ring buffer, oldest dropped).",
     )
 
@@ -98,7 +100,7 @@ class ServerSettings(BaseSettings):
     )
     enable_sqlite: bool = Field(
         default=True,
-        description="Enable SQLite persistence for tasks and events",
+        description="Persist tasks and events to SQLite; when false use process-local memory",
     )
 
     # Server-side Watchdog
@@ -108,7 +110,24 @@ class ServerSettings(BaseSettings):
     )
     watchdog_interval_seconds: int = Field(
         default=15,
+        gt=0,
         description="Watchdog background check interval in seconds",
+    )
+
+    # Terminal task retention / cleanup
+    enable_task_cleanup: bool = Field(
+        default=True,
+        description="Periodically delete expired COMPLETED/FAILED tasks and their events",
+    )
+    task_retention_hours: float = Field(
+        default=72.0,
+        gt=0,
+        description="Hours to retain COMPLETED/FAILED tasks before deletion",
+    )
+    task_cleanup_interval_seconds: float = Field(
+        default=3600.0,
+        gt=0,
+        description="Interval between expired-task cleanup sweeps",
     )
 
     # Long Polling

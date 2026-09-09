@@ -4,7 +4,7 @@ import os
 import tempfile
 import pytest
 
-from trainpilot.common.schemas import EventNotifyRequest, InstructionResponse
+from trainpilot.common.schemas import EventNotifyRequest, HeartbeatRequest, InstructionResponse
 from trainpilot.common.states import EventType, TaskState
 from trainpilot.server.mailbox import TaskMailboxManager, TaskRecord
 from trainpilot.server.storage import SQLiteStorage
@@ -202,3 +202,101 @@ def test_storage_clean_expired_tasks(temp_db):
     assert storage.get_task("old-completed") is None
     assert storage.get_task("recent-completed") is not None
     storage.close()
+
+
+def test_storage_cleanup_deletes_events_but_preserves_active_tasks(temp_db):
+    """Expired terminal cleanup is atomic in scope and never touches active tasks."""
+    storage = SQLiteStorage(temp_db)
+    old_timestamp = "2020-01-01T00:00:00+00:00"
+    expired = TaskRecord(
+        task_id="expired-failed",
+        state=TaskState.FAILED,
+        updated_at=old_timestamp,
+    )
+    active = TaskRecord(
+        task_id="old-but-running",
+        state=TaskState.RUNNING,
+        updated_at=old_timestamp,
+    )
+    storage.save_task(expired)
+    storage.save_task(active)
+    for task_id in (expired.task_id, active.task_id):
+        storage.append_event(
+            task_id,
+            {
+                "event_type": "milestone",
+                "message": "event",
+                "timestamp": old_timestamp,
+            },
+        )
+
+    expired_ids = storage.delete_expired_tasks(max_age_seconds=3600)
+
+    assert expired_ids == ["expired-failed"]
+    assert storage.get_task(expired.task_id) is None
+    assert storage.get_events_count(expired.task_id) == 0
+    assert storage.get_task(active.task_id) is not None
+    assert storage.get_events_count(active.task_id) == 1
+    storage.close()
+
+
+def test_mailbox_cleanup_evicts_expired_task_from_memory(temp_db):
+    """A database cleanup must not leave a stale task in the mailbox cache."""
+    storage = SQLiteStorage(temp_db)
+    mailbox = TaskMailboxManager(storage=storage)
+    task = mailbox._get_or_create("cached-completed")
+    task.state = TaskState.COMPLETED
+    task.updated_at = "2020-01-01T00:00:00+00:00"
+    storage.save_task(task)
+
+    expired_ids = mailbox.clean_expired_tasks(max_age_seconds=3600)
+
+    assert expired_ids == ["cached-completed"]
+    assert "cached-completed" not in mailbox._tasks
+    assert mailbox.get_task("cached-completed") is None
+    storage.close()
+
+
+def test_task_and_event_write_roll_back_together(temp_db, monkeypatch):
+    """A failed event insert must not leave the task snapshot half-updated."""
+    storage = SQLiteStorage(temp_db)
+    mailbox = TaskMailboxManager(storage=storage)
+    mailbox.record_event(
+        EventNotifyRequest(
+            task_id="atomic-task",
+            event_type=EventType.MILESTONE,
+            message="before",
+            step=1,
+        )
+    )
+
+    original_append = storage.append_event
+
+    def fail_append(*args, **kwargs):
+        raise RuntimeError("simulated insert failure")
+
+    monkeypatch.setattr(storage, "append_event", fail_append)
+    with pytest.raises(RuntimeError, match="simulated insert failure"):
+        mailbox.record_event(
+            EventNotifyRequest(
+                task_id="atomic-task",
+                event_type=EventType.MILESTONE,
+                message="after",
+                step=2,
+            )
+        )
+
+    monkeypatch.setattr(storage, "append_event", original_append)
+    assert storage.get_task("atomic-task").latest_step == 1
+    assert mailbox.get_task("atomic-task").latest_step == 1
+    assert storage.get_events_count("atomic-task") == 1
+    storage.close()
+
+
+def test_disabled_persistence_uses_process_local_database():
+    """Disabling persistence must not create or reuse the configured disk DB."""
+    mailbox = TaskMailboxManager(enable_persistence=False)
+    assert mailbox._storage.db_path == ":memory:"
+    mailbox.record_heartbeat(HeartbeatRequest(task_id="memory-only", step=1))
+    assert mailbox.get_task("memory-only") is not None
+    mailbox._storage.close()

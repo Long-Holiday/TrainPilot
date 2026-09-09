@@ -183,6 +183,9 @@ def test_ack_recovery_card_flow(client: TestClient):
     assert resp.json()["state"] == "RUNNING"
 
     # 4. 验证 FeishuClient 接收到恢复卡片
+    from trainpilot.server.background import feishu_dispatcher
+    assert feishu_dispatcher.wait_idle(timeout=2.0)
+
     history = default_feishu_client.sent_cards_history
     rec_cards = [c for c in history if c.get("type") == "recovery" and c.get("task_id") == task_id]
     assert len(rec_cards) == 1

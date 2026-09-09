@@ -381,9 +381,12 @@ docker run -d \
 | `TRAINPILOT_ALERT_DECISION_TIMEOUT_SECONDS`| `30` | int | 告警卡片等待人工决策超时时间（秒），超时自动自愈 |
 | `TRAINPILOT_TASK_HEARTBEAT_TIMEOUT_SECONDS`| `300` | int | 任务心跳判定失联阈值（秒） |
 | `TRAINPILOT_LONG_POLL_TIMEOUT_SECONDS` | `20.0` | float | 服务端长轮询最大挂起时长（秒） |
-| `TRAINPILOT_ENABLE_SQLITE` | `true` | bool | 是否启用 SQLite WAL 本地持久化 |
+| `TRAINPILOT_ENABLE_SQLITE` | `true` | bool | 是否启用 SQLite WAL 持久化；`false` 时仅使用进程内存 |
 | `TRAINPILOT_SQLITE_PATH` | `trainpilot.db` | str | SQLite 数据库存储路径 |
 | `TRAINPILOT_MAX_EVENTS_PER_TASK` | `500` | int | 每个任务保留的最大历史事件数量（环形修剪） |
+| `TRAINPILOT_ENABLE_TASK_CLEANUP` | `true` | bool | 是否定时删除超过保留期的 `COMPLETED`/`FAILED` 任务及事件 |
+| `TRAINPILOT_TASK_RETENTION_HOURS` | `72` | float | 终态任务保留时长（小时） |
+| `TRAINPILOT_TASK_CLEANUP_INTERVAL_SECONDS` | `3600` | float | 过期任务清理周期（秒） |
 | `TRAINPILOT_ENABLE_WATCHDOG` | `true` | bool | 是否启用服务端失联看门狗守护线程 |
 | `TRAINPILOT_WATCHDOG_INTERVAL_SECONDS` | `15` | int | 看门狗后台扫描周期（秒） |
 | `TRAINPILOT_MCP_ENABLE_DNS_REBINDING_PROTECTION` | `false` | bool | 是否启用 MCP DNS 重绑定防护（跨公网连接设为 false） |

@@ -3,7 +3,7 @@
 import logging
 import threading
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from trainpilot.common.schemas import (
     EventNotifyRequest,
@@ -16,9 +16,10 @@ from trainpilot.common.schemas import (
 )
 from trainpilot.common.states import EventType, TaskState
 from trainpilot.server.auth import verify_api_token
+from trainpilot.server.background import feishu_dispatcher
 from trainpilot.server.config import settings
 from trainpilot.server.feishu.client import default_feishu_client
-from trainpilot.server.mailbox import default_mailbox
+from trainpilot.server.mailbox import TaskNotFoundError, default_mailbox
 
 logger = logging.getLogger("trainpilot.api.tasks")
 
@@ -101,12 +102,12 @@ def _schedule_auto_self_resolve(task_id: str) -> None:
 
 
 @router.post("/notify", response_model=EventNotifyResponse, status_code=status.HTTP_200_OK)
-def notify_event(req: EventNotifyRequest, background_tasks: BackgroundTasks) -> EventNotifyResponse:
+def notify_event(req: EventNotifyRequest) -> EventNotifyResponse:
     """Receive training events (alerts, milestones, completion) from GPU Agent."""
     current_state = default_mailbox.record_event(req)
 
     # Async dispatch: do not block the training loop on Feishu latency.
-    background_tasks.add_task(_dispatch_feishu, req)
+    feishu_dispatcher.submit(_dispatch_feishu, req)
 
     # 告警卡片：超过阈值无人工点击则服务端自动视为“自行解决”。
     if req.event_type == EventType.ALERT:
@@ -136,15 +137,18 @@ async def poll_instruction(
     Supports native AsyncIO Long Polling: specify wait_timeout > 0 to hold connection
     without consuming AnyIO thread pool workers until human decision arrives or timeout expires.
     """
-    instruction = await default_mailbox.get_instruction_async(task_id, pop=pop, wait_timeout=wait_timeout)
-    return instruction
+    try:
+        return await default_mailbox.get_instruction_async(
+            task_id, pop=pop, wait_timeout=wait_timeout
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
 
 
 @router.post("/{task_id}/ack", status_code=status.HTTP_200_OK)
 def ack_instruction(
     task_id: str,
     req: InstructionAckRequest,
-    background_tasks: BackgroundTasks,
 ) -> dict:
     """Acknowledge execution of an instruction by the GPU Agent."""
     if req.task_id != task_id:
@@ -160,13 +164,15 @@ def ack_instruction(
             status=req.status,
             message=req.message,
         )
+    except TaskNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
 
     # If successfully resolved, dispatch Feishu recovery card directly from ACK (eliminating duplicate notify)
     if req.status.lower() == "success" and (req.action == "self_resolve" or req.solution):
         solution_text = req.solution or req.message or "已完成现场自愈检查并恢复正常训练。"
-        background_tasks.add_task(
+        feishu_dispatcher.submit(
             default_feishu_client.send_recovery,
             task_id=task_id,
             solution=solution_text,
@@ -197,7 +203,7 @@ def heartbeat(task_id: str, req: HeartbeatRequest) -> dict:
 
 @router.post("/{task_id}/decision", response_model=InstructionResponse)
 def submit_decision(
-    task_id: str, req: TaskDecisionRequest, background_tasks: BackgroundTasks
+    task_id: str, req: TaskDecisionRequest
 ) -> InstructionResponse:
     """Directly submit a human decision for a task (via Web UI, CLI, or test automation)."""
     if req.task_id != task_id:
@@ -212,11 +218,13 @@ def submit_decision(
             payload=req.payload,
             operator=req.operator or "api_operator",
         )
+    except TaskNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
 
     # Update Feishu card asynchronously in background to avoid blocking API latency
-    background_tasks.add_task(
+    feishu_dispatcher.submit(
         default_feishu_client.update_card_to_resolved,
         task_id=task_id,
         action=req.action,

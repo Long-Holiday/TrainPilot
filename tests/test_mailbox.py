@@ -124,3 +124,33 @@ def test_mailbox_lazy_load_from_storage(mailbox: TaskMailboxManager):
     assert summary is not None
     assert summary.task_id == task_id
     assert summary.state == TaskState.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_control_calls_do_not_create_unknown_tasks(mailbox: TaskMailboxManager):
+    """Read/control typos should return not-found without creating ghost tasks."""
+    before = mailbox.get_tasks_count()
+
+    with pytest.raises(ValueError, match="not found"):
+        mailbox.get_instruction("missing-task", wait_timeout=0)
+    with pytest.raises(ValueError, match="not found"):
+        await mailbox.get_instruction_async("missing-task", wait_timeout=0)
+    with pytest.raises(ValueError, match="not found"):
+        mailbox.submit_decision("missing-task", action="self_resolve")
+    with pytest.raises(ValueError, match="not found"):
+        mailbox.ack_instruction(
+            "missing-task",
+            instruction_id=None,
+            action="self_resolve",
+            status="success",
+        )
+
+    assert mailbox.get_tasks_count() == before
+
+
+def test_existing_task_with_no_events_has_zero_event_count(mailbox: TaskMailboxManager):
+    task = mailbox._get_or_create("zero-events")
+    mailbox._storage.save_task(task)
+    mailbox._tasks.pop(task.task_id)
+
+    assert mailbox.get_events_count(task.task_id) == 0

@@ -205,7 +205,7 @@ def test_external_host_header_streamable_http_connection(live_mcp_server):
     from mcp.client.session import ClientSession
 
     async def _test():
-        async with httpx2.AsyncClient(headers={"Host": "35.202.16.245:28780"}) as http_client:
+        async with httpx2.AsyncClient(headers={"Host": "35.202.16.245:28780"}, trust_env=False) as http_client:
             async with streamable_http_client(f"{live_mcp_server}/mcp", http_client=http_client) as (read, write):
                 async with ClientSession(read, write) as session:
                     init_res = await session.initialize()

@@ -1,6 +1,7 @@
 """Unit tests for ServerWatchdog background service and health metrics."""
 
 import time
+import threading
 from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi.testclient import TestClient
@@ -11,6 +12,7 @@ from trainpilot.server.config import ServerSettings
 from trainpilot.server.feishu.client import default_feishu_client
 from trainpilot.server.mailbox import TaskMailboxManager, default_mailbox
 from trainpilot.server.main import app
+from trainpilot.server.storage import SQLiteStorage
 from trainpilot.server.watchdog import ServerWatchdog
 
 
@@ -99,3 +101,84 @@ def test_watchdog_in_health_endpoint():
     assert "checks_count" in data["watchdog"]
     assert "stale_detected_total" in data["watchdog"]
     assert data["sqlite_enabled"] is True
+
+
+def test_scheduled_task_cleanup_runs_independently_of_heartbeat_watchdog(tmp_path):
+    """Cleanup runs immediately, then respects its own interval."""
+    storage = SQLiteStorage(str(tmp_path / "cleanup.db"))
+    mailbox = TaskMailboxManager(storage=storage)
+    custom_settings = ServerSettings(
+        enable_watchdog=False,
+        enable_task_cleanup=True,
+        task_retention_hours=1,
+        task_cleanup_interval_seconds=3600,
+    )
+    watchdog = ServerWatchdog(mailbox=mailbox, server_settings=custom_settings)
+
+    first = mailbox._get_or_create("expired-first")
+    first.state = TaskState.COMPLETED
+    first.updated_at = "2020-01-01T00:00:00+00:00"
+    storage.save_task(first)
+
+    result = watchdog.run_check_once()
+    assert result["tasks_expired"] == 1
+    assert mailbox.get_task("expired-first") is None
+    assert watchdog.get_stats()["tasks_expired_total"] == 1
+    assert watchdog.get_stats()["last_cleanup_at"] is not None
+
+    second = mailbox._get_or_create("expired-second")
+    second.state = TaskState.FAILED
+    second.updated_at = "2020-01-01T00:00:00+00:00"
+    storage.save_task(second)
+
+    # A regular heartbeat sweep must not turn into an early cleanup sweep.
+    assert watchdog.run_check_once()["tasks_expired"] == 0
+    assert mailbox.get_task("expired-second") is not None
+
+    watchdog._last_cleanup_monotonic -= 3600
+    assert watchdog.run_check_once()["tasks_expired"] == 1
+    assert mailbox.get_task("expired-second") is None
+    storage.close()
+
+
+def test_running_watchdog_does_not_block_on_slow_alert_delivery(tmp_path, monkeypatch):
+    """Feishu network latency must not block a maintenance sweep."""
+    storage = SQLiteStorage(str(tmp_path / "alerts.db"))
+    mailbox = TaskMailboxManager(storage=storage)
+    custom_settings = ServerSettings(
+        enable_watchdog=True,
+        enable_task_cleanup=False,
+        task_heartbeat_timeout_seconds=1,
+    )
+    watchdog = ServerWatchdog(mailbox=mailbox, server_settings=custom_settings)
+    stale = mailbox._get_or_create("slow-alert")
+    stale.updated_at = "2020-01-01T00:00:00+00:00"
+    stale.last_heartbeat_at = stale.updated_at
+    storage.save_task(stale)
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_send(**kwargs):
+        entered.set()
+        release.wait(timeout=2)
+        return {"ok": True}
+
+    monkeypatch.setattr(default_feishu_client, "send_stale_alert", slow_send)
+    # An alive thread marks this as the service path without starting its loop.
+    watchdog._thread = threading.current_thread()
+    started_at = time.monotonic()
+    result = watchdog.run_check_once()
+    elapsed = time.monotonic() - started_at
+    watchdog._thread = None
+
+    assert result["stale_count"] == 1
+    assert entered.wait(timeout=1)
+    assert elapsed < 0.5
+    release.set()
+
+    deadline = time.monotonic() + 1
+    while watchdog.get_stats()["stale_alerts_sent_total"] == 0:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    storage.close()

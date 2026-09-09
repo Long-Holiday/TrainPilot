@@ -37,6 +37,12 @@ class ServerWatchdog:
         self._stale_alerts_sent_total = 0
         self._last_check_at: Optional[str] = None
         self._alerted_task_ids: set = set()
+        self._tasks_expired_total = 0
+        self._last_cleanup_at: Optional[str] = None
+        self._last_cleanup_monotonic: Optional[float] = None
+        self._state_lock = threading.Lock()
+        self._pending_alert_task_ids: set = set()
+        self._alert_slots = threading.BoundedSemaphore(4)
 
     @property
     def is_running(self) -> bool:
@@ -52,12 +58,17 @@ class ServerWatchdog:
             "last_check_at": self._last_check_at,
             "interval_seconds": self.settings.watchdog_interval_seconds,
             "heartbeat_timeout_seconds": self.settings.task_heartbeat_timeout_seconds,
+            "task_cleanup_enabled": self.settings.enable_task_cleanup,
+            "task_retention_hours": self.settings.task_retention_hours,
+            "task_cleanup_interval_seconds": self.settings.task_cleanup_interval_seconds,
+            "tasks_expired_total": self._tasks_expired_total,
+            "last_cleanup_at": self._last_cleanup_at,
         }
 
     def start(self) -> None:
         """Start the watchdog background loop if enabled."""
-        if not self.settings.enable_watchdog:
-            logger.info("Watchdog is disabled by configuration (enable_watchdog=False)")
+        if not self.settings.enable_watchdog and not self.settings.enable_task_cleanup:
+            logger.info("Watchdog and task cleanup are disabled by configuration")
             return
         if self.is_running:
             logger.warning("Watchdog is already running")
@@ -65,8 +76,11 @@ class ServerWatchdog:
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run_loop, daemon=True, name="TrainPilot-Watchdog")
         self._thread.start()
-        logger.info("Started TrainPilot Server Watchdog (interval: %ss, heartbeat_timeout: %ss)",
-                    self.settings.watchdog_interval_seconds, self.settings.task_heartbeat_timeout_seconds)
+        logger.info(
+            "Started TrainPilot maintenance service (watchdog: %s, task cleanup: %s)",
+            self.settings.enable_watchdog,
+            self.settings.enable_task_cleanup,
+        )
 
     def stop(self, timeout: float = 5.0) -> None:
         """Gracefully stop the watchdog background thread."""
@@ -86,8 +100,12 @@ class ServerWatchdog:
         self._checks_count += 1
 
         timeout_sec = self.settings.task_heartbeat_timeout_seconds
-        stale_tasks = self.mailbox.get_stale_tasks(timeout_seconds=timeout_sec)
-        self._stale_detected_total = len(stale_tasks)
+        stale_tasks = (
+            self.mailbox.get_stale_tasks(timeout_seconds=timeout_sec)
+            if self.settings.enable_watchdog
+            else []
+        )
+        self._stale_detected_total += len(stale_tasks)
 
         alerts_sent_this_round = 0
         active_stale_ids = set()
@@ -95,7 +113,11 @@ class ServerWatchdog:
         for t in stale_tasks:
             active_stale_ids.add(t.task_id)
             # Check if this task was already alerted (debounce)
-            is_already_alerted = t.task_id in self._alerted_task_ids
+            with self._state_lock:
+                is_already_alerted = (
+                    t.task_id in self._alerted_task_ids
+                    or t.task_id in self._pending_alert_task_ids
+                )
             if not is_already_alerted and self.mailbox._storage:
                 is_already_alerted = self.mailbox._storage.is_task_stale_alerted(t.task_id)
 
@@ -115,28 +137,28 @@ class ServerWatchdog:
                 logger.warning("Watchdog detected stalled task: %s (silent for %.1fs, state: %s)",
                                t.task_id, silent_seconds, t.state.value)
 
-                # Send stale alert card
-                try:
-                    default_feishu_client.send_stale_alert(
-                        task_id=t.task_id,
-                        silent_seconds=silent_seconds,
-                        last_heartbeat_at=t.last_heartbeat_at,
-                        latest_step=t.latest_step,
-                        latest_epoch=t.latest_epoch,
-                        latest_message=t.latest_message,
-                    )
-                    self._alerted_task_ids.add(t.task_id)
-                    if self.mailbox._storage:
-                        self.mailbox._storage.set_task_stale_alerted(t.task_id, True)
-                    self._stale_alerts_sent_total += 1
-                    alerts_sent_this_round += 1
-                except Exception as exc:
-                    logger.error("Failed to send stale alert for task %s: %s", t.task_id, exc)
+                # Direct calls remain synchronous and deterministic for operators/tests.
+                # The running maintenance loop uses bounded daemon workers so a slow
+                # Feishu request cannot block subsequent scans and cleanup sweeps.
+                if self.is_running and self._alert_slots.acquire(blocking=False):
+                    with self._state_lock:
+                        self._pending_alert_task_ids.add(t.task_id)
+                    threading.Thread(
+                        target=self._deliver_stale_alert,
+                        args=(t, silent_seconds, True),
+                        daemon=True,
+                        name=f"TrainPilot-StaleAlert-{t.task_id[:24]}",
+                    ).start()
+                elif not self.is_running:
+                    if self._deliver_stale_alert(t, silent_seconds):
+                        alerts_sent_this_round += 1
 
         # Clear alert debounce for tasks that are no longer stale (e.g., resumed heartbeats)
-        recovered_ids = self._alerted_task_ids - active_stale_ids
+        with self._state_lock:
+            recovered_ids = self._alerted_task_ids - active_stale_ids
         for r_id in recovered_ids:
-            self._alerted_task_ids.discard(r_id)
+            with self._state_lock:
+                self._alerted_task_ids.discard(r_id)
             if self.mailbox._storage:
                 self.mailbox._storage.set_task_stale_alerted(r_id, False)
 
@@ -145,19 +167,38 @@ class ServerWatchdog:
         cleaned_tasks = 0
         vacuum_reclaimed = False
         if self.mailbox._storage:
-            try:
-                trimmed = self.mailbox._storage.trim_all_events(max_events=self.settings.max_events_per_task)
-            except Exception as exc:
-                logger.error("Failed to trim excess events during watchdog run: %s", exc)
-
-            # Periodic disk and WAL space reclamation (every 10 sweeps or when events were trimmed)
-            if self._checks_count % 10 == 0 or trimmed > 0:
+            cleanup_due = (
+                self.settings.enable_task_cleanup
+                and (
+                    self._last_cleanup_monotonic is None
+                    or time.monotonic() - self._last_cleanup_monotonic
+                    >= self.settings.task_cleanup_interval_seconds
+                )
+            )
+            if cleanup_due:
                 try:
-                    if hasattr(self.mailbox._storage, "checkpoint_and_vacuum"):
-                        self.mailbox._storage.checkpoint_and_vacuum()
-                        vacuum_reclaimed = True
-                    if hasattr(self.mailbox._storage, "clean_expired_tasks"):
-                        cleaned_tasks = self.mailbox._storage.clean_expired_tasks()
+                    # append_event already enforces the cap. This periodic pass
+                    # mainly handles a reduced cap after configuration changes,
+                    # so a full GROUP BY scan is unnecessary every watchdog tick.
+                    trimmed = self.mailbox._storage.trim_all_events(
+                        max_events=self.settings.max_events_per_task
+                    )
+                    retention_seconds = self.settings.task_retention_hours * 3600
+                    expired_ids = self.mailbox.clean_expired_tasks(retention_seconds)
+                    cleaned_tasks = len(expired_ids)
+                    self._tasks_expired_total += cleaned_tasks
+                    with self._state_lock:
+                        self._alerted_task_ids.difference_update(expired_ids)
+                    self._last_cleanup_at = datetime.now(timezone.utc).isoformat()
+                    self._last_cleanup_monotonic = time.monotonic()
+                except Exception as exc:
+                    logger.error("Failed to clean expired tasks: %s", exc)
+
+            # Reclaim pages after deletes, not before them.
+            if trimmed > 0 or cleaned_tasks > 0:
+                try:
+                    self.mailbox._storage.checkpoint_and_vacuum()
+                    vacuum_reclaimed = True
                 except Exception as exc:
                     logger.debug("Storage checkpoint/vacuum maintenance: %s", exc)
 
@@ -175,9 +216,42 @@ class ServerWatchdog:
             "checked_at": self._last_check_at,
         }
 
+    def _deliver_stale_alert(
+        self, task: Any, silent_seconds: float, background: bool = False
+    ) -> bool:
+        """Deliver one stale alert and update debounce state after success."""
+        try:
+            default_feishu_client.send_stale_alert(
+                task_id=task.task_id,
+                silent_seconds=silent_seconds,
+                last_heartbeat_at=task.last_heartbeat_at,
+                latest_step=task.latest_step,
+                latest_epoch=task.latest_epoch,
+                latest_message=task.latest_message,
+            )
+            if self.mailbox._storage:
+                self.mailbox._storage.set_task_stale_alerted(task.task_id, True)
+            with self._state_lock:
+                self._alerted_task_ids.add(task.task_id)
+                self._stale_alerts_sent_total += 1
+            return True
+        except Exception as exc:
+            logger.error("Failed to send stale alert for task %s: %s", task.task_id, exc)
+            return False
+        finally:
+            if background:
+                with self._state_lock:
+                    self._pending_alert_task_ids.discard(task.task_id)
+                self._alert_slots.release()
+
     def _run_loop(self) -> None:
         """Main periodic loop."""
-        interval = max(1.0, float(self.settings.watchdog_interval_seconds))
+        enabled_intervals = []
+        if self.settings.enable_watchdog:
+            enabled_intervals.append(float(self.settings.watchdog_interval_seconds))
+        if self.settings.enable_task_cleanup:
+            enabled_intervals.append(float(self.settings.task_cleanup_interval_seconds))
+        interval = max(1.0, min(enabled_intervals))
         while not self._stop_event.is_set():
             try:
                 self.run_check_once()

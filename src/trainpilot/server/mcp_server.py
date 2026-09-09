@@ -17,6 +17,7 @@ from trainpilot.common.schemas import (
 )
 from trainpilot.common.states import EventType, TaskState
 from trainpilot.server.config import settings
+from trainpilot.server.background import feishu_dispatcher
 from trainpilot.server.feishu.client import default_feishu_client
 from trainpilot.server.mailbox import default_mailbox
 
@@ -34,7 +35,7 @@ mcp_server = MCPServer(
 
 
 def _dispatch_feishu_async(req: EventNotifyRequest) -> None:
-    """Run Feishu card delivery in a background thread so MCP tool returns immediately."""
+    """Queue Feishu delivery so MCP tools return immediately."""
     def _run():
         try:
             if req.event_type == EventType.ALERT:
@@ -61,8 +62,7 @@ def _dispatch_feishu_async(req: EventNotifyRequest) -> None:
         except Exception as exc:
             logger.error("Failed to forward event %s to Feishu: %s", req.event_type, exc)
 
-    thread = threading.Thread(target=_run, daemon=True)
-    thread.start()
+    feishu_dispatcher.submit(_run)
 
 
 def _auto_self_resolve_callback(task_id: str, timeout_seconds: int) -> None:
@@ -219,7 +219,17 @@ async def poll_instruction(
         wait_timeout: Long-polling timeout in seconds (0 for immediate non-blocking return).
         pop: If true, consumes the instruction and transitions state to RECOVERING.
     """
-    instruction = await default_mailbox.get_instruction_async(task_id, pop=pop, wait_timeout=wait_timeout)
+    try:
+        instruction = await default_mailbox.get_instruction_async(
+            task_id, pop=pop, wait_timeout=wait_timeout
+        )
+    except ValueError as exc:
+        return {
+            "success": False,
+            "task_id": task_id,
+            "has_instruction": False,
+            "error": str(exc),
+        }
     res = instruction.model_dump()
     res["has_instruction"] = res.get("ready", False)
     return res
@@ -280,8 +290,7 @@ def ack_instruction(
             except Exception as exc:
                 logger.error("Failed to send Feishu recovery card for task %s: %s", task_id, exc)
 
-        t = threading.Thread(target=_send_recovery, daemon=True)
-        t.start()
+        feishu_dispatcher.submit(_send_recovery)
 
     return {
         "success": True,
@@ -396,8 +405,7 @@ def submit_decision(
         except Exception as exc:
             logger.warning("Failed to patch card after decision for %s: %s", task_id, exc)
 
-    t = threading.Thread(target=_patch_card, daemon=True)
-    t.start()
+    feishu_dispatcher.submit(_patch_card)
 
     return {
         "success": True,

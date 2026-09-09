@@ -30,7 +30,9 @@ class SQLiteStorage:
         if db_dir and not os.path.exists(db_dir):
             os.makedirs(db_dir, exist_ok=True)
 
-        self._lock = threading.Lock()
+        # RLock allows the atomic task+event helper to reuse regular write
+        # methods without exposing unlocked variants.
+        self._lock = threading.RLock()
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._init_db()
@@ -41,6 +43,7 @@ class SQLiteStorage:
             cur = self._conn.cursor()
             cur.execute("PRAGMA journal_mode=WAL;")
             cur.execute("PRAGMA synchronous=NORMAL;")
+            cur.execute("PRAGMA busy_timeout=5000;")
             cur.execute("PRAGMA auto_vacuum=INCREMENTAL;")
             cur.execute("PRAGMA wal_autocheckpoint=1000;")
             cur.execute(
@@ -95,10 +98,19 @@ class SQLiteStorage:
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tasks_updated_at ON tasks(updated_at);"
             )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tasks_state_updated_at ON tasks(state, updated_at);"
+            )
             self._conn.commit()
             logger.info("SQLite storage initialized at: %s", self.db_path)
 
-    def save_task(self, task: Any, stale_alerted: Optional[bool] = None) -> None:
+    def save_task(
+        self,
+        task: Any,
+        stale_alerted: Optional[bool] = None,
+        *,
+        _commit: bool = True,
+    ) -> None:
         """Upsert a task record into SQLite."""
         pending_json = (
             task.pending_instruction.model_dump_json()
@@ -173,7 +185,8 @@ class SQLiteStorage:
                     feishu_msg_id,
                 ),
             )
-            self._conn.commit()
+            if _commit:
+                self._conn.commit()
 
     def set_task_feishu_message_id(self, task_id: str, message_id: str) -> None:
         """Store the Feishu message_id associated with this task (survives restarts)."""
@@ -219,7 +232,12 @@ class SQLiteStorage:
             return False
 
     def append_event(
-        self, task_id: str, event_entry: Dict[str, Any], max_events: int = 500
+        self,
+        task_id: str,
+        event_entry: Dict[str, Any],
+        max_events: int = 500,
+        *,
+        _commit: bool = True,
     ) -> None:
         """Append an event to events table and prune old events if exceeding max_events."""
         metrics_json = (
@@ -271,7 +289,30 @@ class SQLiteStorage:
                     (task_id, task_id, max_events),
                 )
 
-            self._conn.commit()
+            if _commit:
+                self._conn.commit()
+
+    def save_task_and_append_event(
+        self,
+        task: Any,
+        event_entry: Dict[str, Any],
+        max_events: int = 500,
+    ) -> None:
+        """Persist a task snapshot and its event as one atomic transaction."""
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                self.save_task(task, _commit=False)
+                self.append_event(
+                    task.task_id,
+                    event_entry,
+                    max_events=max_events,
+                    _commit=False,
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
 
     def get_events(
         self, task_id: str, limit: int = 100, offset: int = 0
@@ -465,29 +506,64 @@ class SQLiteStorage:
                 "checkpoint": list(ckpt_res) if ckpt_res else None,
             }
 
-    def clean_expired_tasks(self, max_age_seconds: int = 86400 * 7) -> int:
-        """Clean up old finished tasks (COMPLETED/FAILED) older than max_age_seconds to free disk space."""
+    def delete_expired_tasks(self, max_age_seconds: float) -> List[str]:
+        """Atomically delete expired terminal tasks and return their IDs.
+
+        Active tasks are never eligible. Returning IDs lets the mailbox evict the
+        same records from its in-memory cache after the database commit succeeds.
+        """
         from datetime import datetime, timezone, timedelta
+
         cutoff = (datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)).isoformat()
         with self._lock:
             cur = self._conn.cursor()
             terminal_states = (TaskState.COMPLETED.value, TaskState.FAILED.value)
-            cur.execute(
-                """
-                SELECT task_id FROM tasks
-                WHERE state IN (?, ?) AND updated_at < ?
-                """,
-                (terminal_states[0], terminal_states[1], cutoff),
+            params = (terminal_states[0], terminal_states[1], cutoff)
+            try:
+                cur.execute(
+                    """
+                    SELECT task_id FROM tasks
+                    WHERE state IN (?, ?) AND updated_at < ?
+                    """,
+                    params,
+                )
+                expired_ids = [r["task_id"] for r in cur.fetchall()]
+                if not expired_ids:
+                    return []
+
+                # Use set-based deletes to avoid one DELETE round-trip per task.
+                cur.execute(
+                    """
+                    DELETE FROM events
+                    WHERE task_id IN (
+                        SELECT task_id FROM tasks
+                        WHERE state IN (?, ?) AND updated_at < ?
+                    )
+                    """,
+                    params,
+                )
+                cur.execute(
+                    """
+                    DELETE FROM tasks
+                    WHERE state IN (?, ?) AND updated_at < ?
+                    """,
+                    params,
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
+            logger.info(
+                "Cleaned %d expired terminal tasks older than %.1fs",
+                len(expired_ids),
+                max_age_seconds,
             )
-            old_tasks = [r["task_id"] for r in cur.fetchall()]
-            if not old_tasks:
-                return 0
-            for tid in old_tasks:
-                cur.execute("DELETE FROM events WHERE task_id = ?", (tid,))
-                cur.execute("DELETE FROM tasks WHERE task_id = ?", (tid,))
-            self._conn.commit()
-            logger.info("Cleaned %d expired finished tasks older than %ds", len(old_tasks), max_age_seconds)
-            return len(old_tasks)
+            return expired_ids
+
+    def clean_expired_tasks(self, max_age_seconds: float = 86400 * 7) -> int:
+        """Backward-compatible count-only wrapper for expired-task deletion."""
+        return len(self.delete_expired_tasks(max_age_seconds=max_age_seconds))
 
     def load_all_tasks(self, active_only: bool = False) -> Dict[str, Any]:
         """Load task records from SQLite. If active_only=True, only non-terminal tasks are loaded."""
