@@ -81,9 +81,9 @@ flowchart TB
 
 ```mermaid
 stateDiagram-v2
-    [*] --> RUNNING: Agent 启动训练任务
-    RUNNING --> RUNNING: 上报心跳 send_heartbeat / 里程碑 report_milestone
-    RUNNING --> WAITING: 捕获异常并冻结现场 report_alert
+    [*] --> RUNNING: Agent 启动训练任务（首次请求上报 gpu_host）
+    RUNNING --> RUNNING: 上报里程碑 report(event_type=milestone)（看门狗 ping gpu_host 判活）
+    RUNNING --> WAITING: 捕获异常并冻结现场 report(event_type=alert)
     WAITING --> RESOLVED: 用户在飞书点击决策或超时自动决策
     RESOLVED --> RECOVERING: Agent 轮询拉取指令 poll_instruction
     RECOVERING --> RUNNING: 自愈成功 ack_instruction - success
@@ -191,13 +191,16 @@ uv run python examples/mock_training.py
 
 在 GPU 服务器上执行训练任务时，Agent 通过以下工具与公网 MCP Server 交互：
 
+所有上报统一走 **`report`** 单一工具，通过 `event_type` 区分事件类型；`task_id` 可省略（服务端回退到 `TRAINPILOT_TASK_ID` 默认任务），唯一必填字段为 `message`。
+
 1. **上报训练阶段里程碑并通知用户**：
    Agent 定期（如每个 Epoch 或 Checkpoint）上报进度，并在 `agent_note` 中附带自主生成的趋势研判，MCP Server 随即向飞书群推送绿色卡片通知用户：
    ```json
    {
-     "tool": "report_milestone",
+     "tool": "report",
      "arguments": {
        "task_id": "llama3-8b-sft",
+       "event_type": "milestone",
        "step": 5000,
        "epoch": 1,
        "metrics": {"loss": 0.385, "gpu_mem": "82%"},
@@ -208,12 +211,13 @@ uv run python examples/mock_training.py
    ```
 
 2. **检测到训练异常，就地冻结现场并请求用户介入**：
-   当 Agent 检测到 `Loss NaN`、剧烈数值突增或 `CUDA OOM` 时，上报告警。控制面将任务置为 `WAITING` 冻结现场，并向飞书推送带有【🛑 停止训练】与【✅ 自行解决】按钮的红色告警卡片：
+   当 Agent 检测到 `Loss NaN`、剧烈数值突增或 `CUDA OOM` 时，将 `event_type` 设为 `alert` 上报。控制面将任务置为 `WAITING` 冻结现场，并向飞书推送带有【🛑 停止训练】与【✅ 自行解决】按钮的红色告警卡片：
    ```json
    {
-     "tool": "report_alert",
+     "tool": "report",
      "arguments": {
        "task_id": "llama3-8b-sft",
+       "event_type": "alert",
        "step": 5420,
        "metrics": {"loss": "NaN"},
        "message": "检测到 Loss 变为 NaN",
@@ -254,18 +258,18 @@ uv run python examples/mock_training.py
 
 公网控制面严格遵循 MCP 规范，对外提供标准化 **Tools** 与 **Resources**。
 
-### MCP Tools (8 大标准工具)
+### MCP Tools (6 大标准工具)
+
+> 除 `message` 外，`report` 的其余参数均可选；所有工具的 `task_id` 均可省略，服务端会回退到 `TRAINPILOT_TASK_ID` 配置的默认任务（适合单任务部署，多任务请显式传入）。
 
 | 工具名称 (Tool Name) | 核心职责 | 输入参数摘要 | 输出及行为效果 |
 |:---|:---|:---|:---|
-| **`report_milestone`** | 状态上报 | `task_id`, `message`, `step`, `epoch`, `metrics`, `agent_note`, `extra` | 记录训练里程碑，更新步数与指标，向飞书推送绿色卡片及 Agent 点评通知用户 |
-| **`report_alert`** | 异常拦截 | `task_id`, `message`, `step`, `epoch`, `metrics`, `agent_note`, `extra` | 状态置为 `WAITING`，冻结训练，推送红色交互卡片提醒用户，激活 30s 超时定时器 |
-| **`poll_instruction`** | 决策拉取 | `task_id`, `wait_timeout` (默认20s), `pop` (默认True) | Agent 挂起等待用户决策；决策到达时返回指令并将状态流转至 `RECOVERING` |
+| **`report`** | 统一事件上报 | `message` (必填), `event_type` (milestone/alert/completed/failed，默认 milestone), `task_id`, `step`, `epoch`, `metrics`, `agent_note`, `extra`, `gpu_host` | `milestone`：登记 `gpu_host` 供看门狗 ping 判活，向飞书推送绿色卡片及 Agent 点评；`alert`：状态置为 `WAITING` 冻结训练，推送红色交互卡片并激活 30s 超时定时器；`completed`/`failed`：流转终态 |
+| **`poll_instruction`** | 决策拉取 | `task_id`, `wait_timeout` (默认 20s), `pop` (默认 True) | Agent 挂起等待用户决策；决策到达时返回指令并将状态流转至 `RECOVERING` |
 | **`ack_instruction`** | 自愈确认 | `task_id`, `instruction_id`, `action`, `status`, `solution`, `message` | 校验指令有效性，状态流转回 `RUNNING`，向飞书推送【自愈恢复】卡片通知用户 |
-| **`send_heartbeat`** | 节点保活 | `task_id`, `step`, `epoch`, `metrics`, `status` | 更新 `last_heartbeat_at`，重置失联预警标记，向看门狗报到 |
-| **`get_task_status`** | 状态查询 | `task_id` | 获取指定任务当前生命周期状态、最新指标、信箱未决指令与事件统计 |
+| **`get_task_status`** | 状态查询 | `task_id` | 获取指定任务当前生命周期状态、GPU 地址、ping 结果、信箱未决指令与事件统计 |
 | **`list_tasks`** | 集群汇总 | `limit`, `offset`, `state` (状态过滤), `stale_only` (仅失联) | 分页查询集群所有跟踪任务列表，支持失联与状态过滤 |
-| **`submit_decision`** | 用户干预 | `task_id`, `action`, `payload`, `operator` | 注入运维决策，更新信箱并就地将飞书卡片置为已处理 |
+| **`submit_decision`** | 用户干预 | `action`, `task_id`, `payload`, `operator` | 注入运维决策，更新信箱并就地将飞书卡片置为已处理 |
 
 ### MCP Resources (只读资源)
 
@@ -286,11 +290,11 @@ TrainPilot 为深度学习生命周期的不同场景精心设计了视觉分明
 
 | 卡片类型 | 视觉色系 | 触发时机 | 核心内容与交互要素 |
 |:---|:---:|:---|:---|
-| **⚠️ 训练异常告警卡片** | 🔴 红色 Header | Agent 触发 `report_alert` (如 Loss NaN) | 实时指标、异常详情、**🤖 Agent 异常研判**、30s 倒计时说明；提供【🛑 停止训练】与【✅ 自行解决】两个交互按钮 |
-| **🚀 训练里程碑卡片** | 🟢 绿色 Header | Agent 触发 `report_milestone` (如 Epoch 完成) | 阶段进度、关键指标、**🤖 Agent 智能点评**（独立区块呈现模型调优意见） |
+| **⚠️ 训练异常告警卡片** | 🔴 红色 Header | Agent 触发 `report(event_type="alert")` (如 Loss NaN) | 实时指标、异常详情、**🤖 Agent 异常研判**、30s 倒计时说明；提供【🛑 停止训练】与【✅ 自行解决】两个交互按钮 |
+| **🚀 训练里程碑卡片** | 🟢 绿色 Header | Agent 触发 `report(event_type="milestone")` (如 Epoch 完成) | 阶段进度、关键指标、**🤖 Agent 智能点评**（独立区块呈现模型调优意见） |
 | **✅ 决策闭环防呆卡片** | 🟦 绿松石 Header | 用户点击决策按钮或 30s 超时触发 | 就地替换原告警卡片，展示**决策人**、**选定动作**及**闭环时间**；完全隐藏按钮防呆 |
 | **🛠️ 异常自愈成功卡片** | 🟢 绿色 Header | Agent 执行自愈后发送 `ack_instruction` | 展示执行的解决方法概要（如回退 Checkpoint、调小学习率），告知团队训练已复苏 |
-| **⚠️ 训练失联预警卡片** | 🟠 橙色 Header | Watchdog 检测到心跳超时（默认 >300s） | 失联时长、最后已知步数与心跳时间，提示排查硬件断电、节点崩溃或 NCCL 死锁 |
+| **⚠️ 训练失联预警卡片** | 🟠 橙色 Header | Watchdog ping `gpu_host` 失败（或从未上报 IP） | 失联时长、GPU 地址、最后探测时间与步数，提示排查硬件断电、节点崩溃或 NCCL 死锁 |
 
 ### 卡片防呆与幂等保障
 
@@ -379,7 +383,7 @@ docker run -d \
 | `TRAINPILOT_ENABLE_MOCK_FEISHU` | `false` | bool | 强制启用飞书 Mock 模式（测试与本地演练用） |
 | `TRAINPILOT_API_TOKEN` | - | str | API 鉴权令牌（设置后客户端调用须携带此 Token） |
 | `TRAINPILOT_ALERT_DECISION_TIMEOUT_SECONDS`| `30` | int | 告警卡片等待人工决策超时时间（秒），超时自动自愈 |
-| `TRAINPILOT_TASK_HEARTBEAT_TIMEOUT_SECONDS`| `300` | int | 任务心跳判定失联阈值（秒） |
+| `TRAINPILOT_GPU_PING_TIMEOUT_SECONDS` | `3.0` | float | 单个 GPU 主机 ping 探测超时时间（秒） |
 | `TRAINPILOT_LONG_POLL_TIMEOUT_SECONDS` | `20.0` | float | 服务端长轮询最大挂起时长（秒） |
 | `TRAINPILOT_ENABLE_SQLITE` | `true` | bool | 是否启用 SQLite WAL 持久化；`false` 时仅使用进程内存 |
 | `TRAINPILOT_SQLITE_PATH` | `trainpilot.db` | str | SQLite 数据库存储路径 |
@@ -387,7 +391,7 @@ docker run -d \
 | `TRAINPILOT_ENABLE_TASK_CLEANUP` | `true` | bool | 是否定时删除超过保留期的 `COMPLETED`/`FAILED` 任务及事件 |
 | `TRAINPILOT_TASK_RETENTION_HOURS` | `72` | float | 终态任务保留时长（小时） |
 | `TRAINPILOT_TASK_CLEANUP_INTERVAL_SECONDS` | `3600` | float | 过期任务清理周期（秒） |
-| `TRAINPILOT_ENABLE_WATCHDOG` | `true` | bool | 是否启用服务端失联看门狗守护线程 |
+| `TRAINPILOT_ENABLE_WATCHDOG` | `true` | bool | 是否启用服务端 GPU ping 失联看门狗守护线程 |
 | `TRAINPILOT_WATCHDOG_INTERVAL_SECONDS` | `15` | int | 看门狗后台扫描周期（秒） |
 | `TRAINPILOT_MCP_ENABLE_DNS_REBINDING_PROTECTION` | `false` | bool | 是否启用 MCP DNS 重绑定防护（跨公网连接设为 false） |
 

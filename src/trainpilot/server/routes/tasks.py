@@ -8,7 +8,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from trainpilot.common.schemas import (
     EventNotifyRequest,
     EventNotifyResponse,
-    HeartbeatRequest,
     InstructionAckRequest,
     InstructionResponse,
     TaskDecisionRequest,
@@ -189,18 +188,6 @@ def ack_instruction(
     }
 
 
-@router.post("/{task_id}/heartbeat", status_code=status.HTTP_200_OK)
-def heartbeat(task_id: str, req: HeartbeatRequest) -> dict:
-    """Record heartbeat from GPU Agent."""
-    if req.task_id != task_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Task ID mismatch in heartbeat: {task_id} vs {req.task_id}",
-        )
-    default_mailbox.record_heartbeat(req)
-    return {"success": True, "task_id": task_id}
-
-
 @router.post("/{task_id}/decision", response_model=InstructionResponse)
 def submit_decision(
     task_id: str, req: TaskDecisionRequest
@@ -262,7 +249,7 @@ def list_tasks(
     limit: int = Query(default=100, ge=1, le=1000, description="Max tasks to return"),
     offset: int = Query(default=0, ge=0, description="Skip first N tasks"),
     state: Optional[TaskState] = Query(default=None, description="Filter by task state"),
-    stale_only: bool = Query(default=False, description="Only return heartbeat-stale tasks"),
+    stale_only: bool = Query(default=False, description="Only return ping-unreachable tasks"),
 ) -> List[TaskSummary]:
     """List tracked training tasks with pagination and optional filters."""
     return default_mailbox.list_tasks(limit=limit, offset=offset, state=state, stale_only=stale_only)

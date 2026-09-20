@@ -53,7 +53,9 @@ class SQLiteStorage:
                     state TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    last_heartbeat_at TEXT,
+                    gpu_host TEXT,
+                    last_ping_at TEXT,
+                    last_ping_ok INTEGER,
                     latest_step INTEGER,
                     latest_epoch INTEGER,
                     latest_metrics_json TEXT,
@@ -67,11 +69,23 @@ class SQLiteStorage:
                 );
                 """
             )
-            # Automatic column migration if table already existed without feishu_message_id
+            # Column migrations for existing databases (heartbeat -> ping model)
             cur.execute("PRAGMA table_info(tasks);")
             cols = [r["name"] for r in cur.fetchall()]
             if "feishu_message_id" not in cols:
                 cur.execute("ALTER TABLE tasks ADD COLUMN feishu_message_id TEXT;")
+            if "gpu_host" not in cols:
+                cur.execute("ALTER TABLE tasks ADD COLUMN gpu_host TEXT;")
+            if "last_ping_at" not in cols:
+                cur.execute("ALTER TABLE tasks ADD COLUMN last_ping_at TEXT;")
+            if "last_ping_ok" not in cols:
+                cur.execute("ALTER TABLE tasks ADD COLUMN last_ping_ok INTEGER;")
+            if "last_heartbeat_at" in cols:
+                try:
+                    cur.execute("ALTER TABLE tasks DROP COLUMN last_heartbeat_at;")
+                except Exception:
+                    # Old SQLite without DROP COLUMN support: leave the column unused.
+                    pass
 
             cur.execute(
                 """
@@ -128,6 +142,10 @@ class SQLiteStorage:
             else None
         )
         feishu_msg_id = getattr(task, "feishu_message_id", None)
+        gpu_host = getattr(task, "gpu_host", None)
+        last_ping_at = getattr(task, "last_ping_at", None)
+        last_ping_ok = getattr(task, "last_ping_ok", None)
+        last_ping_ok_val = None if last_ping_ok is None else (1 if last_ping_ok else 0)
 
         with self._lock:
             cur = self._conn.cursor()
@@ -147,15 +165,18 @@ class SQLiteStorage:
             cur.execute(
                 """
                 INSERT INTO tasks (
-                    task_id, state, created_at, updated_at, last_heartbeat_at,
+                    task_id, state, created_at, updated_at, gpu_host,
+                    last_ping_at, last_ping_ok,
                     latest_step, latest_epoch, latest_metrics_json, latest_message,
                     pending_instruction_json, latest_instruction_json,
                     last_alert_fingerprint, last_alert_at, stale_alerted, feishu_message_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(task_id) DO UPDATE SET
                     state = excluded.state,
                     updated_at = excluded.updated_at,
-                    last_heartbeat_at = excluded.last_heartbeat_at,
+                    gpu_host = COALESCE(excluded.gpu_host, tasks.gpu_host),
+                    last_ping_at = COALESCE(excluded.last_ping_at, tasks.last_ping_at),
+                    last_ping_ok = COALESCE(excluded.last_ping_ok, tasks.last_ping_ok),
                     latest_step = excluded.latest_step,
                     latest_epoch = excluded.latest_epoch,
                     latest_metrics_json = excluded.latest_metrics_json,
@@ -172,7 +193,9 @@ class SQLiteStorage:
                     task.state.value if hasattr(task.state, "value") else str(task.state),
                     task.created_at,
                     task.updated_at,
-                    task.last_heartbeat_at,
+                    gpu_host,
+                    last_ping_at,
+                    last_ping_ok_val,
                     task.latest_step,
                     task.latest_epoch,
                     latest_metrics_json,
@@ -431,13 +454,19 @@ class SQLiteStorage:
 
         keys = r.keys()
         feishu_msg_id = r["feishu_message_id"] if "feishu_message_id" in keys else None
+        gpu_host = r["gpu_host"] if "gpu_host" in keys else None
+        last_ping_at = r["last_ping_at"] if "last_ping_at" in keys else None
+        _ping_val = r["last_ping_ok"] if "last_ping_ok" in keys else None
+        last_ping_ok = None if _ping_val is None else bool(_ping_val)
 
         return TaskRecord(
             task_id=t_id,
             state=TaskState(r["state"]),
             created_at=r["created_at"],
             updated_at=r["updated_at"],
-            last_heartbeat_at=r["last_heartbeat_at"],
+            gpu_host=gpu_host,
+            last_ping_at=last_ping_at,
+            last_ping_ok=last_ping_ok,
             latest_step=r["latest_step"],
             latest_epoch=r["latest_epoch"],
             latest_metrics=latest_metrics,

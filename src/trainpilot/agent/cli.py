@@ -79,6 +79,7 @@ def main(argv=None) -> int:
     p_milestone.add_argument("--epoch", type=int, default=None, help="Current epoch number")
     p_milestone.add_argument("--metrics", help="JSON or comma-separated key=val metrics (e.g. loss=0.45,val_loss=0.48)")
     p_milestone.add_argument("--agent-note", help="AI agent autonomous analysis/commentary note")
+    p_milestone.add_argument("--gpu-host", default=None, help="GPU server IP/hostname (default: auto-detected local IP)")
 
     # 2. report-alert
     p_alert = subparsers.add_parser("report-alert", help="Report training anomaly and freeze training")
@@ -87,6 +88,22 @@ def main(argv=None) -> int:
     p_alert.add_argument("--epoch", type=int, default=None, help="Current epoch number")
     p_alert.add_argument("--metrics", help="Metrics at anomaly (e.g. loss=NaN)")
     p_alert.add_argument("--agent-note", help="AI agent diagnostic note")
+    p_alert.add_argument("--gpu-host", default=None, help="GPU server IP/hostname (default: auto-detected local IP)")
+
+    # 2b. report (unified: milestone/alert/completed/failed)
+    p_report = subparsers.add_parser("report", help="Report any event via the unified report tool")
+    p_report.add_argument("--message", "-m", required=True, help="Event description")
+    p_report.add_argument(
+        "--type",
+        default="milestone",
+        choices=["milestone", "alert", "completed", "failed"],
+        help="Event type (default: milestone)",
+    )
+    p_report.add_argument("--step", type=int, default=None, help="Current step number")
+    p_report.add_argument("--epoch", type=int, default=None, help="Current epoch number")
+    p_report.add_argument("--metrics", help="JSON or comma-separated key=val metrics (e.g. loss=0.45)")
+    p_report.add_argument("--agent-note", help="AI agent autonomous analysis/commentary note")
+    p_report.add_argument("--gpu-host", default=None, help="GPU server IP/hostname (default: auto-detected local IP)")
 
     # 3. poll-instruction
     p_poll = subparsers.add_parser("poll-instruction", help="Poll for human decisions")
@@ -102,28 +119,22 @@ def main(argv=None) -> int:
     p_ack.add_argument("--instruction-id", default=None, help="Instruction ID")
     p_ack.add_argument("--message", default="", help="Additional execution message")
 
-    # 5. send-heartbeat
-    p_hb = subparsers.add_parser("send-heartbeat", help="Send heartbeat telemetry")
-    p_hb.add_argument("--step", type=int, default=None, help="Current step number")
-    p_hb.add_argument("--epoch", type=int, default=None, help="Current epoch number")
-    p_hb.add_argument("--metrics", help="GPU telemetry metrics (e.g. gpu_mem=85%)")
-
-    # 6. get-status
+    # 5. get-status
     subparsers.add_parser("get-status", help="Get current task status and mailbox")
 
-    # 7. list-tasks
+    # 6. list-tasks
     p_list = subparsers.add_parser("list-tasks", help="List all tracked tasks on server")
     p_list.add_argument("--limit", type=int, default=100, help="Max tasks to return")
     p_list.add_argument("--offset", type=int, default=0, help="Offset")
     p_list.add_argument("--state", help="Filter by state (e.g. RUNNING, WAITING)")
-    p_list.add_argument("--stale-only", action="store_true", help="Only show stale tasks")
+    p_list.add_argument("--stale-only", action="store_true", help="Only show ping-unreachable tasks")
 
-    # 8. submit-decision
+    # 7. submit-decision
     p_dec = subparsers.add_parser("submit-decision", help="Directly submit an operator decision")
     p_dec.add_argument("--action", required=True, help="Action name (e.g. self_resolve, stop_training)")
     p_dec.add_argument("--operator", default="cli_operator", help="Operator name")
 
-    # 9. list-tools
+    # 8. list-tools
     subparsers.add_parser("list-tools", help="List all tools exposed by the MCP Server")
 
     args = parser.parse_args(argv)
@@ -132,10 +143,24 @@ def main(argv=None) -> int:
         server_url=args.server_url,
         task_id=args.task_id,
         api_token=args.api_token,
+        gpu_host=getattr(args, "gpu_host", None),
     )
 
     try:
-        if args.subcommand == "report-milestone":
+        if args.subcommand == "report":
+            res = client.report(
+                message=args.message,
+                event_type=args.type,
+                step=args.step,
+                epoch=args.epoch,
+                metrics=_parse_key_value_or_json(args.metrics),
+                agent_note=args.agent_note,
+                gpu_host=args.gpu_host,
+                fail_silently=False,
+            )
+            print(json.dumps(res, indent=2, ensure_ascii=False))
+
+        elif args.subcommand == "report-milestone":
             metrics = _parse_key_value_or_json(args.metrics)
             res = client.report_milestone(
                 message=args.message,
@@ -143,6 +168,7 @@ def main(argv=None) -> int:
                 epoch=args.epoch,
                 metrics=metrics,
                 agent_note=args.agent_note,
+                gpu_host=args.gpu_host,
             )
             print(json.dumps(res, indent=2, ensure_ascii=False))
 
@@ -154,6 +180,7 @@ def main(argv=None) -> int:
                 epoch=args.epoch,
                 metrics=metrics,
                 agent_note=args.agent_note,
+                gpu_host=args.gpu_host,
             )
             print(json.dumps(res, indent=2, ensure_ascii=False))
 
@@ -172,15 +199,6 @@ def main(argv=None) -> int:
                 solution=args.solution,
                 instruction_id=args.instruction_id,
                 message=args.message,
-            )
-            print(json.dumps(res, indent=2, ensure_ascii=False))
-
-        elif args.subcommand == "send-heartbeat":
-            metrics = _parse_key_value_or_json(args.metrics)
-            res = client.send_heartbeat(
-                step=args.step,
-                epoch=args.epoch,
-                metrics=metrics,
             )
             print(json.dumps(res, indent=2, ensure_ascii=False))
 

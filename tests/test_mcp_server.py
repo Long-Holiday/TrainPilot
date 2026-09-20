@@ -4,17 +4,16 @@ import json
 import pytest
 from trainpilot.common.states import TaskState
 from trainpilot.server.mailbox import default_mailbox
+from trainpilot.server.config import settings
 from trainpilot.server.mcp_server import (
     ack_instruction,
     get_task_status,
     list_tasks,
     mcp_server,
     poll_instruction,
-    report_alert,
-    report_milestone,
+    report,
     resource_task_list,
     resource_task_status,
-    send_heartbeat,
     submit_decision,
 )
 
@@ -33,8 +32,8 @@ def test_mcp_server_metadata_and_tools():
 
 
 def test_report_milestone_tool():
-    """Test report_milestone MCP tool."""
-    res = report_milestone(
+    """Test the unified report MCP tool with default milestone event type."""
+    res = report(
         task_id="test-mcp-1",
         message="Epoch 1 completed",
         step=500,
@@ -58,9 +57,10 @@ async def test_report_alert_and_decision_lifecycle():
     task_id = "test-mcp-alert-cycle"
 
     # 1. Report alert -> transitions to WAITING
-    alert_res = report_alert(
+    alert_res = report(
         task_id=task_id,
         message="Loss NaN encountered at step 1000",
+        event_type="alert",
         step=1000,
         metrics={"loss": "NaN"},
     )
@@ -106,16 +106,17 @@ async def test_report_alert_and_decision_lifecycle():
     assert task_after.state == TaskState.RUNNING
 
 
-def test_send_heartbeat_and_list_tasks():
-    """Test send_heartbeat and list_tasks tools."""
-    task_id = "test-mcp-hb"
-    hb_res = send_heartbeat(
+def test_first_report_registers_gpu_host_and_list_tasks():
+    """Test gpu_host registration on first report plus list_tasks tools."""
+    task_id = "test-mcp-gpu"
+    res = report(
         task_id=task_id,
+        message="Epoch 1 started",
         step=200,
-        metrics={"gpu_mem_used_pct": 78.5},
-        status="running",
+        metrics={"loss": 0.5},
+        gpu_host="10.0.0.9",
     )
-    assert hb_res["success"] is True
+    assert res["success"] is True
 
     # List tasks
     list_res = list_tasks(limit=10)
@@ -123,12 +124,14 @@ def test_send_heartbeat_and_list_tasks():
     assert list_res["count"] >= 1
     tids = [t["task_id"] for t in list_res["tasks"]]
     assert task_id in tids
+    task_entry = next(t for t in list_res["tasks"] if t["task_id"] == task_id)
+    assert task_entry["gpu_host"] == "10.0.0.9"
 
 
 def test_mcp_resources():
     """Test MCP resources for reading task state and list."""
     task_id = "test-mcp-res"
-    report_milestone(task_id=task_id, message="Starting run", step=1)
+    report(task_id=task_id, message="Starting run", step=1)
 
     # Read status resource
     raw_status = resource_task_status(task_id=task_id)
@@ -141,3 +144,39 @@ def test_mcp_resources():
     list_json = json.loads(raw_list)
     assert isinstance(list_json, list)
     assert any(t["task_id"] == task_id for t in list_json)
+
+
+def test_report_defaults_task_id_and_event_type():
+    """Omitting task_id falls back to settings.task_id; event_type defaults to milestone."""
+    old_task_id = settings.task_id
+    settings.task_id = "test-default-task"
+    try:
+        res = report(message="Epoch 2 done", step=10)
+        assert res["success"] is True
+        assert res["task_id"] == "test-default-task"
+        assert res["state"] == TaskState.RUNNING.value
+
+        task = default_mailbox.get_task("test-default-task")
+        assert task is not None
+        assert task.latest_step == 10
+    finally:
+        settings.task_id = old_task_id
+
+
+def test_report_rejects_invalid_event_type():
+    """Invalid event_type is rejected without touching the mailbox."""
+    res = report(task_id="test-bad-type", message="oops", event_type="banana")
+    assert res["success"] is False
+    assert "Invalid event_type" in res["error"]
+    assert default_mailbox.get_task("test-bad-type") is None
+
+
+def test_report_terminal_event_types():
+    """completed/failed event types are accepted by the unified tool."""
+    res_done = report(task_id="test-done", message="Training finished", event_type="completed")
+    assert res_done["success"] is True
+    assert res_done["state"] == TaskState.COMPLETED.value
+
+    res_fail = report(task_id="test-fail", message="Crashed", event_type="failed")
+    assert res_fail["success"] is True
+    assert res_fail["state"] == TaskState.FAILED.value

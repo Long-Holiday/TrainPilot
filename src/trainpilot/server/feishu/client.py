@@ -134,16 +134,18 @@ class FeishuCardClient:
         self,
         task_id: str,
         silent_seconds: float,
-        last_heartbeat_at: Optional[str] = None,
+        gpu_host: Optional[str] = None,
+        last_ping_at: Optional[str] = None,
         latest_step: Optional[int] = None,
         latest_epoch: Optional[int] = None,
         latest_message: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Send a stale/heartbeat timeout alert card to the configured receiver."""
+        """Send a stale/ping-unreachable alert card to the configured receiver."""
         card_content = build_stale_alert_card(
             task_id=task_id,
             silent_seconds=silent_seconds,
-            last_heartbeat_at=last_heartbeat_at,
+            gpu_host=gpu_host,
+            last_ping_at=last_ping_at,
             latest_step=latest_step,
             latest_epoch=latest_epoch,
             latest_message=latest_message,

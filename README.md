@@ -81,9 +81,9 @@ flowchart TB
 
 ```mermaid
 stateDiagram-v2
-    [*] --> RUNNING: Agent launches training task
-    RUNNING --> RUNNING: Heartbeat send_heartbeat / Milestone report_milestone
-    RUNNING --> WAITING: Anomaly captured & execution frozen report_alert
+    [*] --> RUNNING: Agent launches training task (first request reports gpu_host)
+    RUNNING --> RUNNING: Milestone report(event_type=milestone) (watchdog pings gpu_host for liveness)
+    RUNNING --> WAITING: Anomaly captured & execution frozen report(event_type=alert)
     WAITING --> RESOLVED: User decision in Feishu or timeout fallback
     RESOLVED --> RECOVERING: Agent polls instruction poll_instruction
     RECOVERING --> RUNNING: Self-healing success ack_instruction - success
@@ -191,13 +191,16 @@ Once configured, the Agent running on the GPU cluster can directly invoke TrainP
 
 When executing training workloads, the Agent interacts with the public MCP Server through the following tools:
 
+All reports go through a single **`report`** tool distinguished by `event_type`; `task_id` may be omitted (the server falls back to the task configured via `TRAINPILOT_TASK_ID`), and `message` is the only required field.
+
 1. **Report Milestones & Notify Users**:
    The Agent regularly reports progress (e.g., at each epoch or checkpoint) along with autonomous analysis in `agent_note`. The MCP Server immediately delivers a green card to the Feishu/Lark group:
    ```json
    {
-     "tool": "report_milestone",
+     "tool": "report",
      "arguments": {
        "task_id": "llama3-8b-sft",
+       "event_type": "milestone",
        "step": 5000,
        "epoch": 1,
        "metrics": {"loss": 0.385, "gpu_mem": "82%"},
@@ -208,12 +211,13 @@ When executing training workloads, the Agent interacts with the public MCP Serve
    ```
 
 2. **Detect Anomalies, Freeze Execution & Request User Intervention**:
-   When the Agent detects `Loss NaN`, extreme metric spikes, or `CUDA OOM`, it reports an alert. The control plane sets the task state to `WAITING`, freezes execution on-site, and sends a red alert card with [🛑 Stop Training] and [✅ Self Resolve] action buttons to Feishu/Lark:
+   When the Agent detects `Loss NaN`, extreme metric spikes, or `CUDA OOM`, it reports with `event_type` set to `alert`. The control plane sets the task state to `WAITING`, freezes execution on-site, and sends a red alert card with [🛑 Stop Training] and [✅ Self Resolve] action buttons to Feishu/Lark:
    ```json
    {
-     "tool": "report_alert",
+     "tool": "report",
      "arguments": {
        "task_id": "llama3-8b-sft",
+       "event_type": "alert",
        "step": 5420,
        "metrics": {"loss": "NaN"},
        "message": "Loss turned into NaN",
@@ -254,18 +258,18 @@ When executing training workloads, the Agent interacts with the public MCP Serve
 
 The public control plane strictly adheres to the MCP specification, providing standardized **Tools** and **Resources**.
 
-### MCP Tools (8 Standard Tools)
+### MCP Tools (6 Standard Tools)
+
+> Apart from `message`, all `report` parameters are optional; `task_id` may be omitted on every tool and falls back to the task configured via `TRAINPILOT_TASK_ID` (ideal for single-task deployments; pass it explicitly for multi-task setups).
 
 | Tool Name | Primary Role | Input Parameters Summary | Behavior & Effects |
 |:---|:---|:---|:---|
-| **`report_milestone`** | Status Reporting | `task_id`, `message`, `step`, `epoch`, `metrics`, `agent_note`, `extra` | Records training milestone, updates step & metrics, pushes green card with Agent analysis to Feishu/Lark |
-| **`report_alert`** | Anomaly Interception | `task_id`, `message`, `step`, `epoch`, `metrics`, `agent_note`, `extra` | Sets state to `WAITING`, freezes execution, pushes red interactive card to user, activates 30s timeout timer |
+| **`report`** | Unified Event Reporting | `message` (required), `event_type` (milestone/alert/completed/failed, default milestone), `task_id`, `step`, `epoch`, `metrics`, `agent_note`, `extra`, `gpu_host` | `milestone`: registers `gpu_host` for ping-based liveness, pushes green card with Agent analysis; `alert`: sets state to `WAITING`, freezes execution, pushes red interactive card, activates 30s timeout timer; `completed`/`failed`: terminal states |
 | **`poll_instruction`** | Decision Polling | `task_id`, `wait_timeout` (default 20s), `pop` (default True) | Agent suspends waiting for user decision; returns instruction when received and transitions state to `RECOVERING` |
 | **`ack_instruction`** | Self-Healing ACK | `task_id`, `instruction_id`, `action`, `status`, `solution`, `message` | Validates instruction, transitions state back to `RUNNING`, pushes self-healing success card to Feishu/Lark |
-| **`send_heartbeat`** | Node Keepalive | `task_id`, `step`, `epoch`, `metrics`, `status` | Updates `last_heartbeat_at`, resets disconnection flags, reports to watchdog |
-| **`get_task_status`** | Status Query | `task_id` | Retrieves current lifecycle state, latest metrics, pending mailbox instructions, and event statistics |
+| **`get_task_status`** | Status Query | `task_id` | Retrieves current lifecycle state, GPU host, ping result, pending mailbox instructions, and event statistics |
 | **`list_tasks`** | Cluster Summary | `limit`, `offset`, `state` (filter), `stale_only` (unreachable only) | Paginated list of all tracked cluster tasks with state and stale filtering |
-| **`submit_decision`** | User Intervention | `task_id`, `action`, `payload`, `operator` | Injects operational decision, updates mailbox, and marks Feishu card as resolved on-site |
+| **`submit_decision`** | User Intervention | `action`, `task_id`, `payload`, `operator` | Injects operational decision, updates mailbox, and marks Feishu card as resolved on-site |
 
 ### MCP Resources (Read-Only Resources)
 
@@ -286,11 +290,11 @@ TrainPilot features meticulously designed, structured Feishu/Lark cards for vari
 
 | Card Type | Header Color | Trigger Condition | Core Content & Interaction Elements |
 |:---|:---:|:---|:---|
-| **⚠️ Training Anomaly Alert Card** | 🔴 Red | Agent triggers `report_alert` (e.g., Loss NaN) | Real-time metrics, anomaly details, **🤖 Agent Anomaly Assessment**, 30s countdown notice; provides [🛑 Stop Training] and [✅ Self Resolve] interactive buttons |
-| **🚀 Training Milestone Card** | 🟢 Green | Agent triggers `report_milestone` (e.g., Epoch finished) | Stage progress, key metrics, **🤖 Agent Intelligent Review** (dedicated block showing optimization suggestions) |
+| **⚠️ Training Anomaly Alert Card** | 🔴 Red | Agent triggers `report(event_type="alert")` (e.g., Loss NaN) | Real-time metrics, anomaly details, **🤖 Agent Anomaly Assessment**, 30s countdown notice; provides [🛑 Stop Training] and [✅ Self Resolve] interactive buttons |
+| **🚀 Training Milestone Card** | 🟢 Green | Agent triggers `report(event_type="milestone")` (e.g., Epoch finished) | Stage progress, key metrics, **🤖 Agent Intelligent Review** (dedicated block showing optimization suggestions) |
 | **✅ Decision Closed-Loop Card** | 🟦 Turquoise | User clicks action button or 30s timeout triggers | Replaces original alert card on-site; displays **Operator**, **Selected Action**, and **Resolution Time**; hides buttons to prevent re-clicks |
 | **🛠️ Self-Healing Success Card** | 🟢 Green | Agent sends `ack_instruction` after self-healing | Summarizes applied solution (e.g., checkpoint rollback, LR reduction), informing the team that training has recovered |
-| **⚠️ Disconnection Warning Card** | 🟠 Orange | Watchdog detects heartbeat timeout (default >300s) | Disconnection duration, last known step & heartbeat time; prompts investigation of power loss, node crash, or NCCL deadlock |
+| **⚠️ Disconnection Warning Card** | 🟠 Orange | Watchdog ping to `gpu_host` fails (or no IP was ever reported) | Disconnection duration, GPU host, last probe time & step; prompts investigation of power loss, node crash, or NCCL deadlock |
 
 ### Card Idempotency & Foolproofing Safeguards
 
@@ -379,7 +383,7 @@ Copy and customize the configuration file: `cp .env.example .env`
 | `TRAINPILOT_ENABLE_MOCK_FEISHU` | `false` | bool | Force enable Feishu mock mode (for local testing/simulation) |
 | `TRAINPILOT_API_TOKEN` | - | str | API authentication token (clients must provide this if set) |
 | `TRAINPILOT_ALERT_DECISION_TIMEOUT_SECONDS` | `30` | int | Timeout (seconds) waiting for human decision before auto fallback |
-| `TRAINPILOT_TASK_HEARTBEAT_TIMEOUT_SECONDS` | `300` | int | Threshold (seconds) to mark a task as disconnected |
+| `TRAINPILOT_GPU_PING_TIMEOUT_SECONDS` | `3.0` | float | Per-host ping timeout (seconds) for GPU liveness checks |
 | `TRAINPILOT_LONG_POLL_TIMEOUT_SECONDS` | `20.0` | float | Maximum server-side long-polling suspension duration (seconds) |
 | `TRAINPILOT_ENABLE_SQLITE` | `true` | bool | Enable SQLite WAL persistence; `false` uses process-local in-memory storage |
 | `TRAINPILOT_SQLITE_PATH` | `trainpilot.db` | str | SQLite database file path |
@@ -387,7 +391,7 @@ Copy and customize the configuration file: `cp .env.example .env`
 | `TRAINPILOT_ENABLE_TASK_CLEANUP` | `true` | bool | Periodically delete expired `COMPLETED`/`FAILED` tasks and their events |
 | `TRAINPILOT_TASK_RETENTION_HOURS` | `72` | float | Retention period for terminal tasks in hours |
 | `TRAINPILOT_TASK_CLEANUP_INTERVAL_SECONDS` | `3600` | float | Interval between expired-task cleanup sweeps |
-| `TRAINPILOT_ENABLE_WATCHDOG` | `true` | bool | Enable server-side background heartbeat watchdog |
+| `TRAINPILOT_ENABLE_WATCHDOG` | `true` | bool | Enable server-side background GPU ping watchdog |
 | `TRAINPILOT_WATCHDOG_INTERVAL_SECONDS` | `15` | int | Watchdog background scan interval (seconds) |
 | `TRAINPILOT_MCP_ENABLE_DNS_REBINDING_PROTECTION` | `false` | bool | Enable MCP DNS rebinding protection (set to false for public access) |
 

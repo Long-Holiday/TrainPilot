@@ -88,37 +88,35 @@ def test_mcp_client_e2e_tools(live_mcp_server):
     assert res["success"] is True
     assert res["state"] == TaskState.RUNNING.value
 
-    # 2. Heartbeat
-    hb_res = client.send_heartbeat(step=100, metrics={"gpu_mem": "80%"})
-    assert hb_res["success"] is True
-
-    # 3. Get task status
+    # 2. Get task status (gpu_host auto-reported on first call)
     status_res = client.get_task_status()
     assert status_res["success"] is True
     assert status_res["task"]["task_id"] == task_id
     assert status_res["task"]["latest_step"] == 100
+    assert status_res["task"]["gpu_host"]
 
-    # 4. Report alert
-    alert_res = client.report_alert(
+    # 3. Report alert via unified report tool
+    alert_res = client.report(
         message="Loss NaN encountered",
+        event_type="alert",
         step=150,
         metrics={"loss": "NaN"},
     )
     assert alert_res["success"] is True
     assert alert_res["state"] == TaskState.WAITING.value
 
-    # 5. Submit decision
+    # 4. Submit decision
     dec_res = client.submit_decision(action="self_resolve", operator="reviewer")
     assert dec_res["success"] is True
     instruction_id = dec_res["instruction"]["instruction_id"]
 
-    # 6. Poll instruction
+    # 5. Poll instruction
     poll_res = client.poll_instruction(wait_timeout=2.0, pop=True)
     assert poll_res["has_instruction"] is True
     assert poll_res["action"] == "self_resolve"
     assert poll_res["instruction_id"] == instruction_id
 
-    # 7. Ack instruction
+    # 6. Ack instruction
     ack_res = client.ack_instruction(
         action="self_resolve",
         status="success",
@@ -179,14 +177,17 @@ def test_cli_parser_and_subcommands(live_mcp_server):
     ])
     assert code == 0
 
-    # Test CLI execution for send-heartbeat
-    code_hb = cli_main([
+    # Test unified report subcommand (alert event type)
+    code_report = cli_main([
         "--server-url", live_mcp_server,
         "--task-id", "test-cli-task",
-        "send-heartbeat",
-        "--step", "50",
+        "report",
+        "--type", "alert",
+        "--message", "CLI loss spike detected",
+        "--step", "75",
+        "--metrics", "loss=NaN",
     ])
-    assert code_hb == 0
+    assert code_report == 0
 
     # Test CLI execution for get-status
     code_st = cli_main([

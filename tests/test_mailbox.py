@@ -3,7 +3,6 @@
 import pytest
 from trainpilot.common.schemas import (
     EventNotifyRequest,
-    HeartbeatRequest,
 )
 from trainpilot.common.states import EventType, TaskState
 from trainpilot.server.mailbox import TaskMailboxManager
@@ -88,16 +87,25 @@ def test_mailbox_lifecycle_state_machine(mailbox: TaskMailboxManager):
     assert st_final == TaskState.COMPLETED
 
 
-def test_heartbeat_updates_metadata(mailbox: TaskMailboxManager):
-    task_id = "test-heartbeat"
-    hb = HeartbeatRequest(task_id=task_id, step=25, metrics={"gpu_mem": 0.85})
-    mailbox.record_heartbeat(hb)
+def test_first_request_registers_gpu_host(mailbox: TaskMailboxManager):
+    task_id = "test-gpu-host"
+    req = EventNotifyRequest(
+        task_id=task_id,
+        event_type=EventType.MILESTONE,
+        message="Epoch 1 started",
+        step=25,
+        metrics={"loss": 0.85},
+        gpu_host="10.0.0.5",
+    )
+    mailbox.record_event(req)
 
     task = mailbox.get_task(task_id)
     assert task is not None
     assert task.latest_step == 25
-    assert task.latest_metrics["gpu_mem"] == 0.85
-    assert task.last_heartbeat_at is not None
+    assert task.latest_metrics["loss"] == 0.85
+    assert task.gpu_host == "10.0.0.5"
+    assert task.last_ping_ok is True
+    assert task.last_ping_at is not None
 
 
 def test_mailbox_tasks_count(mailbox: TaskMailboxManager):

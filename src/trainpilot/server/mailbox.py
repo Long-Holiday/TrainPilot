@@ -13,7 +13,6 @@ from typing import Any, Dict, List, Optional
 
 from trainpilot.common.schemas import (
     EventNotifyRequest,
-    HeartbeatRequest,
     InstructionResponse,
     TaskSummary,
     utc_now_iso,
@@ -58,7 +57,10 @@ class TaskRecord:
     state: TaskState = TaskState.RUNNING
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
-    last_heartbeat_at: Optional[str] = None
+    # GPU 服务器 IP/主机名: Agent 首次请求时上报, 看门狗 ping 该地址判活。
+    gpu_host: Optional[str] = None
+    last_ping_at: Optional[str] = None
+    last_ping_ok: Optional[bool] = None
     latest_step: Optional[int] = None
     latest_epoch: Optional[int] = None
     latest_metrics: Optional[Dict[str, Any]] = None
@@ -186,6 +188,14 @@ class TaskMailboxManager:
             previous = copy.deepcopy(task)
             task.updated_at = utc_now_iso()
             task.latest_message = req.message
+            # Agent 首次请求携带 GPU IP 即可, 后续看门狗 ping 该地址判活, 无需心跳。
+            # 只要本次带了非空 gpu_host 且与已存不同就更新(兼容 DHCP 变更)。
+            _gpu = (getattr(req, "gpu_host", None) or "").strip() if getattr(req, "gpu_host", None) else None
+            if _gpu and _gpu != task.gpu_host:
+                task.gpu_host = _gpu
+                # 新上报/变更 IP 视为一次有效存活证明, 清除旧的 ping 失败记忆。
+                task.last_ping_at = task.updated_at
+                task.last_ping_ok = True
             if req.step is not None:
                 task.latest_step = req.step
             if req.epoch is not None:
@@ -221,8 +231,6 @@ class TaskMailboxManager:
                 if task.state != TaskState.WAITING:
                     task.state = TaskState.RUNNING
                 logger.info("Task %s recorded milestone at step %s", req.task_id, req.step)
-            elif req.event_type == EventType.HEARTBEAT:
-                task.last_heartbeat_at = req.timestamp or utc_now_iso()
             elif req.event_type == EventType.COMPLETED:
                 task.state = TaskState.COMPLETED
                 task.pending_instruction = None
@@ -256,29 +264,41 @@ class TaskMailboxManager:
 
             return task.state
 
-    def record_heartbeat(self, req: HeartbeatRequest) -> None:
-        """Update heartbeat timestamp and lightweight metrics."""
+    def set_task_gpu_host(self, task_id: str, gpu_host: str) -> None:
+        """显式登记/更新任务的 GPU 地址(首次请求上报的等价操作)。"""
+        gpu = (gpu_host or "").strip()
+        if not gpu:
+            raise ValueError("gpu_host must be a non-empty IP/hostname")
         with self._lock:
-            was_cached = req.task_id in self._tasks
-            task = self._get_or_create(req.task_id, persist_new=False)
+            was_cached = task_id in self._tasks
+            task = self._get_or_create(task_id, persist_new=False)
             previous = copy.deepcopy(task)
             now_iso = utc_now_iso()
-            task.last_heartbeat_at = now_iso
-            task.updated_at = now_iso
-            if req.step is not None:
-                task.latest_step = req.step
-            if req.epoch is not None:
-                task.latest_epoch = req.epoch
-            if req.metrics is not None:
-                task.latest_metrics = req.metrics
+            task.gpu_host = gpu
+            task.last_ping_at = now_iso
+            task.last_ping_ok = True
+            self._persist_task_or_restore(task, previous, was_cached, "gpu host registration")
 
-            self._persist_task_or_restore(
-                task,
-                previous,
-                was_cached,
-                "heartbeat",
-                stale_alerted=False,
-            )
+    def update_ping_result(self, task_id: str, ok: bool) -> None:
+        """记录看门狗一次 ping 结果(成功即存活证明)。"""
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                if self._storage:
+                    task = self._storage.get_task(task_id)
+                    if task is None:
+                        return
+                    self._tasks[task_id] = task
+                else:
+                    return
+            previous = copy.deepcopy(task)
+            was_cached = True
+            task.last_ping_at = utc_now_iso()
+            task.last_ping_ok = bool(ok)
+            try:
+                self._persist_task_or_restore(task, previous, was_cached, "ping result")
+            except Exception:
+                logger.debug("Failed to persist ping result for %s", task_id)
 
     def _notify_instruction_waiters(self, task_id: str) -> None:
         """Wake up any pending long-polling requests (sync or async) waiting for this task's decision."""
@@ -701,16 +721,15 @@ class TaskMailboxManager:
         offset: int = 0,
         state: Optional[TaskState] = None,
         stale_only: bool = False,
-        heartbeat_timeout_seconds: Optional[int] = None,
     ) -> List[TaskSummary]:
         """List summaries with pagination and optional state/stale filters.
 
+        ``stale_only=True`` 返回 ping 不可达的任务(ping 失败或从未上报 GPU IP)。
         Uses SQLite pagination directly when available to keep RAM consumption flat (O(limit) instead of O(N)).
         """
         with self._lock:
             if stale_only:
-                # Stale tasks are strictly candidate non-terminal states tracked in memory
-                tasks = [t for t in self._tasks.values() if self._is_stale_locked(t, heartbeat_timeout_seconds)]
+                tasks = [t for t in self._tasks.values() if self._is_unreachable_locked(t)]
                 tasks = tasks[offset:offset + limit]
                 return [self._build_summary(t) for t in tasks]
 
@@ -731,31 +750,33 @@ class TaskMailboxManager:
             tasks = tasks[offset:offset + limit]
             return [self._build_summary(t) for t in tasks]
 
-    def get_stale_tasks(self, timeout_seconds: int = 300) -> List[TaskSummary]:
-        """Tasks without heartbeat beyond timeout (candidates for intervention)."""
+    def get_stale_tasks(self) -> List[TaskSummary]:
+        """Ping 不可达的任务(看门狗告警候选)。"""
         with self._lock:
             return [
                 self._build_summary(t)
                 for t in self._tasks.values()
-                if self._is_stale_locked(t, timeout_seconds)
+                if self._is_unreachable_locked(t)
             ]
 
-    def _is_stale_locked(self, task: TaskRecord, timeout_seconds: Optional[int]) -> bool:
-        if timeout_seconds is None:
-            try:
-                from trainpilot.server.config import settings as _s
-                timeout_seconds = _s.task_heartbeat_timeout_seconds
-            except Exception:
-                timeout_seconds = 300
+    def get_liveness_candidates(self) -> List[TaskSummary]:
+        """看门狗每轮需要 ping 的任务(RUNNING/WAITING/RECOVERING)。"""
+        with self._lock:
+            return [
+                self._build_summary(t)
+                for t in self._tasks.values()
+                if t.state in STALE_CANDIDATE_STATES
+            ]
+
+    @staticmethod
+    def _is_unreachable_locked(task: TaskRecord) -> bool:
         if task.state not in STALE_CANDIDATE_STATES:
             return False
-        last = _parse_iso(task.last_heartbeat_at)
-        if last is None:
-            last = _parse_iso(task.updated_at)
-        if last is None:
-            return False
-        now = datetime.now(timezone.utc)
-        return (now - last).total_seconds() > timeout_seconds
+        if not task.gpu_host:
+            return True
+        if task.last_ping_ok is False:
+            return True
+        return False
 
     def reset(self) -> None:
         """Reset all tasks (mainly for testing)."""
@@ -777,7 +798,9 @@ class TaskMailboxManager:
             state=task.state,
             created_at=task.created_at,
             updated_at=task.updated_at,
-            last_heartbeat_at=task.last_heartbeat_at,
+            gpu_host=task.gpu_host,
+            last_ping_at=task.last_ping_at,
+            last_ping_ok=task.last_ping_ok,
             latest_step=task.latest_step,
             latest_epoch=task.latest_epoch,
             latest_metrics=task.latest_metrics,

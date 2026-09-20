@@ -60,8 +60,8 @@ def test_flush_offline_buffer_on_reconnection():
         assert sent_steps == [100, 200, 300]
 
 
-def test_heartbeat_drains_offline_buffer():
-    """Successful heartbeat pings automatically drain queued offline events."""
+def test_next_notify_drains_offline_buffer():
+    """A successful follow-up notify automatically drains queued offline events."""
     client = TrainPilotClient(
         gateway_url="http://127.0.0.1:9999",
         task_id="test-offline-task",
@@ -74,15 +74,14 @@ def test_heartbeat_drains_offline_buffer():
         client.notify_milestone("Step 20", step=20)
         assert client.get_buffered_count() == 2
 
-    # Heartbeat succeeds
+    # Network recovers: next notify flushes the queue first, then delivers itself
     mock_resp = MagicMock()
     mock_resp.status_code = 200
     mock_resp.json.return_value = {"success": True}
 
     with patch.object(client.session, "post", return_value=mock_resp):
-        ok = client.send_heartbeat(step=25)
-        assert ok is True
-        # Buffer was drained automatically by heartbeat
+        res = client.notify_milestone("Step 30", step=30)
+        assert res["success"] is True
         assert client.get_buffered_count() == 0
 
 

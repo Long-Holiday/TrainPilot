@@ -1,12 +1,12 @@
-"""Unit tests for ServerWatchdog background service and health metrics."""
+"""Unit tests for ServerWatchdog ping-based liveness and health metrics."""
 
-import time
 import threading
-from datetime import datetime, timedelta, timezone
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
-from trainpilot.common.schemas import EventNotifyRequest, HeartbeatRequest
+from trainpilot.common.schemas import EventNotifyRequest
 from trainpilot.common.states import EventType, TaskState
 from trainpilot.server.config import ServerSettings
 from trainpilot.server.feishu.client import default_feishu_client
@@ -25,70 +25,113 @@ def clean_env():
     default_feishu_client.sent_cards_history.clear()
 
 
-def test_watchdog_detects_stale_and_alerts():
-    """Verify watchdog detects a task whose last update is beyond timeout and alerts."""
+def _register(mailbox: TaskMailboxManager, task_id: str, gpu_host: str = "127.0.0.1") -> None:
+    mailbox.record_event(
+        EventNotifyRequest(
+            task_id=task_id,
+            event_type=EventType.MILESTONE,
+            message="Task started",
+            step=0,
+            gpu_host=gpu_host,
+        )
+    )
+
+
+def test_watchdog_detects_unreachable_and_alerts():
+    """Ping 失败的任务被判失联并告警一次(去重)。"""
     custom_settings = ServerSettings(
-        task_heartbeat_timeout_seconds=2,
         watchdog_interval_seconds=1,
         enable_watchdog=True,
     )
     mailbox = TaskMailboxManager(storage=None)
-    watchdog = ServerWatchdog(mailbox=mailbox, server_settings=custom_settings)
+    watchdog = ServerWatchdog(
+        mailbox=mailbox,
+        server_settings=custom_settings,
+        ping_func=lambda host, timeout: False,
+    )
 
-    # 1. Create a task with updated_at in the past (> 2s ago)
-    past_iso = (datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat()
-    task = mailbox._get_or_create("task-stalled-01")
-    task.updated_at = past_iso
-    task.last_heartbeat_at = past_iso
-    task.state = TaskState.RUNNING
+    _register(mailbox, "task-unreachable-01", gpu_host="10.0.0.1")
 
-    # 2. Run check once
     check_res = watchdog.run_check_once()
     assert check_res["stale_count"] == 1
     assert check_res["alerts_sent"] == 1
+    assert check_res["ping_checked"] == 1
 
-    # Verify stale card sent
     cards = default_feishu_client.sent_cards_history
     assert len(cards) >= 1
     last_card = cards[-1]
     assert last_card["type"] == "stale_alert"
-    assert last_card["task_id"] == "task-stalled-01"
+    assert last_card["task_id"] == "task-unreachable-01"
 
-    # 3. Second check sweep: debouncing prevents duplicate alerts
     check_res2 = watchdog.run_check_once()
     assert check_res2["stale_count"] == 1
-    assert check_res2["alerts_sent"] == 0  # No duplicate alert sent!
+    assert check_res2["alerts_sent"] == 0
 
 
-def test_watchdog_recovers_after_heartbeat():
-    """When a stale task sends a fresh heartbeat, it is no longer stale."""
-    custom_settings = ServerSettings(
-        task_heartbeat_timeout_seconds=2,
-        enable_watchdog=True,
-    )
+def test_watchdog_recovers_when_ping_succeeds():
+    """Ping 恢复后任务不再失联, 去重标记被清除。"""
+    custom_settings = ServerSettings(enable_watchdog=True)
     mailbox = TaskMailboxManager(storage=None)
-    watchdog = ServerWatchdog(mailbox=mailbox, server_settings=custom_settings)
+    results = {"ok": False}
+    watchdog = ServerWatchdog(
+        mailbox=mailbox,
+        server_settings=custom_settings,
+        ping_func=lambda host, timeout: results["ok"],
+    )
 
-    past_iso = (datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat()
-    task = mailbox._get_or_create("task-recovering-01")
-    task.updated_at = past_iso
-    task.last_heartbeat_at = past_iso
+    _register(mailbox, "task-recovering-01", gpu_host="10.0.0.2")
 
-    # Detect stale
     res1 = watchdog.run_check_once()
     assert res1["stale_count"] == 1
 
-    # Send fresh heartbeat
-    mailbox.record_heartbeat(
-        HeartbeatRequest(
-            task_id="task-recovering-01",
-            step=100,
-        )
-    )
-
-    # Detect again: no longer stale
+    results["ok"] = True
     res2 = watchdog.run_check_once()
     assert res2["stale_count"] == 0
+
+    # 再次失联应重新告警(去重已清除)
+    results["ok"] = False
+    res3 = watchdog.run_check_once()
+    assert res3["stale_count"] == 1
+    assert res3["alerts_sent"] == 1
+
+
+def test_watchdog_flags_task_without_gpu_host():
+    """从未上报 GPU IP 的任务无法 ping, 直接判失联。"""
+    custom_settings = ServerSettings(enable_watchdog=True)
+    mailbox = TaskMailboxManager(storage=None)
+    watchdog = ServerWatchdog(
+        mailbox=mailbox,
+        server_settings=custom_settings,
+        ping_func=lambda host, timeout: True,
+    )
+
+    task = mailbox._get_or_create("task-no-gpu-ip")
+    task.state = TaskState.RUNNING
+    assert task.gpu_host is None
+
+    res = watchdog.run_check_once()
+    assert res["stale_count"] == 1
+    assert res["ping_checked"] == 0
+
+
+def test_watchdog_pings_shared_host_once():
+    """同一 GPU IP 的多个任务一轮只 ping 一次。"""
+    custom_settings = ServerSettings(enable_watchdog=True)
+    mailbox = TaskMailboxManager(storage=None)
+    calls: list = []
+    watchdog = ServerWatchdog(
+        mailbox=mailbox,
+        server_settings=custom_settings,
+        ping_func=lambda host, timeout: calls.append(host) or True,
+    )
+
+    _register(mailbox, "task-shared-01", gpu_host="10.0.0.3")
+    _register(mailbox, "task-shared-02", gpu_host="10.0.0.3")
+
+    res = watchdog.run_check_once()
+    assert res["stale_count"] == 0
+    assert res["ping_checked"] == 1
+    assert calls == ["10.0.0.3"]
 
 
 def test_watchdog_in_health_endpoint():
@@ -103,7 +146,7 @@ def test_watchdog_in_health_endpoint():
     assert data["sqlite_enabled"] is True
 
 
-def test_scheduled_task_cleanup_runs_independently_of_heartbeat_watchdog(tmp_path):
+def test_scheduled_task_cleanup_runs_independently_of_ping_watchdog(tmp_path):
     """Cleanup runs immediately, then respects its own interval."""
     storage = SQLiteStorage(str(tmp_path / "cleanup.db"))
     mailbox = TaskMailboxManager(storage=storage)
@@ -131,7 +174,7 @@ def test_scheduled_task_cleanup_runs_independently_of_heartbeat_watchdog(tmp_pat
     second.updated_at = "2020-01-01T00:00:00+00:00"
     storage.save_task(second)
 
-    # A regular heartbeat sweep must not turn into an early cleanup sweep.
+    # A regular sweep must not turn into an early cleanup sweep.
     assert watchdog.run_check_once()["tasks_expired"] == 0
     assert mailbox.get_task("expired-second") is not None
 
@@ -148,13 +191,13 @@ def test_running_watchdog_does_not_block_on_slow_alert_delivery(tmp_path, monkey
     custom_settings = ServerSettings(
         enable_watchdog=True,
         enable_task_cleanup=False,
-        task_heartbeat_timeout_seconds=1,
     )
-    watchdog = ServerWatchdog(mailbox=mailbox, server_settings=custom_settings)
-    stale = mailbox._get_or_create("slow-alert")
-    stale.updated_at = "2020-01-01T00:00:00+00:00"
-    stale.last_heartbeat_at = stale.updated_at
-    storage.save_task(stale)
+    watchdog = ServerWatchdog(
+        mailbox=mailbox,
+        server_settings=custom_settings,
+        ping_func=lambda host, timeout: False,
+    )
+    _register(mailbox, "slow-alert", gpu_host="10.0.0.4")
 
     entered = threading.Event()
     release = threading.Event()

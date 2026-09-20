@@ -4,7 +4,6 @@ import pytest
 from trainpilot.common.schemas import (
     EventNotifyRequest,
     EventNotifyResponse,
-    HeartbeatRequest,
     InstructionAckRequest,
     InstructionResponse,
     TaskDecisionRequest,

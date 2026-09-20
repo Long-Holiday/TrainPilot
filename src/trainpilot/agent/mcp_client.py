@@ -113,6 +113,7 @@ class TrainPilotMCPClient:
         task_id: Optional[str] = None,
         timeout: float = 30.0,
         api_token: Optional[str] = None,
+        gpu_host: Optional[str] = None,
     ):
         """Initialize MCP client.
 
@@ -123,6 +124,8 @@ class TrainPilotMCPClient:
             task_id: Default task identifier. Resolves from TRAINPILOT_TASK_ID if omitted.
             timeout: Default timeout in seconds for operations.
             api_token: Optional API token for Bearer authorization. Resolves from TRAINPILOT_API_TOKEN if omitted.
+            gpu_host: GPU server IP/hostname. Defaults to auto-detected local IP;
+                reported on the first tool call so the watchdog can ping it (no heartbeat needed).
         """
         raw_url = server_url or os.getenv("TRAINPILOT_GATEWAY_URL")
         if not raw_url:
@@ -145,6 +148,9 @@ class TrainPilotMCPClient:
         self.default_task_id = task_id or os.getenv("TRAINPILOT_TASK_ID", "default-task")
         self.timeout = timeout
         self.api_token = api_token or os.getenv("TRAINPILOT_API_TOKEN")
+        from trainpilot.common.gateway import resolve_gpu_host
+
+        self.gpu_host = resolve_gpu_host(gpu_host)
 
     def _resolve_task_id(self, task_id: Optional[str]) -> str:
         tid = task_id or self.default_task_id
@@ -200,56 +206,30 @@ class TrainPilotMCPClient:
 
     # High-level tool wrapper methods
 
-    def report_milestone(
+    def report(
         self,
         message: str,
-        task_id: Optional[str] = None,
-        step: int = 0,
-        epoch: Optional[int] = None,
-        metrics: Optional[Dict[str, Any]] = None,
-        agent_note: Optional[str] = None,
-        extra: Optional[Dict[str, Any]] = None,
-        fail_silently: bool = True,
-    ) -> Dict[str, Any]:
-        """Report training milestone with AI note via MCP Server."""
-        tid = self._resolve_task_id(task_id)
-        args: Dict[str, Any] = {
-            "task_id": tid,
-            "message": message,
-            "step": step,
-        }
-        if epoch is not None:
-            args["epoch"] = epoch
-        if metrics is not None:
-            args["metrics"] = metrics
-        if agent_note is not None:
-            args["agent_note"] = agent_note
-        if extra is not None:
-            args["extra"] = extra
-
-        try:
-            return self.call_tool("report_milestone", args)
-        except Exception as exc:
-            if fail_silently:
-                logger.warning("[%s] Failed to send milestone via MCP: %s (continuing training)", tid, exc)
-                return {"success": False, "task_id": tid, "error": str(exc), "fail_silently": True}
-            raise
-
-    def report_alert(
-        self,
-        message: str,
+        event_type: str = "milestone",
         task_id: Optional[str] = None,
         step: Optional[int] = None,
         epoch: Optional[int] = None,
         metrics: Optional[Dict[str, Any]] = None,
         agent_note: Optional[str] = None,
         extra: Optional[Dict[str, Any]] = None,
+        fail_silently: bool = True,
+        gpu_host: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Report training anomaly and freeze training via MCP Server."""
+        """Report any training event (milestone/alert/completed/failed) via the unified MCP tool.
+
+        Milestone reports fail silently by default so a transient gateway hiccup never
+        interrupts the training loop; alerts are always raised on failure.
+        """
         tid = self._resolve_task_id(task_id)
         args: Dict[str, Any] = {
             "task_id": tid,
             "message": message,
+            "event_type": event_type,
+            "gpu_host": gpu_host or self.gpu_host,
         }
         if step is not None:
             args["step"] = step
@@ -262,7 +242,64 @@ class TrainPilotMCPClient:
         if extra is not None:
             args["extra"] = extra
 
-        return self.call_tool("report_alert", args)
+        try:
+            return self.call_tool("report", args)
+        except Exception as exc:
+            if fail_silently and event_type.strip().lower() == "milestone":
+                logger.warning("[%s] Failed to send event via MCP: %s (continuing training)", tid, exc)
+                return {"success": False, "task_id": tid, "error": str(exc), "fail_silently": True}
+            raise
+
+    def report_milestone(
+        self,
+        message: str,
+        task_id: Optional[str] = None,
+        step: Optional[int] = None,
+        epoch: Optional[int] = None,
+        metrics: Optional[Dict[str, Any]] = None,
+        agent_note: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+        fail_silently: bool = True,
+        gpu_host: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Report training milestone with AI note via MCP Server."""
+        return self.report(
+            message=message,
+            event_type="milestone",
+            task_id=task_id,
+            step=step,
+            epoch=epoch,
+            metrics=metrics,
+            agent_note=agent_note,
+            extra=extra,
+            fail_silently=fail_silently,
+            gpu_host=gpu_host,
+        )
+
+    def report_alert(
+        self,
+        message: str,
+        task_id: Optional[str] = None,
+        step: Optional[int] = None,
+        epoch: Optional[int] = None,
+        metrics: Optional[Dict[str, Any]] = None,
+        agent_note: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+        gpu_host: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Report training anomaly and freeze training via MCP Server."""
+        return self.report(
+            message=message,
+            event_type="alert",
+            task_id=task_id,
+            step=step,
+            epoch=epoch,
+            metrics=metrics,
+            agent_note=agent_note,
+            extra=extra,
+            fail_silently=False,
+            gpu_host=gpu_host,
+        )
 
     def poll_instruction(
         self,
@@ -332,33 +369,6 @@ class TrainPilotMCPClient:
 
         return self.call_tool("ack_instruction", args)
 
-    def send_heartbeat(
-        self,
-        task_id: Optional[str] = None,
-        step: Optional[int] = None,
-        epoch: Optional[int] = None,
-        metrics: Optional[Dict[str, Any]] = None,
-        status: str = "running",
-    ) -> Dict[str, Any]:
-        """Send heartbeat telemetry via MCP Server."""
-        tid = self._resolve_task_id(task_id)
-        args: Dict[str, Any] = {
-            "task_id": tid,
-            "status": status,
-        }
-        if step is not None:
-            args["step"] = step
-        if epoch is not None:
-            args["epoch"] = epoch
-        if metrics is not None:
-            args["metrics"] = metrics
-
-        try:
-            return self.call_tool("send_heartbeat", args)
-        except Exception as exc:
-            logger.warning("[%s] Failed to send heartbeat via MCP: %s", tid, exc)
-            return {"success": False, "task_id": tid, "error": str(exc)}
-
     def get_task_status(self, task_id: Optional[str] = None) -> Dict[str, Any]:
         """Query task state and mailbox via MCP Server."""
         tid = self._resolve_task_id(task_id)
@@ -402,5 +412,4 @@ class TrainPilotMCPClient:
     # Duck-typing aliases for seamless TrainingGuardian and TrainPilotClient compatibility
     notify_milestone = report_milestone
     notify_alert = report_alert
-    heartbeat = send_heartbeat
     get_status = get_task_status

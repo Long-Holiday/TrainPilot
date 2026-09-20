@@ -140,6 +140,58 @@ def resolve_port(explicit: str | int | None = None) -> int:
     return _normalize_port(os.environ.get("TRAINPILOT_PORT")) or DEFAULT_PORT
 
 
+def detect_local_ip() -> str:
+    """探测本机(GPU 侧)对外 IP, 供 Agent 首次请求时上报给看门狗 ping。
+
+    策略: UDP 伪连接 8.8.8.8 取本地出口 IP(不发包) -> gethostbyname(hostname)
+    -> 回退 127.0.0.1。永不抛异常。
+    """
+    import socket
+
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            if ip:
+                return ip
+        finally:
+            try:
+                s.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        import socket as _s
+
+        ip = _s.gethostbyname(_s.gethostname())
+        if ip and not ip.startswith("127."):
+            return ip
+        return ip or "127.0.0.1"
+    except Exception:
+        return "127.0.0.1"
+
+
+def resolve_gpu_host(explicit: str | None = None) -> str:
+    """解析 Agent 上报用的 GPU 服务器 IP/主机名。
+
+    优先级: 显式参数 > $TRAINPILOT_GPU_HOST / $TRAINPILOT_GPU_IP > 自动探测本机 IP。
+    返回值已做基础归一化(去 scheme/路径/端口两侧空白), ping 时可直接使用。
+    """
+    for candidate in (
+        explicit,
+        os.environ.get("TRAINPILOT_GPU_HOST"),
+        os.environ.get("TRAINPILOT_GPU_IP"),
+    ):
+        h = _normalize_host(candidate) if candidate else None
+        if h:
+            return h
+    detected = detect_local_ip()
+    h = _normalize_host(detected)
+    return h or "127.0.0.1"
+
+
 def load_dotenv_if_present(start_dir: str | None = None) -> None:
     """自动检测并加载当前目录或上级目录中的 .env 文件到 os.environ（不覆盖已有环境变量）。
 

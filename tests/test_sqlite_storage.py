@@ -4,7 +4,7 @@ import os
 import tempfile
 import pytest
 
-from trainpilot.common.schemas import EventNotifyRequest, HeartbeatRequest, InstructionResponse
+from trainpilot.common.schemas import EventNotifyRequest, InstructionResponse
 from trainpilot.common.states import EventType, TaskState
 from trainpilot.server.mailbox import TaskMailboxManager, TaskRecord
 from trainpilot.server.storage import SQLiteStorage
@@ -297,6 +297,14 @@ def test_disabled_persistence_uses_process_local_database():
     """Disabling persistence must not create or reuse the configured disk DB."""
     mailbox = TaskMailboxManager(enable_persistence=False)
     assert mailbox._storage.db_path == ":memory:"
-    mailbox.record_heartbeat(HeartbeatRequest(task_id="memory-only", step=1))
+    mailbox.record_event(
+        EventNotifyRequest(
+            task_id="memory-only",
+            event_type=EventType.MILESTONE,
+            message="Step 1",
+            step=1,
+            gpu_host="127.0.0.1",
+        )
+    )
     assert mailbox.get_task("memory-only") is not None
     mailbox._storage.close()

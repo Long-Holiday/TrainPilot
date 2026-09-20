@@ -90,7 +90,7 @@ app.include_router(webhook_router)
 def health_check():
     """Liveness probe (never fails on downstream Feishu errors)."""
     try:
-        stale = default_mailbox.get_stale_tasks(timeout_seconds=settings.task_heartbeat_timeout_seconds)
+        stale = default_mailbox.get_stale_tasks()
         stale_count = len(stale)
         tasks_count = default_mailbox.get_tasks_count()
     except Exception:

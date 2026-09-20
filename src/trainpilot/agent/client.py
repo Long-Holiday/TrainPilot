@@ -114,6 +114,9 @@ class TrainPilotClient:
     显式 ``gateway_url`` 参数 > ``$TRAINPILOT_GATEWAY_URL`` >
     ``http://$TRAINPILOT_HOST:$TRAINPILOT_PORT`` > 默认 ``http://127.0.0.1:28780``。
     因此 GPU 机器只需设置 ``TRAINPILOT_HOST=<Web 公网 IP/域名>`` 即可, 无需拼完整 URL。
+
+    存活模型 (无心跳): 首次上报时自动携带本机 IP(``gpu_host``),
+    服务端看门狗后续直接 ping 该 IP 判活, Agent 无需定时发送心跳。
     """
 
     def __init__(
@@ -124,12 +127,15 @@ class TrainPilotClient:
         api_token: Optional[str] = None,
         enable_offline_buffering: bool = True,
         max_offline_buffer_size: int = 1000,
+        gpu_host: Optional[str] = None,
     ):
         if gateway_url is None:
             # 延迟导入避免循环依赖; 解析逻辑收敛到 common.gateway
-            from trainpilot.common.gateway import resolve_gateway_url
+            from trainpilot.common.gateway import resolve_gateway_url, resolve_gpu_host
 
             gateway_url = resolve_gateway_url()
+        else:
+            from trainpilot.common.gateway import resolve_gpu_host
         if task_id is None:
             task_id = os.environ.get("TRAINPILOT_TASK_ID", "train-task-default")
         if api_token is None:
@@ -138,6 +144,7 @@ class TrainPilotClient:
         self.task_id = task_id
         self.timeout = timeout
         self.api_token = api_token
+        self.gpu_host = resolve_gpu_host(gpu_host)
         self.enable_offline_buffering = enable_offline_buffering
         self.max_offline_buffer_size = max(1, int(max_offline_buffer_size))
         self._offline_buffer: deque = deque(maxlen=self.max_offline_buffer_size)
@@ -191,15 +198,17 @@ class TrainPilotClient:
         agent_note: Optional[str] = None,
         fail_silently: Optional[bool] = None,
         max_retries: Optional[int] = None,
+        gpu_host: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Report any event (alert, milestone, completed, failed) to the gateway.
 
+        首次上报自动携带本机 IP(``gpu_host``), 服务端看门狗后续 ping 该 IP 判活。
         Resilience features:
         - Automatic offline buffering: network outages buffer events instead of crashing training.
         - Auto-flush: draining pending offline events when network recovers.
         - Exponential backoff retry: for critical alerts and states.
         """
-        is_routine = event_type.lower() in ("milestone", "heartbeat")
+        is_routine = event_type.lower() == "milestone"
         if fail_silently is None:
             fail_silently = is_routine
         if max_retries is None:
@@ -222,6 +231,7 @@ class TrainPilotClient:
             "metrics": metrics,
             "extra": extra,
             "agent_note": agent_note,
+            "gpu_host": gpu_host or self.gpu_host,
         }
         payload = _sanitize_for_json(raw_payload)
 
@@ -270,6 +280,7 @@ class TrainPilotClient:
         extra: Optional[Dict[str, Any]] = None,
         fail_silently: Optional[bool] = None,
         max_retries: Optional[int] = None,
+        gpu_host: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Report a cruising milestone (e.g., epoch finished, checkpoint saved).
 
@@ -287,6 +298,7 @@ class TrainPilotClient:
             agent_note=agent_note,
             fail_silently=fail_silently,
             max_retries=max_retries,
+            gpu_host=gpu_host,
         )
 
     def notify_alert(
@@ -299,6 +311,7 @@ class TrainPilotClient:
         agent_note: Optional[str] = None,
         fail_silently: Optional[bool] = None,
         max_retries: Optional[int] = None,
+        gpu_host: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Report a high-priority alert (Loss NaN, OOM, loss explosion) and request HITL intervention."""
         return self.notify_event(
@@ -311,6 +324,7 @@ class TrainPilotClient:
             agent_note=agent_note,
             fail_silently=fail_silently,
             max_retries=max_retries,
+            gpu_host=gpu_host,
         )
 
     def poll_instruction(
@@ -408,37 +422,6 @@ class TrainPilotClient:
 
         logger.error("[%s] Failed to acknowledge instruction: %s", self.task_id, last_exc)
         raise last_exc
-
-    def send_heartbeat(
-        self,
-        step: Optional[int] = None,
-        epoch: Optional[int] = None,
-        metrics: Optional[Dict[str, Any]] = None,
-    ) -> bool:
-        """Send a lightweight heartbeat ping and flush any buffered offline events."""
-        url = f"{self.gateway_url}/api/tasks/{self.task_id}/heartbeat"
-        raw_payload = {
-            "task_id": self.task_id,
-            "step": step,
-            "epoch": epoch,
-            "metrics": metrics,
-        }
-        payload = _sanitize_for_json(raw_payload)
-        try:
-            resp = self.session.post(url, json=payload, timeout=self.timeout)
-            if resp.status_code != 200:
-                logger.warning("[%s] Heartbeat rejected: HTTP %s %s", self.task_id, resp.status_code, resp.text[:200])
-                return False
-            # If heartbeat succeeds, network is healthy; drain offline buffer
-            if self.enable_offline_buffering and self.get_buffered_count() > 0:
-                try:
-                    self.flush_offline_buffer()
-                except Exception:
-                    pass
-            return True
-        except requests.RequestException as exc:
-            logger.warning("[%s] Heartbeat delivery failed: %s", self.task_id, exc)
-            return False
 
     def get_status(self) -> Dict[str, Any]:
         """Fetch current status and metadata of the task from the gateway."""

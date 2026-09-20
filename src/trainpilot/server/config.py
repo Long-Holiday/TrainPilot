@@ -27,6 +27,14 @@ class ServerSettings(BaseSettings):
         env_prefix="TRAINPILOT_",
     )
 
+    # Default training task id
+    # MCP/REST 调用省略 task_id 时使用的兜底任务标识 (单任务部署便利项)。
+    # 多任务场景下 Agent 应显式传入 task_id。
+    task_id: str = Field(
+        default="train-task-default",
+        description="Default task id used when MCP/REST calls omit task_id (env TRAINPILOT_TASK_ID)",
+    )
+
     # Server binding
     # TRAINPILOT_HOST: 历史字段, Web 侧表示绑定地址 (建议 0.0.0.0), GPU 侧表示网关 Host。
     host: str = Field(default="0.0.0.0", description="Host to bind the server (Web 侧绑定地址; GPU 侧请改用网关地址, 见文档)")
@@ -55,11 +63,11 @@ class ServerSettings(BaseSettings):
         description="Force Feishu mock mode regardless of credentials for testing",
     )
 
-    # Task Timeout
-    task_heartbeat_timeout_seconds: int = Field(
-        default=300,
+    # Task liveness (ping-based watchdog)
+    gpu_ping_timeout_seconds: float = Field(
+        default=3.0,
         gt=0,
-        description="Seconds without heartbeat before marking task as potentially stalled",
+        description="Per-host ping timeout in seconds for GPU liveness checks",
     )
 
     # HITL alert decision timeout: seconds without human click before auto self-resolve.
@@ -106,7 +114,7 @@ class ServerSettings(BaseSettings):
     # Server-side Watchdog
     enable_watchdog: bool = Field(
         default=True,
-        description="Enable server-side heartbeat watchdog and periodic housekeeping",
+        description="Enable server-side GPU ping watchdog and periodic housekeeping",
     )
     watchdog_interval_seconds: int = Field(
         default=15,

@@ -319,19 +319,21 @@ def build_recovery_card(
 def build_stale_alert_card(
     task_id: str,
     silent_seconds: float,
-    last_heartbeat_at: Optional[str] = None,
+    gpu_host: Optional[str] = None,
+    last_ping_at: Optional[str] = None,
     latest_step: Optional[int] = None,
     latest_epoch: Optional[int] = None,
     latest_message: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Construct a warning notification card dispatched by server Watchdog on heartbeat timeout."""
+    """Construct a warning notification card dispatched by server Watchdog on ping failure."""
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     markdown_lines = [
         f"**🚨 任务标识**: `{task_id}`",
-        f"**⏳ 失联时长**: 已超过 `{int(silent_seconds)}` 秒未收到心跳",
+        f"**🖥️ GPU 服务器**: `{gpu_host or '未上报'}`",
+        f"**⏳ 失联时长**: 已超过 `{int(silent_seconds)}` 秒不可达",
         f"**⏱ 最后进度**: Epoch `{latest_epoch if latest_epoch is not None else '-'}` | Step `{latest_step if latest_step is not None else '-'}`",
-        f"**🕒 最后心跳**: `{last_heartbeat_at or '未知'}`",
+        f"**📡 最后探测**: `{last_ping_at or '未知'}`",
     ]
     if latest_message:
         markdown_lines.append(f"**📋 最后已知状态**: {latest_message}")

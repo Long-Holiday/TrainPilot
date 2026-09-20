@@ -1,40 +1,45 @@
-"""Server-side Watchdog service for background health checks and housekeeping."""
+"""Server-side Watchdog service: ping GPU hosts for liveness + housekeeping."""
 
 import logging
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from trainpilot.common.states import TaskState
 from trainpilot.server.config import ServerSettings, settings
 from trainpilot.server.feishu.client import default_feishu_client
 from trainpilot.server.mailbox import TaskMailboxManager, default_mailbox
+from trainpilot.server.ping import ping_host
 
 logger = logging.getLogger("trainpilot.watchdog")
 
 
 class ServerWatchdog:
-    """Background daemon thread that periodically checks task health and trims database.
+    """Background daemon that pings GPU hosts and trims the database.
 
-    Responsibilities:
-    1. Scan tasks for missing heartbeats (stale / crashed / NCCL hang).
-    2. Dispatch stale alert cards to Feishu (with debouncing so each stall alerts once).
-    3. Perform periodic SQLite retention trimming to keep database lean.
+    判活模型(无心跳):
+    1. Agent 首次请求时上报 ``gpu_host``(GPU 服务器 IP)。
+    2. 看门狗每轮 ping 每个任务的 ``gpu_host``(同 IP 一轮只 ping 一次),
+       能 ping 通即存活; ping 不通或从未上报 IP 即失联并告警。
     """
 
     def __init__(
         self,
         mailbox: Optional[TaskMailboxManager] = None,
         server_settings: Optional[ServerSettings] = None,
+        ping_func: Optional[Callable[[str, float], bool]] = None,
     ):
         self.mailbox = mailbox or default_mailbox
         self.settings = server_settings or settings
+        self._ping = ping_func or ping_host
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._checks_count = 0
         self._stale_detected_total = 0
         self._stale_alerts_sent_total = 0
+        self._ping_checked_total = 0
+        self._ping_unreachable_total = 0
         self._last_check_at: Optional[str] = None
         self._alerted_task_ids: set = set()
         self._tasks_expired_total = 0
@@ -55,9 +60,11 @@ class ServerWatchdog:
             "checks_count": self._checks_count,
             "stale_detected_total": self._stale_detected_total,
             "stale_alerts_sent_total": self._stale_alerts_sent_total,
+            "ping_checked_total": self._ping_checked_total,
+            "ping_unreachable_total": self._ping_unreachable_total,
             "last_check_at": self._last_check_at,
             "interval_seconds": self.settings.watchdog_interval_seconds,
-            "heartbeat_timeout_seconds": self.settings.task_heartbeat_timeout_seconds,
+            "ping_timeout_seconds": self.settings.gpu_ping_timeout_seconds,
             "task_cleanup_enabled": self.settings.enable_task_cleanup,
             "task_retention_hours": self.settings.task_retention_hours,
             "task_cleanup_interval_seconds": self.settings.task_cleanup_interval_seconds,
@@ -94,25 +101,47 @@ class ServerWatchdog:
         logger.info("TrainPilot Server Watchdog stopped.")
 
     def run_check_once(self) -> Dict[str, Any]:
-        """Perform a single inspection sweep (can be called directly or from tests)."""
+        """Perform a single ping sweep (can be called directly or from tests)."""
         now_dt = datetime.now(timezone.utc)
         self._last_check_at = now_dt.isoformat()
         self._checks_count += 1
 
-        timeout_sec = self.settings.task_heartbeat_timeout_seconds
-        stale_tasks = (
-            self.mailbox.get_stale_tasks(timeout_seconds=timeout_sec)
-            if self.settings.enable_watchdog
-            else []
-        )
+        stale_tasks: List[Any] = []
+        ping_checked = 0
+        if self.settings.enable_watchdog:
+            candidates = self.mailbox.get_liveness_candidates()
+            ping_cache: Dict[str, bool] = {}
+            for t in candidates:
+                if not t.gpu_host:
+                    stale_tasks.append(t)
+                    continue
+                if t.gpu_host not in ping_cache:
+                    try:
+                        ok = bool(self._ping(t.gpu_host, float(self.settings.gpu_ping_timeout_seconds)))
+                    except Exception as exc:
+                        logger.debug("ping %s raised: %s", t.gpu_host, exc)
+                        ok = False
+                    ping_cache[t.gpu_host] = ok
+                    ping_checked += 1
+                else:
+                    ok = ping_cache[t.gpu_host]
+                try:
+                    self.mailbox.update_ping_result(t.task_id, ok)
+                except Exception as exc:
+                    logger.debug("Failed to persist ping result for %s: %s", t.task_id, exc)
+                t.last_ping_at = now_dt.isoformat()
+                t.last_ping_ok = ok
+                if not ok:
+                    stale_tasks.append(t)
         self._stale_detected_total += len(stale_tasks)
+        self._ping_checked_total += ping_checked
+        self._ping_unreachable_total += len(stale_tasks)
 
         alerts_sent_this_round = 0
         active_stale_ids = set()
 
         for t in stale_tasks:
             active_stale_ids.add(t.task_id)
-            # Check if this task was already alerted (debounce)
             with self._state_lock:
                 is_already_alerted = (
                     t.task_id in self._alerted_task_ids
@@ -122,24 +151,23 @@ class ServerWatchdog:
                 is_already_alerted = self.mailbox._storage.is_task_stale_alerted(t.task_id)
 
             if not is_already_alerted:
-                # Calculate silent duration
-                last_ts = t.last_heartbeat_at or t.updated_at
-                silent_seconds = timeout_sec
+                last_ts = t.last_ping_at or t.updated_at
+                silent_seconds = 0.0
                 if last_ts:
                     try:
-                        parsed = datetime.fromisoformat(last_ts)
+                        from datetime import datetime as _dt, timezone as _tz
+
+                        parsed = _dt.fromisoformat(last_ts)
                         if parsed.tzinfo is None:
-                            parsed = parsed.replace(tzinfo=timezone.utc)
-                        silent_seconds = max((now_dt - parsed).total_seconds(), float(timeout_sec))
+                            parsed = parsed.replace(tzinfo=_tz.utc)
+                        silent_seconds = max((now_dt - parsed).total_seconds(), 0.0)
                     except Exception:
                         pass
 
-                logger.warning("Watchdog detected stalled task: %s (silent for %.1fs, state: %s)",
-                               t.task_id, silent_seconds, t.state.value)
+                reason = "未上报 GPU IP" if not t.gpu_host else f"ping {t.gpu_host} 不可达"
+                logger.warning("Watchdog detected unreachable task: %s (%s, state: %s)",
+                               t.task_id, reason, t.state.value)
 
-                # Direct calls remain synchronous and deterministic for operators/tests.
-                # The running maintenance loop uses bounded daemon workers so a slow
-                # Feishu request cannot block subsequent scans and cleanup sweeps.
                 if self.is_running and self._alert_slots.acquire(blocking=False):
                     with self._state_lock:
                         self._pending_alert_task_ids.add(t.task_id)
@@ -153,7 +181,7 @@ class ServerWatchdog:
                     if self._deliver_stale_alert(t, silent_seconds):
                         alerts_sent_this_round += 1
 
-        # Clear alert debounce for tasks that are no longer stale (e.g., resumed heartbeats)
+        # Clear alert debounce for tasks that recovered (ping reachable again / terminal)
         with self._state_lock:
             recovered_ids = self._alerted_task_ids - active_stale_ids
         for r_id in recovered_ids:
@@ -177,9 +205,6 @@ class ServerWatchdog:
             )
             if cleanup_due:
                 try:
-                    # append_event already enforces the cap. This periodic pass
-                    # mainly handles a reduced cap after configuration changes,
-                    # so a full GROUP BY scan is unnecessary every watchdog tick.
                     trimmed = self.mailbox._storage.trim_all_events(
                         max_events=self.settings.max_events_per_task
                     )
@@ -194,7 +219,6 @@ class ServerWatchdog:
                 except Exception as exc:
                     logger.error("Failed to clean expired tasks: %s", exc)
 
-            # Reclaim pages after deletes, not before them.
             if trimmed > 0 or cleaned_tasks > 0:
                 try:
                     self.mailbox._storage.checkpoint_and_vacuum()
@@ -210,6 +234,7 @@ class ServerWatchdog:
         return {
             "stale_count": len(stale_tasks),
             "alerts_sent": alerts_sent_this_round,
+            "ping_checked": ping_checked,
             "events_trimmed": trimmed,
             "tasks_expired": cleaned_tasks,
             "vacuum_reclaimed": vacuum_reclaimed,
@@ -224,7 +249,8 @@ class ServerWatchdog:
             default_feishu_client.send_stale_alert(
                 task_id=task.task_id,
                 silent_seconds=silent_seconds,
-                last_heartbeat_at=task.last_heartbeat_at,
+                gpu_host=task.gpu_host,
+                last_ping_at=task.last_ping_at,
                 latest_step=task.latest_step,
                 latest_epoch=task.latest_epoch,
                 latest_message=task.latest_message,

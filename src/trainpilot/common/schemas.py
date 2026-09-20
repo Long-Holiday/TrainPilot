@@ -16,7 +16,7 @@ class EventNotifyRequest(BaseModel):
     """Event reported by GPU Agent to the Control Plane."""
 
     task_id: str = Field(..., description="Unique identifier for the training task")
-    event_type: EventType = Field(..., description="Type of event: alert, milestone, heartbeat, etc.")
+    event_type: EventType = Field(..., description="Type of event: alert, milestone, completed, failed")
     message: str = Field(..., description="Human-readable event description")
     step: Optional[int] = Field(None, description="Current training step counter")
     epoch: Optional[int] = Field(None, description="Current epoch counter")
@@ -26,6 +26,10 @@ class EventNotifyRequest(BaseModel):
         default=None,
         description="外部 AI 智能体 (agy/opencode/claude-code) 针对当前实际情况自主生成的阶段点评, "
         "将渲染到飞书里程碑卡片的 🤖 Agent 智能点评 区块",
+    )
+    gpu_host: Optional[str] = Field(
+        default=None,
+        description="GPU 服务器 IP/主机名。Agent 首次请求时上报, 看门狗后续直接 ping 该地址判活, 无需定时心跳。",
     )
     timestamp: str = Field(default_factory=utc_now_iso, description="ISO timestamp of event occurrence")
 
@@ -67,16 +71,6 @@ class InstructionAckRequest(BaseModel):
     timestamp: str = Field(default_factory=utc_now_iso)
 
 
-class HeartbeatRequest(BaseModel):
-    """Heartbeat reported by GPU Agent to signify liveness."""
-
-    task_id: str = Field(..., description="Task identifier")
-    step: Optional[int] = Field(None, description="Current training step")
-    epoch: Optional[int] = Field(None, description="Current epoch")
-    metrics: Optional[Dict[str, Any]] = Field(default=None, description="Loss, GPU memory, etc.")
-    timestamp: str = Field(default_factory=utc_now_iso)
-
-
 class TaskDecisionRequest(BaseModel):
     """Direct decision injection request (e.g., from API, Web UI, or Feishu Webhook)."""
 
@@ -101,7 +95,9 @@ class TaskSummary(BaseModel):
     state: TaskState
     created_at: str
     updated_at: str
-    last_heartbeat_at: Optional[str] = None
+    gpu_host: Optional[str] = None
+    last_ping_at: Optional[str] = None
+    last_ping_ok: Optional[bool] = None
     latest_step: Optional[int] = None
     latest_epoch: Optional[int] = None
     latest_metrics: Optional[Dict[str, Any]] = None

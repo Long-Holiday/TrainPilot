@@ -20,7 +20,6 @@ class EventType(str, Enum):
     ALERT = "alert"  # Loss NaN, Loss Spike, CUDA OOM, Timeout, etc.
     MILESTONE = "milestone"  # Epoch completed, new metric high, checkpoint saved
     RECOVERY = "recovery"  # Anomaly resolved by agent; reporting solution & resumed status
-    HEARTBEAT = "heartbeat"  # Periodic health ping with lightweight resource usage
     COMPLETED = "completed"  # Training gracefully finished
     FAILED = "failed"  # Training crashed or aborted
 
