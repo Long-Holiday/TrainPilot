@@ -153,7 +153,7 @@ def report(
         metrics: Training metrics, e.g. {'loss': 0.35, 'val_loss': 0.40}.
         agent_note: Autonomous 1-3 sentence analysis/recommendation written by the AI agent.
         extra: Additional contextual metadata.
-        gpu_host: GPU server IP/hostname. Reported on the first request; the watchdog pings it for liveness.
+        gpu_host: GPU server IP/hostname (optional; automatically determined by analyzing incoming network requests).
     """
     key = (event_type or "milestone").strip().lower()
     resolved_type = _REPORTABLE_STATES.get(key)
@@ -164,6 +164,8 @@ def report(
         }
 
     tid = _resolve_task_id(task_id)
+    from trainpilot.server.network import get_current_client_ip
+    client_ip = get_current_client_ip()
     req = EventNotifyRequest(
         task_id=tid,
         event_type=resolved_type,
@@ -175,7 +177,7 @@ def report(
         extra=extra,
         gpu_host=gpu_host,
     )
-    current_state = default_mailbox.record_event(req)
+    current_state = default_mailbox.record_event(req, client_ip=client_ip)
     _dispatch_feishu_async(req)
     if resolved_type == EventType.ALERT:
         _schedule_auto_self_resolve(tid)
@@ -205,6 +207,10 @@ async def poll_instruction(
         pop: If true, consumes the instruction and transitions state to RECOVERING.
     """
     tid = _resolve_task_id(task_id)
+    from trainpilot.server.network import get_current_client_ip
+    client_ip = get_current_client_ip()
+    if client_ip:
+        default_mailbox.update_task_client_ip(tid, client_ip)
     if wait_timeout is None:
         wait_timeout = settings.long_poll_timeout_seconds
     try:
@@ -252,6 +258,10 @@ def ack_instruction(
         metrics: Metrics after recovery.
     """
     tid = _resolve_task_id(task_id)
+    from trainpilot.server.network import get_current_client_ip
+    client_ip = get_current_client_ip()
+    if client_ip:
+        default_mailbox.update_task_client_ip(tid, client_ip)
     try:
         new_state = default_mailbox.ack_instruction(
             task_id=tid,
@@ -297,6 +307,10 @@ def get_task_status(task_id: Optional[str] = None) -> Dict[str, Any]:
         task_id: Task identifier; defaults to the server-configured task when omitted.
     """
     tid = _resolve_task_id(task_id)
+    from trainpilot.server.network import get_current_client_ip
+    client_ip = get_current_client_ip()
+    if client_ip:
+        default_mailbox.update_task_client_ip(tid, client_ip)
     summary = default_mailbox.get_task(tid)
     if not summary:
         return {"success": False, "task_id": tid, "error": f"Task '{tid}' not found"}

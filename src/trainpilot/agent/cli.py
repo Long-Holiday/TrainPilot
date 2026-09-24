@@ -79,7 +79,7 @@ def main(argv=None) -> int:
     p_milestone.add_argument("--epoch", type=int, default=None, help="Current epoch number")
     p_milestone.add_argument("--metrics", help="JSON or comma-separated key=val metrics (e.g. loss=0.45,val_loss=0.48)")
     p_milestone.add_argument("--agent-note", help="AI agent autonomous analysis/commentary note")
-    p_milestone.add_argument("--gpu-host", default=None, help="GPU server IP/hostname (default: auto-detected local IP)")
+    p_milestone.add_argument("--gpu-host", default=None, help="Optional GPU server IP override (default: auto-detected by server from network requests)")
 
     # 2. report-alert
     p_alert = subparsers.add_parser("report-alert", help="Report training anomaly and freeze training")
@@ -88,7 +88,7 @@ def main(argv=None) -> int:
     p_alert.add_argument("--epoch", type=int, default=None, help="Current epoch number")
     p_alert.add_argument("--metrics", help="Metrics at anomaly (e.g. loss=NaN)")
     p_alert.add_argument("--agent-note", help="AI agent diagnostic note")
-    p_alert.add_argument("--gpu-host", default=None, help="GPU server IP/hostname (default: auto-detected local IP)")
+    p_alert.add_argument("--gpu-host", default=None, help="Optional GPU server IP override (default: auto-detected by server from network requests)")
 
     # 2b. report (unified: milestone/alert/completed/failed)
     p_report = subparsers.add_parser("report", help="Report any event via the unified report tool")
@@ -103,7 +103,7 @@ def main(argv=None) -> int:
     p_report.add_argument("--epoch", type=int, default=None, help="Current epoch number")
     p_report.add_argument("--metrics", help="JSON or comma-separated key=val metrics (e.g. loss=0.45)")
     p_report.add_argument("--agent-note", help="AI agent autonomous analysis/commentary note")
-    p_report.add_argument("--gpu-host", default=None, help="GPU server IP/hostname (default: auto-detected local IP)")
+    p_report.add_argument("--gpu-host", default=None, help="Optional GPU server IP override (default: auto-detected by server from network requests)")
 
     # 3. poll-instruction
     p_poll = subparsers.add_parser("poll-instruction", help="Poll for human decisions")

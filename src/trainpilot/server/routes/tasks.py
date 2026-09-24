@@ -3,7 +3,7 @@
 import logging
 import threading
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from trainpilot.common.schemas import (
     EventNotifyRequest,
@@ -19,6 +19,7 @@ from trainpilot.server.background import feishu_dispatcher
 from trainpilot.server.config import settings
 from trainpilot.server.feishu.client import default_feishu_client
 from trainpilot.server.mailbox import TaskNotFoundError, default_mailbox
+from trainpilot.server.network import extract_client_ip
 
 logger = logging.getLogger("trainpilot.api.tasks")
 
@@ -101,9 +102,10 @@ def _schedule_auto_self_resolve(task_id: str) -> None:
 
 
 @router.post("/notify", response_model=EventNotifyResponse, status_code=status.HTTP_200_OK)
-def notify_event(req: EventNotifyRequest) -> EventNotifyResponse:
+def notify_event(req: EventNotifyRequest, request: Request) -> EventNotifyResponse:
     """Receive training events (alerts, milestones, completion) from GPU Agent."""
-    current_state = default_mailbox.record_event(req)
+    client_ip = extract_client_ip(request)
+    current_state = default_mailbox.record_event(req, client_ip=client_ip)
 
     # Async dispatch: do not block the training loop on Feishu latency.
     feishu_dispatcher.submit(_dispatch_feishu, req)
@@ -123,6 +125,7 @@ def notify_event(req: EventNotifyRequest) -> EventNotifyResponse:
 @router.get("/{task_id}/instruction", response_model=InstructionResponse)
 async def poll_instruction(
     task_id: str,
+    request: Request,
     pop: bool = Query(default=True, description="Whether to consume and transition state to RECOVERING"),
     wait_timeout: float = Query(
         default=0.0,
@@ -136,6 +139,9 @@ async def poll_instruction(
     Supports native AsyncIO Long Polling: specify wait_timeout > 0 to hold connection
     without consuming AnyIO thread pool workers until human decision arrives or timeout expires.
     """
+    client_ip = extract_client_ip(request)
+    if client_ip:
+        default_mailbox.update_task_client_ip(task_id, client_ip)
     try:
         return await default_mailbox.get_instruction_async(
             task_id, pop=pop, wait_timeout=wait_timeout
@@ -148,6 +154,7 @@ async def poll_instruction(
 def ack_instruction(
     task_id: str,
     req: InstructionAckRequest,
+    request: Request,
 ) -> dict:
     """Acknowledge execution of an instruction by the GPU Agent."""
     if req.task_id != task_id:
@@ -155,6 +162,9 @@ def ack_instruction(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Task ID mismatch: path has {task_id}, body has {req.task_id}",
         )
+    client_ip = extract_client_ip(request)
+    if client_ip:
+        default_mailbox.update_task_client_ip(task_id, client_ip)
     try:
         new_state = default_mailbox.ack_instruction(
             task_id=task_id,
@@ -222,8 +232,11 @@ def submit_decision(
 
 
 @router.get("/{task_id}/status", response_model=TaskSummary)
-def get_task_status(task_id: str) -> TaskSummary:
+def get_task_status(task_id: str, request: Request) -> TaskSummary:
     """Retrieve full status for a specific training task."""
+    client_ip = extract_client_ip(request)
+    if client_ip:
+        default_mailbox.update_task_client_ip(task_id, client_ip)
     summary = default_mailbox.get_task(task_id)
     if not summary:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Task '{task_id}' not found in mailbox")

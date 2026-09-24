@@ -330,7 +330,7 @@ def build_stale_alert_card(
 
     markdown_lines = [
         f"**🚨 任务标识**: `{task_id}`",
-        f"**🖥️ GPU 服务器**: `{gpu_host or '未上报'}`",
+        f"**🖥️ GPU 服务器**: `{gpu_host or '未获取到（等待请求）'}`",
         f"**⏳ 失联时长**: 已超过 `{int(silent_seconds)}` 秒不可达",
         f"**⏱ 最后进度**: Epoch `{latest_epoch if latest_epoch is not None else '-'}` | Step `{latest_step if latest_step is not None else '-'}`",
         f"**📡 最后探测**: `{last_ping_at or '未知'}`",

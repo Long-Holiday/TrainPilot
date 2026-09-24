@@ -180,7 +180,7 @@ class TaskMailboxManager:
             logger.exception("Failed to persist %s for task %s", context, task.task_id)
             raise
 
-    def record_event(self, req: EventNotifyRequest) -> TaskState:
+    def record_event(self, req: EventNotifyRequest, client_ip: Optional[str] = None) -> TaskState:
         """Process an incoming event from the GPU Agent and transition states."""
         with self._lock:
             was_cached = req.task_id in self._tasks
@@ -188,12 +188,16 @@ class TaskMailboxManager:
             previous = copy.deepcopy(task)
             task.updated_at = utc_now_iso()
             task.latest_message = req.message
-            # Agent 首次请求携带 GPU IP 即可, 后续看门狗 ping 该地址判活, 无需心跳。
-            # 只要本次带了非空 gpu_host 且与已存不同就更新(兼容 DHCP 变更)。
-            _gpu = (getattr(req, "gpu_host", None) or "").strip() if getattr(req, "gpu_host", None) else None
+            # 分析 GPU 端网络请求自动获取客户端 IP (gpu_host):
+            # 优先从当前网络请求中分析提取的 client_ip 或 contextvar,
+            # 若无网络请求(例如纯离线测试或直接调用)则回退到 req.gpu_host。
+            from trainpilot.server.network import get_current_client_ip, normalize_client_ip
+            detected_ip = normalize_client_ip(client_ip or get_current_client_ip())
+            req_ip = normalize_client_ip(getattr(req, "gpu_host", None))
+            _gpu = detected_ip or req_ip
             if _gpu and _gpu != task.gpu_host:
                 task.gpu_host = _gpu
-                # 新上报/变更 IP 视为一次有效存活证明, 清除旧的 ping 失败记忆。
+                # 新获取/变更 IP 视为一次有效存活证明, 清除旧的 ping 失败记忆。
                 task.last_ping_at = task.updated_at
                 task.last_ping_ok = True
             if req.step is not None:
@@ -278,6 +282,31 @@ class TaskMailboxManager:
             task.last_ping_at = now_iso
             task.last_ping_ok = True
             self._persist_task_or_restore(task, previous, was_cached, "gpu host registration")
+
+    def update_task_client_ip(self, task_id: str, client_ip: Optional[str]) -> bool:
+        """根据从 Agent 网络请求中分析得到的客户端 IP 自动登记/更新任务的 GPU 主机地址。
+
+        Returns:
+            True if the IP was updated or registered, False otherwise.
+        """
+        from trainpilot.server.network import normalize_client_ip
+        ip = normalize_client_ip(client_ip)
+        if not ip:
+            return False
+        with self._lock:
+            was_cached = task_id in self._tasks
+            task = self._get_or_create(task_id, persist_new=False)
+            if task.gpu_host != ip:
+                previous = copy.deepcopy(task)
+                now_iso = utc_now_iso()
+                task.gpu_host = ip
+                task.updated_at = now_iso
+                task.last_ping_at = now_iso
+                task.last_ping_ok = True
+                self._persist_task_or_restore(task, previous, was_cached, "client ip update from network request")
+                logger.info("Updated GPU host for task %s to %s via network request analysis", task_id, ip)
+                return True
+        return False
 
     def update_ping_result(self, task_id: str, ok: bool) -> None:
         """记录看门狗一次 ping 结果(成功即存活证明)。"""

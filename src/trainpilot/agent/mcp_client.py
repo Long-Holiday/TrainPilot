@@ -124,8 +124,8 @@ class TrainPilotMCPClient:
             task_id: Default task identifier. Resolves from TRAINPILOT_TASK_ID if omitted.
             timeout: Default timeout in seconds for operations.
             api_token: Optional API token for Bearer authorization. Resolves from TRAINPILOT_API_TOKEN if omitted.
-            gpu_host: GPU server IP/hostname. Defaults to auto-detected local IP;
-                reported on the first tool call so the watchdog can ping it (no heartbeat needed).
+            gpu_host: Optional GPU server IP/hostname override. If omitted, the server
+                automatically determines the IP by analyzing incoming network requests.
         """
         raw_url = server_url or os.getenv("TRAINPILOT_GATEWAY_URL")
         if not raw_url:
@@ -148,9 +148,7 @@ class TrainPilotMCPClient:
         self.default_task_id = task_id or os.getenv("TRAINPILOT_TASK_ID", "default-task")
         self.timeout = timeout
         self.api_token = api_token or os.getenv("TRAINPILOT_API_TOKEN")
-        from trainpilot.common.gateway import resolve_gpu_host
-
-        self.gpu_host = resolve_gpu_host(gpu_host)
+        self.gpu_host = gpu_host
 
     def _resolve_task_id(self, task_id: Optional[str]) -> str:
         tid = task_id or self.default_task_id
@@ -160,12 +158,16 @@ class TrainPilotMCPClient:
 
     def _create_http_client(self):
         """Create an AsyncClient configured with timeouts and optional API token headers."""
-        try:
-            import httpx2 as _http_mod
-        except ImportError:
-            import httpx as _http_mod
+        for var in ("NO_PROXY", "no_proxy"):
+            val = os.environ.get(var)
+            if val and "[::1]" in val:
+                os.environ[var] = val.replace("[::1]", "::1")
+
+        import httpx as _http_mod
 
         headers = {}
+        if self.default_task_id:
+            headers["X-Task-ID"] = self.default_task_id
         if self.api_token:
             headers["Authorization"] = f"Bearer {self.api_token}"
         return _http_mod.AsyncClient(headers=headers, timeout=self.timeout)

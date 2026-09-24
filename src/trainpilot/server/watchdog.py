@@ -19,9 +19,9 @@ class ServerWatchdog:
     """Background daemon that pings GPU hosts and trims the database.
 
     判活模型(无心跳):
-    1. Agent 首次请求时上报 ``gpu_host``(GPU 服务器 IP)。
+    1. 服务端分析 GPU 端 Agent 的网络请求自动获取客户端 IP (``gpu_host``), Agent 无需主动汇报。
     2. 看门狗每轮 ping 每个任务的 ``gpu_host``(同 IP 一轮只 ping 一次),
-       能 ping 通即存活; ping 不通或从未上报 IP 即失联并告警。
+       能 ping 通即存活; ping 不通或未获取到网络请求 IP 即失联并告警。
     """
 
     def __init__(
@@ -164,7 +164,7 @@ class ServerWatchdog:
                     except Exception:
                         pass
 
-                reason = "未上报 GPU IP" if not t.gpu_host else f"ping {t.gpu_host} 不可达"
+                reason = "未获取到 GPU 端网络请求 IP" if not t.gpu_host else f"ping {t.gpu_host} 不可达"
                 logger.warning("Watchdog detected unreachable task: %s (%s, state: %s)",
                                t.task_id, reason, t.state.value)
 

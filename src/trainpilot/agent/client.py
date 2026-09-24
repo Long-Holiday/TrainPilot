@@ -115,8 +115,8 @@ class TrainPilotClient:
     ``http://$TRAINPILOT_HOST:$TRAINPILOT_PORT`` > 默认 ``http://127.0.0.1:28780``。
     因此 GPU 机器只需设置 ``TRAINPILOT_HOST=<Web 公网 IP/域名>`` 即可, 无需拼完整 URL。
 
-    存活模型 (无心跳): 首次上报时自动携带本机 IP(``gpu_host``),
-    服务端看门狗后续直接 ping 该 IP 判活, Agent 无需定时发送心跳。
+    存活模型 (无心跳): 服务端分析 GPU 端网络请求自动获取 IP,
+    看门狗后续直接 ping 该 IP 判活, Agent 无需主动汇报 IP, 无需定时发送心跳。
     """
 
     def __init__(
@@ -144,12 +144,13 @@ class TrainPilotClient:
         self.task_id = task_id
         self.timeout = timeout
         self.api_token = api_token
-        self.gpu_host = resolve_gpu_host(gpu_host)
+        self.gpu_host = gpu_host
         self.enable_offline_buffering = enable_offline_buffering
         self.max_offline_buffer_size = max(1, int(max_offline_buffer_size))
         self._offline_buffer: deque = deque(maxlen=self.max_offline_buffer_size)
         self._buffer_lock = threading.Lock()
         self.session = requests.Session()
+        self.session.headers.update({"X-Task-ID": self.task_id})
         if api_token:
             self.session.headers.update({"Authorization": f"Bearer {api_token}"})
 
@@ -202,7 +203,7 @@ class TrainPilotClient:
     ) -> Dict[str, Any]:
         """Report any event (alert, milestone, completed, failed) to the gateway.
 
-        首次上报自动携带本机 IP(``gpu_host``), 服务端看门狗后续 ping 该 IP 判活。
+        服务端看门狗根据网络请求分析自动获取 IP 并执行 ping 判活，无需额外心跳。
         Resilience features:
         - Automatic offline buffering: network outages buffer events instead of crashing training.
         - Auto-flush: draining pending offline events when network recovers.
