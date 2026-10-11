@@ -12,7 +12,6 @@ from trainpilot.server.feishu.cards import (
     build_milestone_card,
     build_recovery_card,
     build_resolved_card,
-    build_stale_alert_card,
 )
 
 logger = logging.getLogger("trainpilot.feishu")
@@ -128,32 +127,6 @@ class FeishuCardClient:
             task_id=task_id,
             card_dict=card_content,
             card_type="recovery",
-        )
-
-    def send_stale_alert(
-        self,
-        task_id: str,
-        silent_seconds: float,
-        gpu_host: Optional[str] = None,
-        last_ping_at: Optional[str] = None,
-        latest_step: Optional[int] = None,
-        latest_epoch: Optional[int] = None,
-        latest_message: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Send a stale/ping-unreachable alert card to the configured receiver."""
-        card_content = build_stale_alert_card(
-            task_id=task_id,
-            silent_seconds=silent_seconds,
-            gpu_host=gpu_host,
-            last_ping_at=last_ping_at,
-            latest_step=latest_step,
-            latest_epoch=latest_epoch,
-            latest_message=latest_message,
-        )
-        return self._send_card(
-            task_id=task_id,
-            card_dict=card_content,
-            card_type="stale_alert",
         )
 
     def update_card_to_resolved(

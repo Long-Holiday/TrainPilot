@@ -104,8 +104,6 @@ def test_first_request_registers_gpu_host(mailbox: TaskMailboxManager):
     assert task.latest_step == 25
     assert task.latest_metrics["loss"] == 0.85
     assert task.gpu_host == "10.0.0.5"
-    assert task.last_ping_ok is True
-    assert task.last_ping_at is not None
 
 
 def test_mailbox_tasks_count(mailbox: TaskMailboxManager):

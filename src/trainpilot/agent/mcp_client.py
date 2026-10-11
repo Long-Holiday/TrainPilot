@@ -381,13 +381,11 @@ class TrainPilotMCPClient:
         limit: int = 100,
         offset: int = 0,
         state: Optional[str] = None,
-        stale_only: bool = False,
     ) -> Dict[str, Any]:
         """List tasks via MCP Server."""
         args: Dict[str, Any] = {
             "limit": limit,
             "offset": offset,
-            "stale_only": stale_only,
         }
         if state is not None:
             args["state"] = state

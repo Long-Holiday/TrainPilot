@@ -127,7 +127,6 @@ def main(argv=None) -> int:
     p_list.add_argument("--limit", type=int, default=100, help="Max tasks to return")
     p_list.add_argument("--offset", type=int, default=0, help="Offset")
     p_list.add_argument("--state", help="Filter by state (e.g. RUNNING, WAITING)")
-    p_list.add_argument("--stale-only", action="store_true", help="Only show ping-unreachable tasks")
 
     # 7. submit-decision
     p_dec = subparsers.add_parser("submit-decision", help="Directly submit an operator decision")
@@ -211,7 +210,6 @@ def main(argv=None) -> int:
                 limit=args.limit,
                 offset=args.offset,
                 state=args.state,
-                stale_only=args.stale_only,
             )
             print(json.dumps(res, indent=2, ensure_ascii=False))
 

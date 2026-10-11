@@ -9,12 +9,12 @@ from trainpilot import __version__
 from trainpilot.server.auth import McpAuthMiddleware
 from trainpilot.server.background import feishu_dispatcher
 from trainpilot.server.config import settings
+from trainpilot.server.cleanup import default_cleanup
 from trainpilot.server.mailbox import default_mailbox
 from trainpilot.server.mcp_server import mcp_server
 from trainpilot.server.network import ClientIpMiddleware
 from trainpilot.server.routes.tasks import router as tasks_router
 from trainpilot.server.routes.webhook import router as webhook_router
-from trainpilot.server.watchdog import default_watchdog
 
 logging.basicConfig(
     level=logging.DEBUG if settings.debug else logging.INFO,
@@ -42,7 +42,7 @@ async def lifespan(app: FastAPI):
     """Application startup and shutdown hooks."""
     logger.info("Starting TrainPilot Control Plane MCP Gateway (Streamable HTTP)...")
     logger.info("Feishu configured: %s (Receiver: %s)", settings.is_feishu_configured, settings.feishu_receiver_id)
-    default_watchdog.start()
+    default_cleanup.start()
 
     # Ensure clean StreamableHTTPSessionManager instance for each lifespan cycle
     sm = getattr(mcp_server._lowlevel_server, "_session_manager", None)
@@ -59,7 +59,7 @@ async def lifespan(app: FastAPI):
     async with sm.run():
         yield
 
-    default_watchdog.stop()
+    default_cleanup.stop()
     logger.info("TrainPilot Control Plane MCP Gateway stopped.")
 
 
@@ -94,11 +94,8 @@ app.include_router(webhook_router)
 def health_check():
     """Liveness probe (never fails on downstream Feishu errors)."""
     try:
-        stale = default_mailbox.get_stale_tasks()
-        stale_count = len(stale)
         tasks_count = default_mailbox.get_tasks_count()
     except Exception:
-        stale_count = 0
         tasks_count = -1
     return {
         "status": "healthy",
@@ -111,8 +108,7 @@ def health_check():
         "auth_enforced": settings.is_api_token_configured,
         "sqlite_enabled": settings.enable_sqlite,
         "tasks_count": tasks_count,
-        "stale_tasks_count": stale_count,
-        "watchdog": default_watchdog.get_stats(),
+        "cleanup": default_cleanup.get_stats(),
         "background_dispatcher": feishu_dispatcher.get_stats(),
     }
 

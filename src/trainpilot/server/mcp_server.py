@@ -322,7 +322,6 @@ def list_tasks(
     limit: int = 100,
     offset: int = 0,
     state: Optional[str] = None,
-    stale_only: bool = False,
 ) -> Dict[str, Any]:
     """List tracked training tasks with optional state filtering and pagination.
 
@@ -330,7 +329,6 @@ def list_tasks(
         limit: Maximum number of tasks to return.
         offset: Number of tasks to skip.
         state: Optional filter by TaskState (e.g. 'RUNNING', 'WAITING').
-        stale_only: Only return ping-unreachable tasks.
     """
     parsed_state = None
     if state:
@@ -338,7 +336,7 @@ def list_tasks(
             parsed_state = TaskState(state.upper())
         except ValueError:
             return {"success": False, "error": f"Invalid state '{state}'"}
-    tasks = default_mailbox.list_tasks(limit=limit, offset=offset, state=parsed_state, stale_only=stale_only)
+    tasks = default_mailbox.list_tasks(limit=limit, offset=offset, state=parsed_state)
     return {
         "success": True,
         "count": len(tasks),

@@ -81,8 +81,8 @@ flowchart TB
 
 ```mermaid
 stateDiagram-v2
-    [*] --> RUNNING: Agent 启动训练任务（首次请求上报 gpu_host）
-    RUNNING --> RUNNING: 上报里程碑 report(event_type=milestone)（看门狗 ping gpu_host 判活）
+    [*] --> RUNNING: Agent 启动训练任务
+    RUNNING --> RUNNING: 上报里程碑 report(event_type=milestone)
     RUNNING --> WAITING: 捕获异常并冻结现场 report(event_type=alert)
     WAITING --> RESOLVED: 用户在飞书点击决策或超时自动决策
     RESOLVED --> RECOVERING: Agent 轮询拉取指令 poll_instruction
@@ -264,11 +264,11 @@ uv run python examples/mock_training.py
 
 | 工具名称 (Tool Name) | 核心职责 | 输入参数摘要 | 输出及行为效果 |
 |:---|:---|:---|:---|
-| **`report`** | 统一事件上报 | `message` (必填), `event_type` (milestone/alert/completed/failed，默认 milestone), `task_id`, `step`, `epoch`, `metrics`, `agent_note`, `extra`, `gpu_host` | `milestone`：登记 `gpu_host` 供看门狗 ping 判活，向飞书推送绿色卡片及 Agent 点评；`alert`：状态置为 `WAITING` 冻结训练，推送红色交互卡片并激活 30s 超时定时器；`completed`/`failed`：流转终态 |
+| **`report`** | 统一事件上报 | `message` (必填), `event_type` (milestone/alert/completed/failed，默认 milestone), `task_id`, `step`, `epoch`, `metrics`, `agent_note`, `extra`, `gpu_host` | `milestone`：登记任务进度，向飞书推送绿色卡片及 Agent 点评；`alert`：状态置为 `WAITING` 冻结训练，推送红色交互卡片并激活 30s 超时定时器；`completed`/`failed`：流转终态 |
 | **`poll_instruction`** | 决策拉取 | `task_id`, `wait_timeout` (默认 20s), `pop` (默认 True) | Agent 挂起等待用户决策；决策到达时返回指令并将状态流转至 `RECOVERING` |
 | **`ack_instruction`** | 自愈确认 | `task_id`, `instruction_id`, `action`, `status`, `solution`, `message` | 校验指令有效性，状态流转回 `RUNNING`，向飞书推送【自愈恢复】卡片通知用户 |
-| **`get_task_status`** | 状态查询 | `task_id` | 获取指定任务当前生命周期状态、GPU 地址、ping 结果、信箱未决指令与事件统计 |
-| **`list_tasks`** | 集群汇总 | `limit`, `offset`, `state` (状态过滤), `stale_only` (仅失联) | 分页查询集群所有跟踪任务列表，支持失联与状态过滤 |
+| **`get_task_status`** | 状态查询 | `task_id` | 获取指定任务当前生命周期状态、GPU 地址、信箱未决指令与事件统计 |
+| **`list_tasks`** | 集群汇总 | `limit`, `offset`, `state` (状态过滤) | 分页查询集群所有跟踪任务列表，支持状态过滤 |
 | **`submit_decision`** | 用户干预 | `action`, `task_id`, `payload`, `operator` | 注入运维决策，更新信箱并就地将飞书卡片置为已处理 |
 
 ### MCP Resources (只读资源)
@@ -284,7 +284,7 @@ uv run python examples/mock_training.py
 
 ## 📱 飞书交互卡片与 HITL 闭环体系
 
-### 5 类卡片矩阵
+### 4 类卡片矩阵
 
 TrainPilot 为深度学习生命周期的不同场景精心设计了视觉分明、结构规整的飞书卡片：
 
@@ -294,7 +294,6 @@ TrainPilot 为深度学习生命周期的不同场景精心设计了视觉分明
 | **🚀 训练里程碑卡片** | 🟢 绿色 Header | Agent 触发 `report(event_type="milestone")` (如 Epoch 完成) | 阶段进度、关键指标、**🤖 Agent 智能点评**（独立区块呈现模型调优意见） |
 | **✅ 决策闭环防呆卡片** | 🟦 绿松石 Header | 用户点击决策按钮或 30s 超时触发 | 就地替换原告警卡片，展示**决策人**、**选定动作**及**闭环时间**；完全隐藏按钮防呆 |
 | **🛠️ 异常自愈成功卡片** | 🟢 绿色 Header | Agent 执行自愈后发送 `ack_instruction` | 展示执行的解决方法概要（如回退 Checkpoint、调小学习率），告知团队训练已复苏 |
-| **⚠️ 训练失联预警卡片** | 🟠 橙色 Header | Watchdog ping `gpu_host` 失败（或未获取到网络请求 IP） | 失联时长、GPU 地址、最后探测时间与步数，提示排查硬件断电、节点崩溃或 NCCL 死锁 |
 
 ### 卡片防呆与幂等保障
 
@@ -383,7 +382,6 @@ docker run -d \
 | `TRAINPILOT_ENABLE_MOCK_FEISHU` | `false` | bool | 强制启用飞书 Mock 模式（测试与本地演练用） |
 | `TRAINPILOT_API_TOKEN` | - | str | API 鉴权令牌（设置后客户端调用须携带此 Token） |
 | `TRAINPILOT_ALERT_DECISION_TIMEOUT_SECONDS`| `30` | int | 告警卡片等待人工决策超时时间（秒），超时自动自愈 |
-| `TRAINPILOT_GPU_PING_TIMEOUT_SECONDS` | `3.0` | float | 单个 GPU 主机 ping 探测超时时间（秒） |
 | `TRAINPILOT_LONG_POLL_TIMEOUT_SECONDS` | `20.0` | float | 服务端长轮询最大挂起时长（秒） |
 | `TRAINPILOT_ENABLE_SQLITE` | `true` | bool | 是否启用 SQLite WAL 持久化；`false` 时仅使用进程内存 |
 | `TRAINPILOT_SQLITE_PATH` | `trainpilot.db` | str | SQLite 数据库存储路径 |
@@ -391,8 +389,6 @@ docker run -d \
 | `TRAINPILOT_ENABLE_TASK_CLEANUP` | `true` | bool | 是否定时删除超过保留期的 `COMPLETED`/`FAILED` 任务及事件 |
 | `TRAINPILOT_TASK_RETENTION_HOURS` | `72` | float | 终态任务保留时长（小时） |
 | `TRAINPILOT_TASK_CLEANUP_INTERVAL_SECONDS` | `3600` | float | 过期任务清理周期（秒） |
-| `TRAINPILOT_ENABLE_WATCHDOG` | `true` | bool | 是否启用服务端 GPU ping 失联看门狗守护线程 |
-| `TRAINPILOT_WATCHDOG_INTERVAL_SECONDS` | `15` | int | 看门狗后台扫描周期（秒） |
 | `TRAINPILOT_MCP_ENABLE_DNS_REBINDING_PROTECTION` | `false` | bool | 是否启用 MCP DNS 重绑定防护（跨公网连接设为 false） |
 
 #### 模块二：内网 GPU 客户端配置 (运行在 GPU 训练节点)

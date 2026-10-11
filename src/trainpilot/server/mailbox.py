@@ -22,7 +22,6 @@ from trainpilot.common.states import EventType, TaskState
 logger = logging.getLogger("trainpilot.mailbox")
 
 TERMINAL_STATES = frozenset({TaskState.COMPLETED, TaskState.FAILED})
-STALE_CANDIDATE_STATES = frozenset({TaskState.RUNNING, TaskState.WAITING, TaskState.RECOVERING})
 
 
 class TaskNotFoundError(ValueError):
@@ -57,10 +56,8 @@ class TaskRecord:
     state: TaskState = TaskState.RUNNING
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
-    # GPU 服务器 IP/主机名: Agent 首次请求时上报, 看门狗 ping 该地址判活。
+    # GPU 服务器 IP/主机名: 从网络请求或 Agent 上报中获取
     gpu_host: Optional[str] = None
-    last_ping_at: Optional[str] = None
-    last_ping_ok: Optional[bool] = None
     latest_step: Optional[int] = None
     latest_epoch: Optional[int] = None
     latest_metrics: Optional[Dict[str, Any]] = None
@@ -167,11 +164,10 @@ class TaskMailboxManager:
         previous: TaskRecord,
         was_cached: bool,
         context: str,
-        stale_alerted: Optional[bool] = None,
     ) -> None:
         """Persist a mutation, restoring the in-memory snapshot on failure."""
         try:
-            self._storage.save_task(task, stale_alerted=stale_alerted)
+            self._storage.save_task(task)
         except Exception:
             if was_cached:
                 self._tasks[task.task_id] = previous
@@ -197,9 +193,6 @@ class TaskMailboxManager:
             _gpu = detected_ip or req_ip
             if _gpu and _gpu != task.gpu_host:
                 task.gpu_host = _gpu
-                # 新获取/变更 IP 视为一次有效存活证明, 清除旧的 ping 失败记忆。
-                task.last_ping_at = task.updated_at
-                task.last_ping_ok = True
             if req.step is not None:
                 task.latest_step = req.step
             if req.epoch is not None:
@@ -277,10 +270,7 @@ class TaskMailboxManager:
             was_cached = task_id in self._tasks
             task = self._get_or_create(task_id, persist_new=False)
             previous = copy.deepcopy(task)
-            now_iso = utc_now_iso()
             task.gpu_host = gpu
-            task.last_ping_at = now_iso
-            task.last_ping_ok = True
             self._persist_task_or_restore(task, previous, was_cached, "gpu host registration")
 
     def update_task_client_ip(self, task_id: str, client_ip: Optional[str]) -> bool:
@@ -301,33 +291,10 @@ class TaskMailboxManager:
                 now_iso = utc_now_iso()
                 task.gpu_host = ip
                 task.updated_at = now_iso
-                task.last_ping_at = now_iso
-                task.last_ping_ok = True
                 self._persist_task_or_restore(task, previous, was_cached, "client ip update from network request")
                 logger.info("Updated GPU host for task %s to %s via network request analysis", task_id, ip)
                 return True
         return False
-
-    def update_ping_result(self, task_id: str, ok: bool) -> None:
-        """记录看门狗一次 ping 结果(成功即存活证明)。"""
-        with self._lock:
-            task = self._tasks.get(task_id)
-            if task is None:
-                if self._storage:
-                    task = self._storage.get_task(task_id)
-                    if task is None:
-                        return
-                    self._tasks[task_id] = task
-                else:
-                    return
-            previous = copy.deepcopy(task)
-            was_cached = True
-            task.last_ping_at = utc_now_iso()
-            task.last_ping_ok = bool(ok)
-            try:
-                self._persist_task_or_restore(task, previous, was_cached, "ping result")
-            except Exception:
-                logger.debug("Failed to persist ping result for %s", task_id)
 
     def _notify_instruction_waiters(self, task_id: str) -> None:
         """Wake up any pending long-polling requests (sync or async) waiting for this task's decision."""
@@ -749,19 +716,12 @@ class TaskMailboxManager:
         limit: int = 100,
         offset: int = 0,
         state: Optional[TaskState] = None,
-        stale_only: bool = False,
     ) -> List[TaskSummary]:
-        """List summaries with pagination and optional state/stale filters.
+        """List summaries with pagination and optional state filter.
 
-        ``stale_only=True`` 返回 ping 不可达的任务(ping 失败或从未上报 GPU IP)。
         Uses SQLite pagination directly when available to keep RAM consumption flat (O(limit) instead of O(N)).
         """
         with self._lock:
-            if stale_only:
-                tasks = [t for t in self._tasks.values() if self._is_unreachable_locked(t)]
-                tasks = tasks[offset:offset + limit]
-                return [self._build_summary(t) for t in tasks]
-
             # Storage pagination path: only loads current page rows into RAM
             if self._storage:
                 records = self._storage.list_tasks(limit=limit, offset=offset, state=state)
@@ -778,34 +738,6 @@ class TaskMailboxManager:
                 tasks = [t for t in tasks if t.state == state]
             tasks = tasks[offset:offset + limit]
             return [self._build_summary(t) for t in tasks]
-
-    def get_stale_tasks(self) -> List[TaskSummary]:
-        """Ping 不可达的任务(看门狗告警候选)。"""
-        with self._lock:
-            return [
-                self._build_summary(t)
-                for t in self._tasks.values()
-                if self._is_unreachable_locked(t)
-            ]
-
-    def get_liveness_candidates(self) -> List[TaskSummary]:
-        """看门狗每轮需要 ping 的任务(RUNNING/WAITING/RECOVERING)。"""
-        with self._lock:
-            return [
-                self._build_summary(t)
-                for t in self._tasks.values()
-                if t.state in STALE_CANDIDATE_STATES
-            ]
-
-    @staticmethod
-    def _is_unreachable_locked(task: TaskRecord) -> bool:
-        if task.state not in STALE_CANDIDATE_STATES:
-            return False
-        if not task.gpu_host:
-            return True
-        if task.last_ping_ok is False:
-            return True
-        return False
 
     def reset(self) -> None:
         """Reset all tasks (mainly for testing)."""
@@ -828,8 +760,6 @@ class TaskMailboxManager:
             created_at=task.created_at,
             updated_at=task.updated_at,
             gpu_host=task.gpu_host,
-            last_ping_at=task.last_ping_at,
-            last_ping_ok=task.last_ping_ok,
             latest_step=task.latest_step,
             latest_epoch=task.latest_epoch,
             latest_metrics=task.latest_metrics,

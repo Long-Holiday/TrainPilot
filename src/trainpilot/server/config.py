@@ -63,13 +63,6 @@ class ServerSettings(BaseSettings):
         description="Force Feishu mock mode regardless of credentials for testing",
     )
 
-    # Task liveness (ping-based watchdog)
-    gpu_ping_timeout_seconds: float = Field(
-        default=3.0,
-        gt=0,
-        description="Per-host ping timeout in seconds for GPU liveness checks",
-    )
-
     # HITL alert decision timeout: seconds without human click before auto self-resolve.
     alert_decision_timeout_seconds: int = Field(
         default=30,
@@ -109,17 +102,6 @@ class ServerSettings(BaseSettings):
     enable_sqlite: bool = Field(
         default=True,
         description="Persist tasks and events to SQLite; when false use process-local memory",
-    )
-
-    # Server-side Watchdog
-    enable_watchdog: bool = Field(
-        default=True,
-        description="Enable server-side GPU ping watchdog and periodic housekeeping",
-    )
-    watchdog_interval_seconds: int = Field(
-        default=15,
-        gt=0,
-        description="Watchdog background check interval in seconds",
     )
 
     # Terminal task retention / cleanup

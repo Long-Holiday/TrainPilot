@@ -262,7 +262,6 @@ def list_tasks(
     limit: int = Query(default=100, ge=1, le=1000, description="Max tasks to return"),
     offset: int = Query(default=0, ge=0, description="Skip first N tasks"),
     state: Optional[TaskState] = Query(default=None, description="Filter by task state"),
-    stale_only: bool = Query(default=False, description="Only return ping-unreachable tasks"),
 ) -> List[TaskSummary]:
     """List tracked training tasks with pagination and optional filters."""
-    return default_mailbox.list_tasks(limit=limit, offset=offset, state=state, stale_only=stale_only)
+    return default_mailbox.list_tasks(limit=limit, offset=offset, state=state)

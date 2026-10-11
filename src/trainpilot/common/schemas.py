@@ -96,8 +96,6 @@ class TaskSummary(BaseModel):
     created_at: str
     updated_at: str
     gpu_host: Optional[str] = None
-    last_ping_at: Optional[str] = None
-    last_ping_ok: Optional[bool] = None
     latest_step: Optional[int] = None
     latest_epoch: Optional[int] = None
     latest_metrics: Optional[Dict[str, Any]] = None

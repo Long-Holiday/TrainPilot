@@ -1,7 +1,7 @@
 """Network request analysis utilities for TrainPilot Control Plane.
 
 Extracts and manages the GPU Agent's client IP from incoming HTTP and MCP requests,
-enabling the watchdog to ping the GPU host without requiring the agent to self-report its IP.
+recording the GPU host address without requiring the agent to self-report its IP.
 """
 
 import contextvars

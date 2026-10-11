@@ -54,8 +54,6 @@ class SQLiteStorage:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     gpu_host TEXT,
-                    last_ping_at TEXT,
-                    last_ping_ok INTEGER,
                     latest_step INTEGER,
                     latest_epoch INTEGER,
                     latest_metrics_json TEXT,
@@ -64,22 +62,17 @@ class SQLiteStorage:
                     latest_instruction_json TEXT,
                     last_alert_fingerprint TEXT,
                     last_alert_at TEXT,
-                    stale_alerted INTEGER DEFAULT 0,
                     feishu_message_id TEXT
                 );
                 """
             )
-            # Column migrations for existing databases (heartbeat -> ping model)
+            # Column migrations for existing databases
             cur.execute("PRAGMA table_info(tasks);")
             cols = [r["name"] for r in cur.fetchall()]
             if "feishu_message_id" not in cols:
                 cur.execute("ALTER TABLE tasks ADD COLUMN feishu_message_id TEXT;")
             if "gpu_host" not in cols:
                 cur.execute("ALTER TABLE tasks ADD COLUMN gpu_host TEXT;")
-            if "last_ping_at" not in cols:
-                cur.execute("ALTER TABLE tasks ADD COLUMN last_ping_at TEXT;")
-            if "last_ping_ok" not in cols:
-                cur.execute("ALTER TABLE tasks ADD COLUMN last_ping_ok INTEGER;")
             if "last_heartbeat_at" in cols:
                 try:
                     cur.execute("ALTER TABLE tasks DROP COLUMN last_heartbeat_at;")
@@ -121,7 +114,6 @@ class SQLiteStorage:
     def save_task(
         self,
         task: Any,
-        stale_alerted: Optional[bool] = None,
         *,
         _commit: bool = True,
     ) -> None:
@@ -143,40 +135,30 @@ class SQLiteStorage:
         )
         feishu_msg_id = getattr(task, "feishu_message_id", None)
         gpu_host = getattr(task, "gpu_host", None)
-        last_ping_at = getattr(task, "last_ping_at", None)
-        last_ping_ok = getattr(task, "last_ping_ok", None)
-        last_ping_ok_val = None if last_ping_ok is None else (1 if last_ping_ok else 0)
 
         with self._lock:
             cur = self._conn.cursor()
-            if stale_alerted is not None:
-                alerted_val = 1 if stale_alerted else 0
-            else:
-                # Check existing stale_alerted and feishu_message_id if already exists
+            if feishu_msg_id is None:
                 cur.execute(
-                    "SELECT stale_alerted, feishu_message_id FROM tasks WHERE task_id = ?",
+                    "SELECT feishu_message_id FROM tasks WHERE task_id = ?",
                     (task.task_id,),
                 )
                 row = cur.fetchone()
-                alerted_val = row["stale_alerted"] if row else 0
-                if feishu_msg_id is None and row:
+                if row:
                     feishu_msg_id = row["feishu_message_id"]
 
             cur.execute(
                 """
                 INSERT INTO tasks (
                     task_id, state, created_at, updated_at, gpu_host,
-                    last_ping_at, last_ping_ok,
                     latest_step, latest_epoch, latest_metrics_json, latest_message,
                     pending_instruction_json, latest_instruction_json,
-                    last_alert_fingerprint, last_alert_at, stale_alerted, feishu_message_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    last_alert_fingerprint, last_alert_at, feishu_message_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(task_id) DO UPDATE SET
                     state = excluded.state,
                     updated_at = excluded.updated_at,
                     gpu_host = COALESCE(excluded.gpu_host, tasks.gpu_host),
-                    last_ping_at = COALESCE(excluded.last_ping_at, tasks.last_ping_at),
-                    last_ping_ok = COALESCE(excluded.last_ping_ok, tasks.last_ping_ok),
                     latest_step = excluded.latest_step,
                     latest_epoch = excluded.latest_epoch,
                     latest_metrics_json = excluded.latest_metrics_json,
@@ -185,7 +167,6 @@ class SQLiteStorage:
                     latest_instruction_json = excluded.latest_instruction_json,
                     last_alert_fingerprint = excluded.last_alert_fingerprint,
                     last_alert_at = excluded.last_alert_at,
-                    stale_alerted = excluded.stale_alerted,
                     feishu_message_id = COALESCE(excluded.feishu_message_id, tasks.feishu_message_id);
                 """,
                 (
@@ -194,8 +175,6 @@ class SQLiteStorage:
                     task.created_at,
                     task.updated_at,
                     gpu_host,
-                    last_ping_at,
-                    last_ping_ok_val,
                     task.latest_step,
                     task.latest_epoch,
                     latest_metrics_json,
@@ -204,7 +183,6 @@ class SQLiteStorage:
                     latest_inst_json,
                     task.last_alert_fingerprint,
                     task.last_alert_at,
-                    alerted_val,
                     feishu_msg_id,
                 ),
             )
@@ -231,28 +209,6 @@ class SQLiteStorage:
             )
             row = cur.fetchone()
             return row["feishu_message_id"] if row else None
-
-    def set_task_stale_alerted(self, task_id: str, alerted: bool) -> None:
-        """Mark whether watchdog has dispatched a stale alert for task_id (debounce)."""
-        with self._lock:
-            cur = self._conn.cursor()
-            cur.execute(
-                "UPDATE tasks SET stale_alerted = ? WHERE task_id = ?",
-                (1 if alerted else 0, task_id),
-            )
-            self._conn.commit()
-
-    def is_task_stale_alerted(self, task_id: str) -> bool:
-        """Check if watchdog has already sent a stale alert."""
-        with self._lock:
-            cur = self._conn.cursor()
-            cur.execute(
-                "SELECT stale_alerted FROM tasks WHERE task_id = ?", (task_id,)
-            )
-            row = cur.fetchone()
-            if row:
-                return bool(row["stale_alerted"])
-            return False
 
     def append_event(
         self,
@@ -455,9 +411,6 @@ class SQLiteStorage:
         keys = r.keys()
         feishu_msg_id = r["feishu_message_id"] if "feishu_message_id" in keys else None
         gpu_host = r["gpu_host"] if "gpu_host" in keys else None
-        last_ping_at = r["last_ping_at"] if "last_ping_at" in keys else None
-        _ping_val = r["last_ping_ok"] if "last_ping_ok" in keys else None
-        last_ping_ok = None if _ping_val is None else bool(_ping_val)
 
         return TaskRecord(
             task_id=t_id,
@@ -465,8 +418,6 @@ class SQLiteStorage:
             created_at=r["created_at"],
             updated_at=r["updated_at"],
             gpu_host=gpu_host,
-            last_ping_at=last_ping_at,
-            last_ping_ok=last_ping_ok,
             latest_step=r["latest_step"],
             latest_epoch=r["latest_epoch"],
             latest_metrics=latest_metrics,
