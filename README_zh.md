@@ -17,14 +17,14 @@
 TrainPilot 彻底终结了内网 GPU 训练集群“无公网 IP”、“无法直接接收外网 Webhook”、“无外部凭据下发通道”与“训练异常难以及时干预”的痛点：
 1. **Agent 在 GPU 服务器上执行训练任务**：内网 GPU 节点上的 AI Agent（如 Claude Code、OpenCode、自定义 Agent 或训练脚本）负责调度并运行模型训练。
 2. **向公网 MCP Server 发送任务状态**：GPU 端 Agent 通过标准 Model Context Protocol (MCP) 远程协议，主动将训练进度、实时指标（Loss/LR/显存）及自主研判点评（`agent_note`）上报给公网 MCP 服务器。
-3. **实时通知人类用户并闭环决策**：公网 MCP 服务器接收到任务状态后，即刻渲染富文本卡片推送到飞书通知用户；遇异常（NaN/OOM）就地冻结现场并提供交互按钮，用户在飞书上一键决策，指令实时回传 GPU 端 Agent 完成自愈恢复。
+3. **实时通知人类用户并闭环决策**：公网 MCP 服务器接收到任务状态后，即刻渲染富文本卡片推送到飞书通知用户；遇异常（NaN/OOM）记录等待状态并提供交互按钮，GPU Agent 负责安全暂停训练，用户在飞书上一键决策，指令实时回传 GPU 端 Agent 完成自愈恢复。
 
 ---
 
 ## ✨ 核心特性
 
 - 🤖 **内网 GPU 纯出站 Agent 驱动**：专为无公网 IP、无开放入站端口、零外网凭据的内网 GPU 集群设计，Agent 纯出站通过标准 Model Context Protocol (Streamable HTTP `/mcp`) 与控制面长效同步，零防火墙配置成本。
-- 📱 **飞书卡片 HITL 一键自愈闭环**：突发 NaN/OOM 异常时就地冻结训练保护现场，秒级向飞书推送富文本交互卡片；算法工程师一键下发调参/回滚决策，自愈指令实时回传 GPU 端执行闭环恢复。
+- 📱 **飞书卡片 HITL 一键自愈闭环**：突发 NaN/OOM 异常时由 GPU Agent 安全暂停训练保护现场，秒级向飞书推送富文本交互卡片；算法工程师一键下发调参/回滚决策，自愈指令实时回传 GPU 端执行闭环恢复。
 
 ---
 
@@ -185,6 +185,25 @@ uv run python examples/mock_training.py
 
 配置后，GPU 端运行的 Agent 在执行训练脚本或运维排障时，即可直接调用 TrainPilot 提供的标准化 MCP 工具。
 
+仅连接 MCP **不会自动监控日志或暂停 GPU 进程**。更新 TrainPilot 后，请重启服务端并重新连接 Agent，刷新 MCP 初始化指令与工具描述。建议将以下约束复制到 GPU 工作目录的 Agent 指令文件（如 `AGENTS.md` / `CLAUDE.md`）或训练请求中：
+
+```text
+执行训练时，持续检查训练输出、错误日志与进程退出状态。
+遇到 NaN/Inf、Loss 爆炸、OOM、异常退出或任何阻断训练的错误，
+必须在修复、重启或放弃任务之前调用 TrainPilot report(event_type="alert")。
+携带实际错误、task_id 和可用指标；不能用 milestone 或 failed 替代待干预告警。
+能够安全暂停时，由 GPU Agent 实际暂停训练；进程已退出则如实说明。
+控制面 WAITING 不代表 GPU 进程已被暂停。
+随后使用同一 task_id 调用 poll_instruction，直到 has_instruction=true；
+轮询超时则继续轮询，不重复发送同一告警；遇 COMPLETED/FAILED 则结束轮询。
+执行返回的 action，验证结果后携带 instruction_id 和 action 调用 ack_instruction。
+只有实际执行并验证成功才 ACK success，否则 ACK failed；solution 只写实际措施。
+stop_training：先实际停止任务，再 ACK，随后 report(event_type="failed") 标记终态。
+completed/failed 仅用于确定结束的任务，不会发送交互报警卡片。
+```
+
+这些约束用于引导工具选择；如果 Agent 不读取训练输出或不调用 MCP 工具，服务端无法替它发现异常。
+
 ---
 
 ### 2. GPU 端 Agent 常用工作流
@@ -211,7 +230,7 @@ uv run python examples/mock_training.py
    ```
 
 2. **检测到训练异常，就地冻结现场并请求用户介入**：
-   当 Agent 检测到 `Loss NaN`、剧烈数值突增或 `CUDA OOM` 时，将 `event_type` 设为 `alert` 上报。控制面将任务置为 `WAITING` 冻结现场，并向飞书推送带有【🛑 停止训练】与【✅ 自行解决】按钮的红色告警卡片：
+   当 Agent 检测到 `Loss NaN`、剧烈数值突增或 `CUDA OOM` 时，将 `event_type` 设为 `alert` 上报。GPU Agent 在可行时安全暂停训练；控制面将任务置为 `WAITING`（不会直接暂停 GPU 进程），并异步向飞书推送带有【🛑 停止训练】与【✅ 自行解决】按钮的红色告警卡片：
    ```json
    {
      "tool": "report",
@@ -264,7 +283,7 @@ uv run python examples/mock_training.py
 
 | 工具名称 (Tool Name) | 核心职责 | 输入参数摘要 | 输出及行为效果 |
 |:---|:---|:---|:---|
-| **`report`** | 统一事件上报 | `message` (必填), `event_type` (milestone/alert/completed/failed，默认 milestone), `task_id`, `step`, `epoch`, `metrics`, `agent_note`, `extra`, `gpu_host` | `milestone`：登记任务进度，向飞书推送绿色卡片及 Agent 点评；`alert`：状态置为 `WAITING` 冻结训练，推送红色交互卡片并激活 30s 超时定时器；`completed`/`failed`：流转终态 |
+| **`report`** | 统一事件上报 | `message` (必填), `event_type` (milestone/alert/completed/failed，默认 milestone), `task_id`, `step`, `epoch`, `metrics`, `agent_note`, `extra`, `gpu_host` | `milestone`：登记任务进度，向飞书推送绿色卡片及 Agent 点评；`alert`：状态置为 `WAITING`（GPU Agent 负责实际暂停），异步推送红色交互卡片并激活 30s 超时定时器；`completed`/`failed`：流转终态 |
 | **`poll_instruction`** | 决策拉取 | `task_id`, `wait_timeout` (默认 20s), `pop` (默认 True) | Agent 挂起等待用户决策；决策到达时返回指令并将状态流转至 `RECOVERING` |
 | **`ack_instruction`** | 自愈确认 | `task_id`, `instruction_id`, `action`, `status`, `solution`, `message` | 校验指令有效性，状态流转回 `RUNNING`，向飞书推送【自愈恢复】卡片通知用户 |
 | **`get_task_status`** | 状态查询 | `task_id` | 获取指定任务当前生命周期状态、GPU 地址、信箱未决指令与事件统计 |

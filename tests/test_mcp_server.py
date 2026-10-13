@@ -1,10 +1,12 @@
 """Unit and integration tests for TrainPilot MCP Server."""
 
 import json
+from unittest.mock import Mock
 import pytest
 from trainpilot.common.states import TaskState
 from trainpilot.server.mailbox import default_mailbox
 from trainpilot.server.config import settings
+import trainpilot.server.mcp_server as server
 from trainpilot.server.mcp_server import (
     ack_instruction,
     get_task_status,
@@ -16,6 +18,19 @@ from trainpilot.server.mcp_server import (
     resource_task_status,
     submit_decision,
 )
+
+
+@pytest.fixture(autouse=True)
+def mock_notifications(monkeypatch):
+    """Exercise delivery synchronously without external requests or live timers."""
+    def submit(fn, *args, **kwargs):
+        fn(*args, **kwargs)
+        return True
+
+    monkeypatch.setattr(server.feishu_dispatcher, "submit", submit)
+    for name in ("send_alert", "send_milestone", "send_recovery", "update_card_to_resolved"):
+        monkeypatch.setattr(server.default_feishu_client, name, Mock())
+    monkeypatch.setattr(server, "_schedule_auto_self_resolve", Mock())
 
 
 @pytest.fixture(autouse=True)
@@ -66,6 +81,12 @@ async def test_report_alert_and_decision_lifecycle():
     )
     assert alert_res["success"] is True
     assert alert_res["state"] == TaskState.WAITING.value
+    assert alert_res["next_action"] == {
+        "tool": "poll_instruction",
+        "arguments": {"task_id": task_id, "pop": True},
+    }
+    server.default_feishu_client.send_alert.assert_called_once()
+    server._schedule_auto_self_resolve.assert_called_once_with(task_id)
 
     # Verify task state is WAITING
     status_res = get_task_status(task_id=task_id)
@@ -104,6 +125,13 @@ async def test_report_alert_and_decision_lifecycle():
 
     task_after = default_mailbox.get_task(task_id)
     assert task_after.state == TaskState.RUNNING
+    server.default_feishu_client.send_recovery.assert_called_once_with(
+        task_id=task_id,
+        solution="Rolled back to step 950 and reduced learning rate to 5e-5",
+        step=None,
+        epoch=None,
+        metrics=None,
+    )
 
 
 def test_first_report_registers_gpu_host_and_list_tasks():
@@ -180,3 +208,67 @@ def test_report_terminal_event_types():
     res_fail = report(task_id="test-fail", message="Crashed", event_type="failed")
     assert res_fail["success"] is True
     assert res_fail["state"] == TaskState.FAILED.value
+
+
+@pytest.mark.asyncio
+async def test_agent_guidance_exposed_in_mcp_metadata():
+    """Check metadata seen by AI clients, not just Python function docstrings."""
+    instructions = mcp_server.instructions
+    assert "report(event_type='alert')" in instructions
+    assert "process exit status" in instructions
+    assert "before attempting repair" in instructions
+    assert "has_instruction=true" in instructions
+    assert "instruction_id" in instructions
+    assert "Connecting MCP does not automatically monitor" in instructions
+
+    tools = {tool.name: tool for tool in await mcp_server.list_tools()}
+    assert set(tools) == {
+        "report", "poll_instruction", "ack_instruction", "get_task_status",
+        "list_tasks", "submit_decision",
+    }
+    assert "REQUIRED" in tools["report"].description
+    assert "CUDA OOM" in tools["report"].description
+    assert "do not" in tools["report"].description
+    assert "keep polling" in tools["poll_instruction"].description
+    assert "AFTER executing" in tools["ack_instruction"].description
+    assert "verify training can resume" in tools["ack_instruction"].description
+    assert tools["report"].input_schema["properties"]["event_type"]["default"] == "milestone"
+
+
+@pytest.mark.parametrize("message,metrics", [
+    ("Loss is NaN", {"loss": "NaN"}),
+    ("CUDA out of memory", {"error": "CUDA_OOM"}),
+    ("Training process exited with code 1", {"exit_code": 1}),
+])
+def test_alert_delivery_and_next_action(message, metrics):
+    result = report(
+        task_id="test-agent-error", event_type="alert", message=message,
+        step=42, metrics=metrics, agent_note="Observed in training output.",
+    )
+    assert result["success"] is True
+    assert result["state"] == TaskState.WAITING.value
+    assert result["next_action"]["arguments"]["task_id"] == "test-agent-error"
+    assert "asynchronous, not confirmed" in result["guidance"]
+    assert "WAITING does not pause" in result["guidance"]
+    assert "instruction_id" in result["guidance"]
+    server.default_feishu_client.send_alert.assert_called_once_with(
+        task_id="test-agent-error", message=message, step=42, epoch=None,
+        metrics=metrics, extra=None,
+        timeout_seconds=settings.alert_decision_timeout_seconds,
+        agent_note="Observed in training output.",
+    )
+    server.default_feishu_client.send_milestone.assert_not_called()
+    server._schedule_auto_self_resolve.assert_called_once_with("test-agent-error")
+
+
+@pytest.mark.parametrize("event_type,state", [
+    ("milestone", TaskState.RUNNING),
+    ("completed", TaskState.COMPLETED),
+    ("failed", TaskState.FAILED),
+])
+def test_non_alert_reports_do_not_request_decision(event_type, state):
+    result = report(task_id="test-non-alert", message="Training update", event_type=event_type)
+    assert result["state"] == state.value
+    assert "next_action" not in result
+    server.default_feishu_client.send_alert.assert_not_called()
+    server._schedule_auto_self_resolve.assert_not_called()

@@ -34,9 +34,23 @@ _REPORTABLE_STATES = {
 mcp_server = MCPServer(
     name="TrainPilot",
     instructions=(
-        "TrainPilot Control Plane MCP Server: Provides tools to supervise deep learning training jobs, "
-        "report milestone metrics with AI notes, intercept NaN/Inf anomalies, poll human-in-the-loop decisions, "
-        "and acknowledge self-healing recovery actions connected to Feishu interactive cards."
+        "TrainPilot supervises training through Feishu interactive cards. Connecting MCP does not "
+        "automatically monitor or pause GPU processes: you must inspect training output, error logs, "
+        "and process exit status while running a job. On NaN/Inf, loss explosion, CUDA OOM, unexpected "
+        "process exit, or any error blocking training, call report(event_type='alert') immediately, "
+        "before attempting repair, restart, or abandoning the job. Never report an active anomaly as "
+        "a milestone or use failed instead of an alert requiring human intervention. Include the "
+        "observed error and available metrics; do not invent diagnostics. Safely pause further training "
+        "on the GPU when possible; if the process already exited, report that fact. WAITING is only "
+        "a control-plane state, not proof that a GPU process was paused. After alert, repeatedly call "
+        "poll_instruction for the same task until has_instruction=true; do not resend the same alert "
+        "on each poll timeout. Stop polling if the task is COMPLETED or FAILED. Follow the returned "
+        "action: stop_training means stop the job; self_resolve permits an actual recovery attempt. "
+        "Only after executing the action, call ack_instruction with the returned instruction_id and "
+        "action. Report success only after verifying the result; otherwise report status='failed'. "
+        "After acknowledging stop_training, report(event_type='failed') to mark the stopped run terminal. "
+        "Describe only recovery actions actually performed in solution. Use completed/failed only "
+        "when the run is definitively finished; terminal reports do not send interactive alert cards."
     ),
 )
 
@@ -140,9 +154,17 @@ def report(
     """Report any training event in one unified tool (milestone / alert / completed / failed).
 
     - `milestone`: normal progress; pushes a green Feishu card with the AI agent note.
-    - `alert`: anomaly (NaN/Inf, loss spike, OOM); sets state to WAITING, pushes a red
-      interactive Feishu card, and arms the fallback auto-decision timer.
-    - `completed` / `failed`: terminal state of the run.
+    - `alert`: REQUIRED when you observe NaN/Inf, loss explosion, CUDA OOM, unexpected
+      process exit, or any error blocking training. Report before repair/restart; do not
+      use the default milestone for errors. Sets WAITING, queues a red interactive
+      Feishu card, and arms the fallback auto-decision timer. You must safely pause
+      further GPU training yourself when possible; the server cannot pause processes.
+      Example: report(message="CUDA out of memory", event_type="alert",
+      task_id="training-run", metrics={"error": "CUDA_OOM"}).
+      Then call poll_instruction for the same task until a decision arrives, execute
+      the action, verify the result, and ack_instruction with its instruction_id.
+    - `completed` / `failed`: definitive terminal state, NOT a substitute for an
+      alert requiring intervention. These events do not send interactive alert cards.
 
     Args:
         message: Human-readable event description (the only required field).
@@ -182,12 +204,26 @@ def report(
     if resolved_type == EventType.ALERT:
         _schedule_auto_self_resolve(tid)
 
-    return {
+    response = {
         "success": True,
         "task_id": tid,
         "state": current_state.value,
         "message": f"Event '{key}' recorded. Current state: {current_state.value}",
     }
+    if resolved_type == EventType.ALERT:
+        response["next_action"] = {
+            "tool": "poll_instruction",
+            "arguments": {"task_id": tid, "pop": True},
+        }
+        response["guidance"] = (
+            "Alert recorded; Feishu delivery is asynchronous, not confirmed by this response. "
+            "WAITING does not pause the GPU process: safely pause further training yourself "
+            "when possible. Poll until has_instruction=true (stop on COMPLETED/FAILED); "
+            "do not resend this alert on poll timeouts or repair/restart before a decision. "
+            "Execute the returned action, verify the result, then ack_instruction with its "
+            "instruction_id and action. Never claim successful recovery before verification."
+        )
+    return response
 
 
 @mcp_server.tool()
@@ -200,6 +236,12 @@ async def poll_instruction(
 
     Supports native AsyncIO long-polling: holds connection up to wait_timeout seconds
     without consuming thread pool workers until a decision arrives or timeout expires.
+
+    After report(event_type="alert"), keep polling the same task while has_instruction
+    is false; a timeout is not permission to repair or resume. Do not resend the alert
+    on each timeout. Stop polling on COMPLETED/FAILED. When has_instruction is true,
+    execute the returned action and retain instruction_id for ack_instruction.
+    stop_training means stop the job; self_resolve permits a recovery attempt.
 
     Args:
         task_id: Task identifier; defaults to the server-configured task when omitted.
@@ -243,7 +285,14 @@ def ack_instruction(
 ) -> Dict[str, Any]:
     """Acknowledge execution of an instruction with solution details.
 
-    On successful recovery, automatically pushes a Feishu recovery card and resets
+    Call only AFTER executing the action returned by poll_instruction, using that
+    instruction_id and action. For self_resolve, verify training can resume before
+    reporting status="success"; otherwise use status="failed". Describe only actual
+    recovery actions in solution, never an assumed or planned fix. For stop_training,
+    stop the GPU job before acknowledging success, then report(event_type="failed")
+    to mark the stopped run terminal (successful ACK alone resets state to RUNNING).
+
+    On successful self_resolve recovery, queues a Feishu recovery card and resets
     the task state to RUNNING.
 
     Args:

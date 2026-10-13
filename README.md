@@ -17,14 +17,14 @@
 TrainPilot thoroughly resolves the longstanding pain points of intranet GPU training clusters—such as lacking public IPs, inability to receive external inbound webhooks, absent external credential delivery channels, and delayed intervention during training anomalies:
 1. **Agent Executes Training Tasks on GPU Servers**: AI Agents on intranet GPU nodes (e.g., Claude Code, OpenCode, custom agents, or training scripts) manage and execute model training workloads.
 2. **Reports Task Status to Public MCP Server**: The GPU-side Agent actively reports training progress, real-time metrics (Loss/LR/VRAM), and autonomous assessment insights (`agent_note`) to the public MCP server via standard Model Context Protocol (MCP) remote transport.
-3. **Notifies Human Users in Real Time with Closed-Loop Decisions**: Upon receiving updates, the public MCP server immediately renders rich text cards and pushes them to Feishu/Lark. When anomalies occur (such as NaN or OOM), it freezes the training execution on-site and provides interactive buttons. Users make one-click decisions in Feishu/Lark, and instructions are streamed back to the GPU-side Agent in real time for self-healing and recovery.
+3. **Notifies Human Users in Real Time with Closed-Loop Decisions**: Upon receiving updates, the public MCP server immediately renders rich text cards and pushes them to Feishu/Lark. When anomalies occur (such as NaN or OOM), it records the waiting state and provides interactive buttons; the GPU Agent is responsible for safely pausing training. Users make one-click decisions in Feishu/Lark, and instructions are streamed back to the GPU-side Agent in real time for self-healing and recovery.
 
 ---
 
 ## ✨ Key Features
 
 - 🤖 **Intranet GPU Pure-Outbound Agent**: Architected for intranet GPU clusters with no public IP, no inbound ports, and zero external credentials. The GPU-side Agent operates as a pure outbound client syncing state via standard Model Context Protocol (Streamable HTTP `/mcp`) with zero firewall configuration.
-- 📱 **Feishu/Lark HITL One-Click Self-Healing Loop**: Freezes training execution on-site upon sudden NaN or OOM anomalies and pushes interactive cards within seconds; ML engineers make one-click decisions in Feishu/Lark, and self-healing instructions are streamed back to the GPU in real time for recovery.
+- 📱 **Feishu/Lark HITL One-Click Self-Healing Loop**: The GPU Agent safely pauses training upon sudden NaN or OOM anomalies and pushes interactive cards within seconds; ML engineers make one-click decisions in Feishu/Lark, and self-healing instructions are streamed back to the GPU in real time for recovery.
 
 ---
 
@@ -185,6 +185,28 @@ In your AI Agent configuration file on the GPU server (e.g., `~/.claude.json`, `
 
 Once configured, the Agent running on the GPU cluster can directly invoke TrainPilot's standardized MCP tools while running training scripts or troubleshooting.
 
+Connecting MCP does **not** automatically monitor logs or pause GPU processes. After updating TrainPilot, restart the server and reconnect the Agent to refresh MCP instructions and tool descriptions. Add the following rules to the GPU workspace's Agent instructions (e.g. `AGENTS.md` / `CLAUDE.md`) or the training request:
+
+```text
+While running training, inspect output, error logs, and process exit status.
+On NaN/Inf, loss explosion, OOM, unexpected exit, or any error blocking training,
+call TrainPilot report(event_type="alert") BEFORE repair, restart, or abandonment.
+Include the observed error, task_id, and available metrics. Do not use milestone
+or failed instead of an alert requiring intervention. Safely pause further GPU
+training when possible; if the process already exited, say so. WAITING alone
+is not proof that the process was paused.
+Then poll_instruction for the same task until has_instruction=true; repeat on
+poll timeout, not the alert. Stop polling on COMPLETED/FAILED.
+Execute the returned action, verify the result, and ack_instruction with its
+instruction_id and action. ACK success only for a verified result; otherwise
+ACK failed. Describe only actions actually performed in solution.
+For stop_training, stop the job, ACK, then report(event_type="failed").
+Use completed/failed only for definitive terminal outcomes; they do not send
+interactive alert cards.
+```
+
+This guides tool selection; an Agent that does not read training output or call MCP tools cannot be monitored by the server.
+
 ---
 
 ### 2. Common GPU Agent Workflows
@@ -211,7 +233,7 @@ All reports go through a single **`report`** tool distinguished by `event_type`;
    ```
 
 2. **Detect Anomalies, Freeze Execution & Request User Intervention**:
-   When the Agent detects `Loss NaN`, extreme metric spikes, or `CUDA OOM`, it reports with `event_type` set to `alert`. The control plane sets the task state to `WAITING`, freezes execution on-site, and sends a red alert card with [🛑 Stop Training] and [✅ Self Resolve] action buttons to Feishu/Lark:
+   When the Agent detects `Loss NaN`, extreme metric spikes, or `CUDA OOM`, it reports with `event_type` set to `alert`. The GPU Agent safely pauses further training when possible; the control plane sets the task state to `WAITING` (it does not pause GPU processes) and queues a red alert card with [🛑 Stop Training] and [✅ Self Resolve] action buttons to Feishu/Lark:
    ```json
    {
      "tool": "report",
@@ -264,7 +286,7 @@ The public control plane strictly adheres to the MCP specification, providing st
 
 | Tool Name | Primary Role | Input Parameters Summary | Behavior & Effects |
 |:---|:---|:---|:---|
-| **`report`** | Unified Event Reporting | `message` (required), `event_type` (milestone/alert/completed/failed, default milestone), `task_id`, `step`, `epoch`, `metrics`, `agent_note`, `extra`, `gpu_host` | `milestone`: registers task progress, pushes green card with Agent analysis; `alert`: sets state to `WAITING`, freezes execution, pushes red interactive card, activates 30s timeout timer; `completed`/`failed`: terminal states |
+| **`report`** | Unified Event Reporting | `message` (required), `event_type` (milestone/alert/completed/failed, default milestone), `task_id`, `step`, `epoch`, `metrics`, `agent_note`, `extra`, `gpu_host` | `milestone`: registers task progress, pushes green card with Agent analysis; `alert`: sets state to `WAITING` (Agent pauses GPU execution), queues red interactive card, activates 30s timeout timer; `completed`/`failed`: terminal states |
 | **`poll_instruction`** | Decision Polling | `task_id`, `wait_timeout` (default 20s), `pop` (default True) | Agent suspends waiting for user decision; returns instruction when received and transitions state to `RECOVERING` |
 | **`ack_instruction`** | Self-Healing ACK | `task_id`, `instruction_id`, `action`, `status`, `solution`, `message` | Validates instruction, transitions state back to `RUNNING`, pushes self-healing success card to Feishu/Lark |
 | **`get_task_status`** | Status Query | `task_id` | Retrieves current lifecycle state, GPU host, pending mailbox instructions, and event statistics |
