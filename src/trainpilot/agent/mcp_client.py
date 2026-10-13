@@ -11,8 +11,7 @@ import logging
 import math
 import os
 import threading
-import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -113,7 +112,6 @@ class TrainPilotMCPClient:
         task_id: Optional[str] = None,
         timeout: float = 30.0,
         api_token: Optional[str] = None,
-        gpu_host: Optional[str] = None,
     ):
         """Initialize MCP client.
 
@@ -124,8 +122,6 @@ class TrainPilotMCPClient:
             task_id: Default task identifier. Resolves from TRAINPILOT_TASK_ID if omitted.
             timeout: Default timeout in seconds for operations.
             api_token: Optional API token for Bearer authorization. Resolves from TRAINPILOT_API_TOKEN if omitted.
-            gpu_host: Optional GPU server IP/hostname override. If omitted, the server
-                automatically determines the IP by analyzing incoming network requests.
         """
         raw_url = server_url or os.getenv("TRAINPILOT_GATEWAY_URL")
         if not raw_url:
@@ -145,10 +141,9 @@ class TrainPilotMCPClient:
 
         # Backwards compatibility alias
         self.sse_url = self.mcp_url
-        self.default_task_id = task_id or os.getenv("TRAINPILOT_TASK_ID", "default-task")
+        self.default_task_id = task_id or os.getenv("TRAINPILOT_TASK_ID", "train-task-default")
         self.timeout = timeout
         self.api_token = api_token or os.getenv("TRAINPILOT_API_TOKEN")
-        self.gpu_host = gpu_host
 
     def _resolve_task_id(self, task_id: Optional[str]) -> str:
         tid = task_id or self.default_task_id
@@ -193,19 +188,6 @@ class TrainPilotMCPClient:
         """Synchronously call a tool on the remote TrainPilot MCP Server."""
         return _run_coroutine_sync(self.call_tool_async(tool_name, arguments))
 
-    async def list_tools_async(self) -> List[str]:
-        """List all available tools on the remote MCP Server asynchronously over Streamable HTTP."""
-        async with self._create_http_client() as http_client:
-            async with streamable_http_client(self.mcp_url, http_client=http_client) as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    tools_res = await session.list_tools()
-                    return [t.name for t in tools_res.tools]
-
-    def list_tools(self) -> List[str]:
-        """Synchronously list all available tools on the remote MCP Server."""
-        return _run_coroutine_sync(self.list_tools_async())
-
     # High-level tool wrapper methods
 
     def report(
@@ -217,9 +199,7 @@ class TrainPilotMCPClient:
         epoch: Optional[int] = None,
         metrics: Optional[Dict[str, Any]] = None,
         agent_note: Optional[str] = None,
-        extra: Optional[Dict[str, Any]] = None,
         fail_silently: bool = True,
-        gpu_host: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Report any training event (milestone/alert/completed/failed) via the unified MCP tool.
 
@@ -231,7 +211,6 @@ class TrainPilotMCPClient:
             "task_id": tid,
             "message": message,
             "event_type": event_type,
-            "gpu_host": gpu_host or self.gpu_host,
         }
         if step is not None:
             args["step"] = step
@@ -241,8 +220,6 @@ class TrainPilotMCPClient:
             args["metrics"] = metrics
         if agent_note is not None:
             args["agent_note"] = agent_note
-        if extra is not None:
-            args["extra"] = extra
 
         try:
             return self.call_tool("report", args)
@@ -252,104 +229,29 @@ class TrainPilotMCPClient:
                 return {"success": False, "task_id": tid, "error": str(exc), "fail_silently": True}
             raise
 
-    def report_milestone(
-        self,
-        message: str,
-        task_id: Optional[str] = None,
-        step: Optional[int] = None,
-        epoch: Optional[int] = None,
-        metrics: Optional[Dict[str, Any]] = None,
-        agent_note: Optional[str] = None,
-        extra: Optional[Dict[str, Any]] = None,
-        fail_silently: bool = True,
-        gpu_host: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Report training milestone with AI note via MCP Server."""
-        return self.report(
-            message=message,
-            event_type="milestone",
-            task_id=task_id,
-            step=step,
-            epoch=epoch,
-            metrics=metrics,
-            agent_note=agent_note,
-            extra=extra,
-            fail_silently=fail_silently,
-            gpu_host=gpu_host,
-        )
-
-    def report_alert(
-        self,
-        message: str,
-        task_id: Optional[str] = None,
-        step: Optional[int] = None,
-        epoch: Optional[int] = None,
-        metrics: Optional[Dict[str, Any]] = None,
-        agent_note: Optional[str] = None,
-        extra: Optional[Dict[str, Any]] = None,
-        gpu_host: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Report training anomaly and freeze training via MCP Server."""
-        return self.report(
-            message=message,
-            event_type="alert",
-            task_id=task_id,
-            step=step,
-            epoch=epoch,
-            metrics=metrics,
-            agent_note=agent_note,
-            extra=extra,
-            fail_silently=False,
-            gpu_host=gpu_host,
-        )
-
     def poll_instruction(
         self,
         task_id: Optional[str] = None,
-        wait_timeout: float = 20.0,
-        pop: bool = True,
-        timeout: Optional[float] = None,
-        interval: float = 1.0,
-        **kwargs,
+        wait_timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Poll or long-poll for human instructions via MCP Server.
+        """Long-poll for a human decision; consumes it if one is waiting.
 
-        If timeout is provided and > 0, loops until an instruction becomes ready or timeout occurs.
+        Returns the InstructionResponse payload, whose `has_instruction` field says
+        whether a decision arrived.
         """
         tid = self._resolve_task_id(task_id)
-        if timeout is not None and timeout > 0:
-            start_time = time.time()
-            while True:
-                elapsed = time.time() - start_time
-                if elapsed >= timeout:
-                    raise TimeoutError(f"Timed out after {timeout} seconds waiting for decision on task {tid}")
-                current_wait = max(0.5, min(wait_timeout, timeout - elapsed))
-                res = self.call_tool("poll_instruction", {
-                    "task_id": tid,
-                    "wait_timeout": current_wait,
-                    "pop": pop,
-                })
-                if isinstance(res, dict) and (res.get("ready") or res.get("has_instruction")):
-                    return res
-                time.sleep(interval)
-        else:
-            return self.call_tool("poll_instruction", {
-                "task_id": tid,
-                "wait_timeout": wait_timeout,
-                "pop": pop,
-            })
+        args: Dict[str, Any] = {"task_id": tid}
+        if wait_timeout is not None:
+            args["wait_timeout"] = wait_timeout
+        return self.call_tool("poll_instruction", args)
 
     def ack_instruction(
         self,
         action: str = "self_resolve",
         status: str = "success",
         solution: str = "",
-        message: str = "",
         task_id: Optional[str] = None,
         instruction_id: Optional[str] = None,
-        step: Optional[int] = None,
-        epoch: Optional[int] = None,
-        metrics: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Acknowledge instruction execution via MCP Server."""
         tid = self._resolve_task_id(task_id)
@@ -358,16 +260,9 @@ class TrainPilotMCPClient:
             "action": action,
             "status": status,
             "solution": solution,
-            "message": message,
         }
         if instruction_id is not None:
             args["instruction_id"] = instruction_id
-        if step is not None:
-            args["step"] = step
-        if epoch is not None:
-            args["epoch"] = epoch
-        if metrics is not None:
-            args["metrics"] = metrics
 
         return self.call_tool("ack_instruction", args)
 
@@ -375,41 +270,3 @@ class TrainPilotMCPClient:
         """Query task state and mailbox via MCP Server."""
         tid = self._resolve_task_id(task_id)
         return self.call_tool("get_task_status", {"task_id": tid})
-
-    def list_tasks(
-        self,
-        limit: int = 100,
-        offset: int = 0,
-        state: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """List tasks via MCP Server."""
-        args: Dict[str, Any] = {
-            "limit": limit,
-            "offset": offset,
-        }
-        if state is not None:
-            args["state"] = state
-        return self.call_tool("list_tasks", args)
-
-    def submit_decision(
-        self,
-        action: str,
-        task_id: Optional[str] = None,
-        payload: Optional[Dict[str, Any]] = None,
-        operator: str = "mcp_client",
-    ) -> Dict[str, Any]:
-        """Submit a decision directly via MCP Server."""
-        tid = self._resolve_task_id(task_id)
-        args: Dict[str, Any] = {
-            "task_id": tid,
-            "action": action,
-            "operator": operator,
-        }
-        if payload is not None:
-            args["payload"] = payload
-        return self.call_tool("submit_decision", args)
-
-    # Duck-typing aliases for seamless TrainingGuardian and TrainPilotClient compatibility
-    notify_milestone = report_milestone
-    notify_alert = report_alert
-    get_status = get_task_status

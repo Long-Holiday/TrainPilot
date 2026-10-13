@@ -12,7 +12,6 @@ from trainpilot.server.config import settings
 from trainpilot.server.cleanup import default_cleanup
 from trainpilot.server.mailbox import default_mailbox
 from trainpilot.server.mcp_server import mcp_server
-from trainpilot.server.network import ClientIpMiddleware
 from trainpilot.server.routes.tasks import router as tasks_router
 from trainpilot.server.routes.webhook import router as webhook_router
 
@@ -69,9 +68,6 @@ app = FastAPI(
     version=__version__,
     lifespan=lifespan,
 )
-
-# Client IP extraction & tracking middleware (analyzes network requests from GPU agent)
-app.add_middleware(ClientIpMiddleware)
 
 # MCP Endpoint API Token Authentication
 app.add_middleware(McpAuthMiddleware)

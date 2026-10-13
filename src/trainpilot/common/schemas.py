@@ -1,10 +1,10 @@
 """Data contracts and Pydantic schemas for TrainPilot."""
 
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field
+from typing import Any, Dict, Optional
+from pydantic import AliasChoices, BaseModel, Field
 
-from trainpilot.common.states import ActionType, EventType, TaskState
+from trainpilot.common.states import EventType, TaskState
 
 
 def utc_now_iso() -> str:
@@ -27,48 +27,23 @@ class EventNotifyRequest(BaseModel):
         description="外部 AI 智能体 (agy/opencode/claude-code) 针对当前实际情况自主生成的阶段点评, "
         "将渲染到飞书里程碑卡片的 🤖 Agent 智能点评 区块",
     )
-    gpu_host: Optional[str] = Field(
-        default=None,
-        description="GPU 服务器 IP/主机名。Agent 首次请求时上报, 看门狗后续直接 ping 该地址判活, 无需定时心跳。",
-    )
     timestamp: str = Field(default_factory=utc_now_iso, description="ISO timestamp of event occurrence")
-
-
-class EventNotifyResponse(BaseModel):
-    """Response returned to GPU Agent upon event receipt."""
-
-    success: bool = Field(True, description="Whether the event was successfully recorded")
-    task_id: str = Field(..., description="Task identifier")
-    state: TaskState = Field(..., description="Current task state after processing event")
-    message: str = Field(..., description="Status summary message")
-    timestamp: str = Field(default_factory=utc_now_iso)
 
 
 class InstructionResponse(BaseModel):
     """Response payload when GPU Agent polls for pending instructions."""
 
-    ready: bool = Field(..., description="True if human has made a decision, False if still waiting")
+    has_instruction: bool = Field(
+        ...,
+        validation_alias=AliasChoices("has_instruction", "ready"),
+        description="True if human has made a decision, False if still waiting",
+    )
     status: TaskState = Field(..., description="Current task status in mailbox")
     instruction_id: Optional[str] = Field(None, description="Unique ID for the instruction to acknowledge")
     action: Optional[str] = Field(None, description="Action selected by human (e.g. self_resolve)")
     payload: Optional[Dict[str, Any]] = Field(default=None, description="Optional action parameters")
     decision_by: Optional[str] = Field(None, description="Operator identity who clicked the decision")
     decided_at: Optional[str] = Field(None, description="Timestamp of when decision was made")
-
-
-class InstructionAckRequest(BaseModel):
-    """Acknowledgment sent by GPU Agent after executing or failing an instruction."""
-
-    task_id: str = Field(..., description="Task identifier")
-    instruction_id: Optional[str] = Field(None, description="ID of the instruction executed")
-    action: str = Field(..., description="The action executed")
-    status: str = Field("success", description="Execution result: 'success' or 'failed'")
-    message: Optional[str] = Field(None, description="Execution log or error message")
-    solution: Optional[str] = Field(None, description="Optional solution summary for recovery notification")
-    step: Optional[int] = Field(None, description="Training step counter")
-    epoch: Optional[int] = Field(None, description="Training epoch counter")
-    metrics: Optional[Dict[str, Any]] = Field(default=None, description="Metrics upon recovery")
-    timestamp: str = Field(default_factory=utc_now_iso)
 
 
 class TaskDecisionRequest(BaseModel):
@@ -95,7 +70,6 @@ class TaskSummary(BaseModel):
     state: TaskState
     created_at: str
     updated_at: str
-    gpu_host: Optional[str] = None
     latest_step: Optional[int] = None
     latest_epoch: Optional[int] = None
     latest_metrics: Optional[Dict[str, Any]] = None

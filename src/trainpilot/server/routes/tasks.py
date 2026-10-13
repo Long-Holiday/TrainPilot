@@ -1,25 +1,23 @@
-"""FastAPI router for Agent-facing task APIs."""
+"""FastAPI router exposing the operator-facing task APIs.
+
+Agents talk to the control plane over MCP (`/mcp`); these REST endpoints exist for
+operations, dashboards, and decision injection (Web UI, Feishu webhook, tests).
+"""
 
 import logging
-import threading
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from trainpilot.common.schemas import (
-    EventNotifyRequest,
-    EventNotifyResponse,
-    InstructionAckRequest,
     InstructionResponse,
     TaskDecisionRequest,
     TaskSummary,
 )
-from trainpilot.common.states import EventType, TaskState
+from trainpilot.common.states import TaskState
 from trainpilot.server.auth import verify_api_token
 from trainpilot.server.background import feishu_dispatcher
-from trainpilot.server.config import settings
 from trainpilot.server.feishu.client import default_feishu_client
 from trainpilot.server.mailbox import TaskNotFoundError, default_mailbox
-from trainpilot.server.network import extract_client_ip
 
 logger = logging.getLogger("trainpilot.api.tasks")
 
@@ -28,174 +26,6 @@ router = APIRouter(
     tags=["Tasks"],
     dependencies=[Depends(verify_api_token)],
 )
-
-
-def _dispatch_feishu(req: EventNotifyRequest) -> None:
-    """Background delivery of Feishu cards (never blocks GPU training loop)."""
-    try:
-        if req.event_type == EventType.ALERT:
-            default_feishu_client.send_alert(
-                task_id=req.task_id,
-                message=req.message,
-                step=req.step,
-                epoch=req.epoch,
-                metrics=req.metrics,
-                extra=req.extra,
-                timeout_seconds=settings.alert_decision_timeout_seconds,
-                agent_note=req.agent_note,
-            )
-        elif req.event_type == EventType.MILESTONE:
-            default_feishu_client.send_milestone(
-                task_id=req.task_id,
-                message=req.message,
-                step=req.step,
-                epoch=req.epoch,
-                metrics=req.metrics,
-                agent_note=req.agent_note,
-                extra=req.extra,
-            )
-    except Exception as exc:
-        logger.error("Failed to forward event %s to Feishu: %s", req.event_type, exc)
-
-
-def _auto_self_resolve_callback(task_id: str, timeout_seconds: int) -> None:
-    """Timer callback: auto self-resolve if no human decision arrived in time."""
-    try:
-        instruction = default_mailbox.try_auto_resolve(
-            task_id=task_id,
-            action="self_resolve",
-            operator=f"系统自动决策（{timeout_seconds}s超时未决策）",
-            timeout_seconds=timeout_seconds,
-            payload={"timeout_seconds": timeout_seconds},
-        )
-        if instruction is None:
-            return
-        try:
-            default_feishu_client.update_card_to_resolved(
-                task_id=task_id,
-                action="self_resolve",
-                operator=instruction.decision_by or "系统自动决策",
-                resolved_at=instruction.decided_at,
-            )
-        except Exception as exc:
-            logger.warning("Failed to patch card after auto self-resolve for %s: %s", task_id, exc)
-    except Exception as exc:
-        logger.error("Auto self-resolve callback failed for task %s: %s", task_id, exc)
-
-
-def _schedule_auto_self_resolve(task_id: str) -> None:
-    """Schedule a daemon timer that auto self-resolves the alert after timeout."""
-    try:
-        timeout_seconds = int(settings.alert_decision_timeout_seconds)
-    except Exception:
-        timeout_seconds = 30
-    if timeout_seconds <= 0:
-        return
-    timer = threading.Timer(
-        timeout_seconds,
-        _auto_self_resolve_callback,
-        args=(task_id, timeout_seconds),
-    )
-    timer.daemon = True
-    timer.start()
-    logger.info("Scheduled auto self-resolve for task %s in %ss", task_id, timeout_seconds)
-
-
-@router.post("/notify", response_model=EventNotifyResponse, status_code=status.HTTP_200_OK)
-def notify_event(req: EventNotifyRequest, request: Request) -> EventNotifyResponse:
-    """Receive training events (alerts, milestones, completion) from GPU Agent."""
-    client_ip = extract_client_ip(request)
-    current_state = default_mailbox.record_event(req, client_ip=client_ip)
-
-    # Async dispatch: do not block the training loop on Feishu latency.
-    feishu_dispatcher.submit(_dispatch_feishu, req)
-
-    # 告警卡片：超过阈值无人工点击则服务端自动视为“自行解决”。
-    if req.event_type == EventType.ALERT:
-        _schedule_auto_self_resolve(req.task_id)
-
-    return EventNotifyResponse(
-        success=True,
-        task_id=req.task_id,
-        state=current_state,
-        message=f"Event {req.event_type.value} recorded. Current state: {current_state.value}",
-    )
-
-
-@router.get("/{task_id}/instruction", response_model=InstructionResponse)
-async def poll_instruction(
-    task_id: str,
-    request: Request,
-    pop: bool = Query(default=True, description="Whether to consume and transition state to RECOVERING"),
-    wait_timeout: float = Query(
-        default=0.0,
-        ge=0.0,
-        le=60.0,
-        description="Long-polling timeout in seconds. Blocks until decision is ready or timeout occurs. 0 for immediate response.",
-    ),
-) -> InstructionResponse:
-    """Poll for pending human instructions for a given task.
-
-    Supports native AsyncIO Long Polling: specify wait_timeout > 0 to hold connection
-    without consuming AnyIO thread pool workers until human decision arrives or timeout expires.
-    """
-    client_ip = extract_client_ip(request)
-    if client_ip:
-        default_mailbox.update_task_client_ip(task_id, client_ip)
-    try:
-        return await default_mailbox.get_instruction_async(
-            task_id, pop=pop, wait_timeout=wait_timeout
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
-
-
-@router.post("/{task_id}/ack", status_code=status.HTTP_200_OK)
-def ack_instruction(
-    task_id: str,
-    req: InstructionAckRequest,
-    request: Request,
-) -> dict:
-    """Acknowledge execution of an instruction by the GPU Agent."""
-    if req.task_id != task_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Task ID mismatch: path has {task_id}, body has {req.task_id}",
-        )
-    client_ip = extract_client_ip(request)
-    if client_ip:
-        default_mailbox.update_task_client_ip(task_id, client_ip)
-    try:
-        new_state = default_mailbox.ack_instruction(
-            task_id=task_id,
-            instruction_id=req.instruction_id,
-            action=req.action,
-            status=req.status,
-            message=req.message,
-        )
-    except TaskNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
-
-    # If successfully resolved, dispatch Feishu recovery card directly from ACK (eliminating duplicate notify)
-    if req.status.lower() == "success" and (req.action == "self_resolve" or req.solution):
-        solution_text = req.solution or req.message or "已完成现场自愈检查并恢复正常训练。"
-        feishu_dispatcher.submit(
-            default_feishu_client.send_recovery,
-            task_id=task_id,
-            solution=solution_text,
-            step=req.step,
-            epoch=req.epoch,
-            metrics=req.metrics,
-        )
-
-    return {
-        "success": True,
-        "task_id": task_id,
-        "state": new_state.value,
-        "message": f"Instruction acknowledged with status {req.status}",
-    }
 
 
 @router.post("/{task_id}/decision", response_model=InstructionResponse)
@@ -232,11 +62,8 @@ def submit_decision(
 
 
 @router.get("/{task_id}/status", response_model=TaskSummary)
-def get_task_status(task_id: str, request: Request) -> TaskSummary:
+def get_task_status(task_id: str) -> TaskSummary:
     """Retrieve full status for a specific training task."""
-    client_ip = extract_client_ip(request)
-    if client_ip:
-        default_mailbox.update_task_client_ip(task_id, client_ip)
     summary = default_mailbox.get_task(task_id)
     if not summary:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Task '{task_id}' not found in mailbox")

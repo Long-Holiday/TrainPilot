@@ -1,6 +1,5 @@
 """Unit tests for TaskCleanupService and retention housekeeping."""
 
-import time
 import pytest
 
 from trainpilot.common.states import TaskState

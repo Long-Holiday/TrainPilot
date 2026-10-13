@@ -1,15 +1,12 @@
 """Integration tests for TrainPilot MCP Client and CLI on GPU nodes."""
 
-import math
 import threading
 import time
 import pytest
 import uvicorn
-from starlette.applications import Starlette
 
 from trainpilot.agent.cli import _parse_key_value_or_json, main as cli_main
 from trainpilot.agent.mcp_client import TrainPilotMCPClient, _sanitize_for_json
-from trainpilot.agent.monitor import StopTrainingException, TrainingGuardian
 from trainpilot.common.states import TaskState
 from trainpilot.server.mailbox import default_mailbox
 from trainpilot.server.main import app as server_app
@@ -78,8 +75,9 @@ def test_mcp_client_e2e_tools(live_mcp_server):
     client = TrainPilotMCPClient(server_url=live_mcp_server, task_id=task_id)
 
     # 1. Report milestone
-    res = client.report_milestone(
+    res = client.report(
         message="Step 100 milestone",
+        event_type="milestone",
         step=100,
         epoch=1,
         metrics={"loss": 0.42},
@@ -88,12 +86,11 @@ def test_mcp_client_e2e_tools(live_mcp_server):
     assert res["success"] is True
     assert res["state"] == TaskState.RUNNING.value
 
-    # 2. Get task status (gpu_host auto-reported on first call)
+    # 2. Get task status
     status_res = client.get_task_status()
     assert status_res["success"] is True
     assert status_res["task"]["task_id"] == task_id
     assert status_res["task"]["latest_step"] == 100
-    assert status_res["task"]["gpu_host"]
 
     # 3. Report alert via unified report tool
     alert_res = client.report(
@@ -105,13 +102,14 @@ def test_mcp_client_e2e_tools(live_mcp_server):
     assert alert_res["success"] is True
     assert alert_res["state"] == TaskState.WAITING.value
 
-    # 4. Submit decision
-    dec_res = client.submit_decision(action="self_resolve", operator="reviewer")
-    assert dec_res["success"] is True
-    instruction_id = dec_res["instruction"]["instruction_id"]
+    # 4. A human decision is injected on the operator surface (REST), not by the agent
+    instruction = default_mailbox.submit_decision(
+        task_id=task_id, action="self_resolve", operator="reviewer"
+    )
+    instruction_id = instruction.instruction_id
 
-    # 5. Poll instruction
-    poll_res = client.poll_instruction(wait_timeout=2.0, pop=True)
+    # 5. Poll instruction (consumes it, pop is implicit)
+    poll_res = client.poll_instruction(wait_timeout=2.0)
     assert poll_res["has_instruction"] is True
     assert poll_res["action"] == "self_resolve"
     assert poll_res["instruction_id"] == instruction_id
@@ -127,35 +125,6 @@ def test_mcp_client_e2e_tools(live_mcp_server):
     assert ack_res["state"] == TaskState.RUNNING.value
 
 
-def test_training_guardian_with_mcp_client(live_mcp_server):
-    """Test TrainingGuardian intercepting NaN and resolving via TrainPilotMCPClient."""
-    task_id = "test-guardian-mcp-task"
-    client = TrainPilotMCPClient(server_url=live_mcp_server, task_id=task_id)
-    guardian = TrainingGuardian(client=client, poll_interval=0.5, poll_timeout=5.0)
-
-    # In a separate thread, simulate engineer submitting decision after alert
-    def _delayed_decision():
-        time.sleep(1.0)
-        client.submit_decision(
-            action="self_resolve",
-            payload={"solution": "Lowered learning rate"},
-            operator="feishu_user",
-        )
-
-    t = threading.Thread(target=_delayed_decision, daemon=True)
-    t.start()
-
-    # Normal step
-    guardian.check_and_handle_loss(0.5, step=1)
-
-    # Anomaly step: Loss NaN
-    guardian.check_and_handle_loss(float("nan"), step=2)
-
-    # Verify task successfully restored to RUNNING
-    status = client.get_task_status()
-    assert status["task"]["state"] == TaskState.RUNNING.value
-
-
 def test_cli_parser_and_subcommands(live_mcp_server):
     """Test agent CLI argument parsing and tool calls."""
     # Test key-value parser
@@ -165,11 +134,11 @@ def test_cli_parser_and_subcommands(live_mcp_server):
     parsed_json = _parse_key_value_or_json('{"loss": 0.33}')
     assert parsed_json == {"loss": 0.33}
 
-    # Test CLI execution for report-milestone
+    # Test CLI execution for report (milestone is the default event type)
     code = cli_main([
         "--server-url", live_mcp_server,
         "--task-id", "test-cli-task",
-        "report-milestone",
+        "report",
         "--message", "CLI epoch completed",
         "--step", "50",
         "--metrics", "loss=0.35",
@@ -189,11 +158,11 @@ def test_cli_parser_and_subcommands(live_mcp_server):
     ])
     assert code_report == 0
 
-    # Test CLI execution for get-status
+    # Test CLI execution for status
     code_st = cli_main([
         "--server-url", live_mcp_server,
         "--task-id", "test-cli-task",
-        "get-status",
+        "status",
     ])
     assert code_st == 0
 

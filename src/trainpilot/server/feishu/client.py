@@ -168,7 +168,6 @@ class FeishuCardClient:
 
         if self._lark_client and message_id:
             try:
-                import lark_oapi as lark
                 from lark_oapi.api.im.v1 import PatchMessageRequest, PatchMessageRequestBody
 
                 request = PatchMessageRequest.builder() \
@@ -214,7 +213,6 @@ class FeishuCardClient:
 
         if self._lark_client and self.settings.feishu_receiver_id:
             try:
-                import lark_oapi as lark
                 from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
 
                 request = CreateMessageRequest.builder() \

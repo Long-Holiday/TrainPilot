@@ -1,6 +1,5 @@
 """Unit and integration tests for TrainPilot MCP Server."""
 
-import json
 from unittest.mock import Mock
 import pytest
 from trainpilot.common.states import TaskState
@@ -10,13 +9,9 @@ import trainpilot.server.mcp_server as server
 from trainpilot.server.mcp_server import (
     ack_instruction,
     get_task_status,
-    list_tasks,
     mcp_server,
     poll_instruction,
     report,
-    resource_task_list,
-    resource_task_status,
-    submit_decision,
 )
 
 
@@ -68,7 +63,7 @@ def test_report_milestone_tool():
 
 @pytest.mark.asyncio
 async def test_report_alert_and_decision_lifecycle():
-    """Test report_alert, submit_decision, poll_instruction, and ack_instruction tools."""
+    """Test report(alert), decision injection, poll_instruction, and ack_instruction."""
     task_id = "test-mcp-alert-cycle"
 
     # 1. Report alert -> transitions to WAITING
@@ -83,7 +78,7 @@ async def test_report_alert_and_decision_lifecycle():
     assert alert_res["state"] == TaskState.WAITING.value
     assert alert_res["next_action"] == {
         "tool": "poll_instruction",
-        "arguments": {"task_id": task_id, "pop": True},
+        "arguments": {"task_id": task_id},
     }
     server.default_feishu_client.send_alert.assert_called_once()
     server._schedule_auto_self_resolve.assert_called_once_with(task_id)
@@ -93,18 +88,17 @@ async def test_report_alert_and_decision_lifecycle():
     assert status_res["success"] is True
     assert status_res["task"]["state"] == TaskState.WAITING.value
 
-    # 2. Submit decision -> transitions to RESOLVED
-    dec_res = submit_decision(
+    # 2. A human decision is injected (via the REST/operator surface) -> RESOLVED
+    instruction = default_mailbox.submit_decision(
         task_id=task_id,
         action="self_resolve",
         operator="lead_engineer",
     )
-    assert dec_res["success"] is True
-    instruction_id = dec_res["instruction"]["instruction_id"]
+    instruction_id = instruction.instruction_id
     assert instruction_id is not None
 
-    # 3. Poll instruction with pop=True -> transitions to RECOVERING
-    poll_res = await poll_instruction(task_id=task_id, wait_timeout=0.0, pop=True)
+    # 3. Poll instruction -> consumes it and transitions to RECOVERING
+    poll_res = await poll_instruction(task_id=task_id, wait_timeout=0.0)
     assert poll_res["has_instruction"] is True
     assert poll_res["action"] == "self_resolve"
     assert poll_res["instruction_id"] == instruction_id
@@ -125,53 +119,15 @@ async def test_report_alert_and_decision_lifecycle():
 
     task_after = default_mailbox.get_task(task_id)
     assert task_after.state == TaskState.RUNNING
+    # The recovery card must carry the step/metrics from the last report: the agent is
+    # no longer asked to re-send them on ack, so they can only come from the TaskRecord.
     server.default_feishu_client.send_recovery.assert_called_once_with(
         task_id=task_id,
         solution="Rolled back to step 950 and reduced learning rate to 5e-5",
-        step=None,
+        step=1000,
         epoch=None,
-        metrics=None,
+        metrics={"loss": "NaN"},
     )
-
-
-def test_first_report_registers_gpu_host_and_list_tasks():
-    """Test gpu_host registration on first report plus list_tasks tools."""
-    task_id = "test-mcp-gpu"
-    res = report(
-        task_id=task_id,
-        message="Epoch 1 started",
-        step=200,
-        metrics={"loss": 0.5},
-        gpu_host="10.0.0.9",
-    )
-    assert res["success"] is True
-
-    # List tasks
-    list_res = list_tasks(limit=10)
-    assert list_res["success"] is True
-    assert list_res["count"] >= 1
-    tids = [t["task_id"] for t in list_res["tasks"]]
-    assert task_id in tids
-    task_entry = next(t for t in list_res["tasks"] if t["task_id"] == task_id)
-    assert task_entry["gpu_host"] == "10.0.0.9"
-
-
-def test_mcp_resources():
-    """Test MCP resources for reading task state and list."""
-    task_id = "test-mcp-res"
-    report(task_id=task_id, message="Starting run", step=1)
-
-    # Read status resource
-    raw_status = resource_task_status(task_id=task_id)
-    status_json = json.loads(raw_status)
-    assert status_json["task_id"] == task_id
-    assert status_json["state"] == TaskState.RUNNING.value
-
-    # Read list resource
-    raw_list = resource_task_list()
-    list_json = json.loads(raw_list)
-    assert isinstance(list_json, list)
-    assert any(t["task_id"] == task_id for t in list_json)
 
 
 def test_report_defaults_task_id_and_event_type():
@@ -210,29 +166,60 @@ def test_report_terminal_event_types():
     assert res_fail["state"] == TaskState.FAILED.value
 
 
+def test_get_task_status_unknown_task_does_not_create_it():
+    """Reading an unknown task reports not-found instead of fabricating a task row."""
+    res = get_task_status(task_id="test-unknown-task")
+    assert res["success"] is False
+    assert res["task_id"] == "test-unknown-task"
+    assert "not found" in res["error"]
+    assert default_mailbox.get_task("test-unknown-task") is None
+    assert default_mailbox.list_tasks() == []
+
+
 @pytest.mark.asyncio
 async def test_agent_guidance_exposed_in_mcp_metadata():
     """Check metadata seen by AI clients, not just Python function docstrings."""
     instructions = mcp_server.instructions
     assert "report(event_type='alert')" in instructions
     assert "process exit status" in instructions
-    assert "before attempting repair" in instructions
+    assert "BEFORE repair, restart, or abandonment" in instructions
     assert "has_instruction=true" in instructions
     assert "instruction_id" in instructions
-    assert "Connecting MCP does not automatically monitor" in instructions
+    assert "Connecting MCP does not monitor or pause GPU processes" in instructions
 
     tools = {tool.name: tool for tool in await mcp_server.list_tools()}
     assert set(tools) == {
         "report", "poll_instruction", "ack_instruction", "get_task_status",
-        "list_tasks", "submit_decision",
     }
-    assert "REQUIRED" in tools["report"].description
-    assert "CUDA OOM" in tools["report"].description
-    assert "do not" in tools["report"].description
-    assert "keep polling" in tools["poll_instruction"].description
-    assert "AFTER executing" in tools["ack_instruction"].description
-    assert "verify training can resume" in tools["ack_instruction"].description
+    # Behaviour rules belong to `instructions`; docstrings must point there, not restate them.
+    assert "specified in the server instructions" in tools["report"].description
+    assert "has_instruction" in tools["poll_instruction"].description
+    assert "after you have executed it" in tools["ack_instruction"].description
+    assert "instruction_id" in tools["ack_instruction"].description
+    assert "instruction-mailbox summary" in tools["get_task_status"].description
     assert tools["report"].input_schema["properties"]["event_type"]["default"] == "milestone"
+
+
+@pytest.mark.asyncio
+async def test_tool_input_schemas_are_exactly_the_agent_contract():
+    """Pin the exposed parameter sets so signature drift cannot slip through.
+
+    Every other test calls these tools as Python functions, which is blind to a
+    leftover (or missing) parameter in the MCP schema.
+    """
+    tools = {tool.name: tool for tool in await mcp_server.list_tools()}
+    expected = {
+        "report": {"message", "event_type", "task_id", "step", "epoch", "metrics", "agent_note"},
+        "poll_instruction": {"task_id", "wait_timeout"},
+        "ack_instruction": {"task_id", "instruction_id", "action", "status", "solution"},
+        "get_task_status": {"task_id"},
+    }
+    for name, props in expected.items():
+        assert set(tools[name].input_schema["properties"]) == props, name
+    assert tools["report"].input_schema["required"] == ["message"]
+
+    # The agent surface is tools-only; the resource listings were removed.
+    assert await mcp_server.list_resources() == []
 
 
 @pytest.mark.parametrize("message,metrics", [
@@ -247,10 +234,13 @@ def test_alert_delivery_and_next_action(message, metrics):
     )
     assert result["success"] is True
     assert result["state"] == TaskState.WAITING.value
-    assert result["next_action"]["arguments"]["task_id"] == "test-agent-error"
-    assert "asynchronous, not confirmed" in result["guidance"]
-    assert "WAITING does not pause" in result["guidance"]
-    assert "instruction_id" in result["guidance"]
+    assert result["next_action"] == {
+        "tool": "poll_instruction",
+        "arguments": {"task_id": "test-agent-error"},
+    }
+    assert "asynchronous and not confirmed" in result["guidance"]
+    assert "has_instruction=true" in result["guidance"]
+    assert "ack_instruction" in result["guidance"]
     server.default_feishu_client.send_alert.assert_called_once_with(
         task_id="test-agent-error", message=message, step=42, epoch=None,
         metrics=metrics, extra=None,
@@ -259,6 +249,44 @@ def test_alert_delivery_and_next_action(message, metrics):
     )
     server.default_feishu_client.send_milestone.assert_not_called()
     server._schedule_auto_self_resolve.assert_called_once_with("test-agent-error")
+
+
+def test_auto_self_resolve_callback_respects_the_timeout_window():
+    """The timer callback must not resolve an alert that may still get a human decision."""
+    task_id = "test-auto-resolve"
+    report(task_id=task_id, message="Loss NaN", event_type="alert", step=10)
+
+    # Alert is brand new: a 30s window has not elapsed, so nothing happens.
+    server._auto_self_resolve_callback(task_id, 30)
+    task = default_mailbox.get_task(task_id)
+    assert task.state == TaskState.WAITING
+    assert task.pending_instruction is None
+    server.default_feishu_client.update_card_to_resolved.assert_not_called()
+
+
+def test_auto_self_resolve_callback_resolves_on_timeout():
+    """Past the window, the alert is auto-resolved and the Feishu card is patched."""
+    task_id = "test-auto-resolve-elapsed"
+    report(task_id=task_id, message="Loss NaN", event_type="alert", step=10)
+
+    server._auto_self_resolve_callback(task_id, 0)
+
+    task = default_mailbox.get_task(task_id)
+    assert task.state == TaskState.RESOLVED
+    assert task.pending_instruction is not None
+    assert task.pending_instruction.action == "self_resolve"
+    assert task.pending_instruction.payload["auto_resolved"] is True
+    server.default_feishu_client.update_card_to_resolved.assert_called_once()
+    assert server.default_feishu_client.update_card_to_resolved.call_args.kwargs["task_id"] == task_id
+
+
+def test_auto_self_resolve_callback_ignores_unknown_and_non_waiting_tasks():
+    server._auto_self_resolve_callback("test-never-reported", 0)
+    assert default_mailbox.get_task("test-never-reported") is None
+
+    report(task_id="test-happy-task", message="Epoch 1 done", step=5)
+    server._auto_self_resolve_callback("test-happy-task", 0)
+    assert default_mailbox.get_task("test-happy-task").state == TaskState.RUNNING
 
 
 @pytest.mark.parametrize("event_type,state", [

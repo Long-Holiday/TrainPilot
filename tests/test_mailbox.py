@@ -37,9 +37,9 @@ def test_mailbox_lifecycle_state_machine(mailbox: TaskMailboxManager):
     st = mailbox.record_event(a_req)
     assert st == TaskState.WAITING
 
-    # 3. Before decision, polling returns not ready
+    # 3. Before decision, polling returns has_instruction=False
     inst = mailbox.get_instruction(task_id, pop=False)
-    assert inst.ready is False
+    assert inst.has_instruction is False
     assert inst.status == TaskState.WAITING
 
     # 4. Human submits decision -> RESOLVED
@@ -48,7 +48,7 @@ def test_mailbox_lifecycle_state_machine(mailbox: TaskMailboxManager):
         action="self_resolve",
         operator="lead_researcher",
     )
-    assert inst_submitted.ready is True
+    assert inst_submitted.has_instruction is True
     assert inst_submitted.action == "self_resolve"
 
     task = mailbox.get_task(task_id)
@@ -56,15 +56,15 @@ def test_mailbox_lifecycle_state_machine(mailbox: TaskMailboxManager):
 
     # 5. Agent polls with pop=True -> RECOVERING
     inst_polled = mailbox.get_instruction(task_id, pop=True)
-    assert inst_polled.ready is True
+    assert inst_polled.has_instruction is True
     assert inst_polled.action == "self_resolve"
 
     task_after_pop = mailbox.get_task(task_id)
     assert task_after_pop.state == TaskState.RECOVERING
 
-    # Subsequent poll before ack returns not ready
+    # Subsequent poll before ack returns has_instruction=False
     empty_poll = mailbox.get_instruction(task_id, pop=True)
-    assert empty_poll.ready is False
+    assert empty_poll.has_instruction is False
 
     # 6. Agent acks success -> RUNNING
     st_after_ack = mailbox.ack_instruction(
@@ -85,25 +85,6 @@ def test_mailbox_lifecycle_state_machine(mailbox: TaskMailboxManager):
     )
     st_final = mailbox.record_event(c_req)
     assert st_final == TaskState.COMPLETED
-
-
-def test_first_request_registers_gpu_host(mailbox: TaskMailboxManager):
-    task_id = "test-gpu-host"
-    req = EventNotifyRequest(
-        task_id=task_id,
-        event_type=EventType.MILESTONE,
-        message="Epoch 1 started",
-        step=25,
-        metrics={"loss": 0.85},
-        gpu_host="10.0.0.5",
-    )
-    mailbox.record_event(req)
-
-    task = mailbox.get_task(task_id)
-    assert task is not None
-    assert task.latest_step == 25
-    assert task.latest_metrics["loss"] == 0.85
-    assert task.gpu_host == "10.0.0.5"
 
 
 def test_mailbox_tasks_count(mailbox: TaskMailboxManager):

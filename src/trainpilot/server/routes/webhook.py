@@ -3,7 +3,7 @@
 import json
 import logging
 from typing import Any, Dict
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, status
 
 from trainpilot.server.config import settings
 from trainpilot.server.feishu.cards import build_resolved_card

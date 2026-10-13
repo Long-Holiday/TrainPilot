@@ -53,7 +53,6 @@ class SQLiteStorage:
                     state TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    gpu_host TEXT,
                     latest_step INTEGER,
                     latest_epoch INTEGER,
                     latest_metrics_json TEXT,
@@ -71,14 +70,13 @@ class SQLiteStorage:
             cols = [r["name"] for r in cur.fetchall()]
             if "feishu_message_id" not in cols:
                 cur.execute("ALTER TABLE tasks ADD COLUMN feishu_message_id TEXT;")
-            if "gpu_host" not in cols:
-                cur.execute("ALTER TABLE tasks ADD COLUMN gpu_host TEXT;")
-            if "last_heartbeat_at" in cols:
-                try:
-                    cur.execute("ALTER TABLE tasks DROP COLUMN last_heartbeat_at;")
-                except Exception:
-                    # Old SQLite without DROP COLUMN support: leave the column unused.
-                    pass
+            for obsolete in ("last_heartbeat_at", "gpu_host"):
+                if obsolete in cols:
+                    try:
+                        cur.execute(f"ALTER TABLE tasks DROP COLUMN {obsolete};")
+                    except Exception:
+                        # Old SQLite without DROP COLUMN support: leave the column unused.
+                        pass
 
             cur.execute(
                 """
@@ -134,7 +132,6 @@ class SQLiteStorage:
             else None
         )
         feishu_msg_id = getattr(task, "feishu_message_id", None)
-        gpu_host = getattr(task, "gpu_host", None)
 
         with self._lock:
             cur = self._conn.cursor()
@@ -150,15 +147,14 @@ class SQLiteStorage:
             cur.execute(
                 """
                 INSERT INTO tasks (
-                    task_id, state, created_at, updated_at, gpu_host,
+                    task_id, state, created_at, updated_at,
                     latest_step, latest_epoch, latest_metrics_json, latest_message,
                     pending_instruction_json, latest_instruction_json,
                     last_alert_fingerprint, last_alert_at, feishu_message_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(task_id) DO UPDATE SET
                     state = excluded.state,
                     updated_at = excluded.updated_at,
-                    gpu_host = COALESCE(excluded.gpu_host, tasks.gpu_host),
                     latest_step = excluded.latest_step,
                     latest_epoch = excluded.latest_epoch,
                     latest_metrics_json = excluded.latest_metrics_json,
@@ -174,7 +170,6 @@ class SQLiteStorage:
                     task.state.value if hasattr(task.state, "value") else str(task.state),
                     task.created_at,
                     task.updated_at,
-                    gpu_host,
                     task.latest_step,
                     task.latest_epoch,
                     latest_metrics_json,
@@ -410,14 +405,12 @@ class SQLiteStorage:
 
         keys = r.keys()
         feishu_msg_id = r["feishu_message_id"] if "feishu_message_id" in keys else None
-        gpu_host = r["gpu_host"] if "gpu_host" in keys else None
 
         return TaskRecord(
             task_id=t_id,
             state=TaskState(r["state"]),
             created_at=r["created_at"],
             updated_at=r["updated_at"],
-            gpu_host=gpu_host,
             latest_step=r["latest_step"],
             latest_epoch=r["latest_epoch"],
             latest_metrics=latest_metrics,

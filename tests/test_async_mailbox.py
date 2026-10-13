@@ -5,7 +5,7 @@ import time
 import pytest
 
 from trainpilot.common.schemas import EventNotifyRequest
-from trainpilot.common.states import EventType, TaskState
+from trainpilot.common.states import EventType
 from trainpilot.server.mailbox import default_mailbox
 
 
@@ -18,7 +18,7 @@ def clean_mailbox():
 
 @pytest.mark.asyncio
 async def test_async_long_polling_immediate_return():
-    """Async fast path returns immediately when instruction is already ready."""
+    """Async fast path returns immediately when instruction is already available."""
     task_id = "task-async-01"
     default_mailbox.record_event(
         EventNotifyRequest(task_id=task_id, event_type=EventType.ALERT, message="NaN")
@@ -29,7 +29,7 @@ async def test_async_long_polling_immediate_return():
     res = await default_mailbox.get_instruction_async(task_id, pop=True, wait_timeout=5.0)
     elapsed = time.time() - start
 
-    assert res.ready is True
+    assert res.has_instruction is True
     assert res.action == "self_resolve"
     assert res.decision_by == "lead_eng"
     assert elapsed < 0.2
@@ -47,7 +47,7 @@ async def test_async_long_polling_timeout():
     res = await default_mailbox.get_instruction_async(task_id, pop=True, wait_timeout=0.5)
     elapsed = time.time() - start
 
-    assert res.ready is False
+    assert res.has_instruction is False
     assert 0.45 <= elapsed < 1.0
 
 
@@ -72,7 +72,7 @@ async def test_async_long_polling_instant_wake_up():
     default_mailbox.submit_decision(task_id, action="stop_training", operator="safety_agent")
 
     inst, elapsed = await poll_task
-    assert inst.ready is True
+    assert inst.has_instruction is True
     assert inst.action == "stop_training"
     assert inst.decision_by == "safety_agent"
     assert elapsed < 1.0
@@ -106,5 +106,5 @@ async def test_concurrent_async_long_polling():
 
     assert len(results) == num_tasks
     for i, tid in enumerate(tasks):
-        assert results[tid].ready is True
+        assert results[tid].has_instruction is True
         assert results[tid].action == f"action_{i}"

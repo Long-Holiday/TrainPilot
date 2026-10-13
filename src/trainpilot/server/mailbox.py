@@ -56,8 +56,6 @@ class TaskRecord:
     state: TaskState = TaskState.RUNNING
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
-    # GPU 服务器 IP/主机名: 从网络请求或 Agent 上报中获取
-    gpu_host: Optional[str] = None
     latest_step: Optional[int] = None
     latest_epoch: Optional[int] = None
     latest_metrics: Optional[Dict[str, Any]] = None
@@ -176,7 +174,7 @@ class TaskMailboxManager:
             logger.exception("Failed to persist %s for task %s", context, task.task_id)
             raise
 
-    def record_event(self, req: EventNotifyRequest, client_ip: Optional[str] = None) -> TaskState:
+    def record_event(self, req: EventNotifyRequest) -> TaskState:
         """Process an incoming event from the GPU Agent and transition states."""
         with self._lock:
             was_cached = req.task_id in self._tasks
@@ -184,15 +182,6 @@ class TaskMailboxManager:
             previous = copy.deepcopy(task)
             task.updated_at = utc_now_iso()
             task.latest_message = req.message
-            # 分析 GPU 端网络请求自动获取客户端 IP (gpu_host):
-            # 优先从当前网络请求中分析提取的 client_ip 或 contextvar,
-            # 若无网络请求(例如纯离线测试或直接调用)则回退到 req.gpu_host。
-            from trainpilot.server.network import get_current_client_ip, normalize_client_ip
-            detected_ip = normalize_client_ip(client_ip or get_current_client_ip())
-            req_ip = normalize_client_ip(getattr(req, "gpu_host", None))
-            _gpu = detected_ip or req_ip
-            if _gpu and _gpu != task.gpu_host:
-                task.gpu_host = _gpu
             if req.step is not None:
                 task.latest_step = req.step
             if req.epoch is not None:
@@ -261,41 +250,6 @@ class TaskMailboxManager:
 
             return task.state
 
-    def set_task_gpu_host(self, task_id: str, gpu_host: str) -> None:
-        """显式登记/更新任务的 GPU 地址(首次请求上报的等价操作)。"""
-        gpu = (gpu_host or "").strip()
-        if not gpu:
-            raise ValueError("gpu_host must be a non-empty IP/hostname")
-        with self._lock:
-            was_cached = task_id in self._tasks
-            task = self._get_or_create(task_id, persist_new=False)
-            previous = copy.deepcopy(task)
-            task.gpu_host = gpu
-            self._persist_task_or_restore(task, previous, was_cached, "gpu host registration")
-
-    def update_task_client_ip(self, task_id: str, client_ip: Optional[str]) -> bool:
-        """根据从 Agent 网络请求中分析得到的客户端 IP 自动登记/更新任务的 GPU 主机地址。
-
-        Returns:
-            True if the IP was updated or registered, False otherwise.
-        """
-        from trainpilot.server.network import normalize_client_ip
-        ip = normalize_client_ip(client_ip)
-        if not ip:
-            return False
-        with self._lock:
-            was_cached = task_id in self._tasks
-            task = self._get_or_create(task_id, persist_new=False)
-            if task.gpu_host != ip:
-                previous = copy.deepcopy(task)
-                now_iso = utc_now_iso()
-                task.gpu_host = ip
-                task.updated_at = now_iso
-                self._persist_task_or_restore(task, previous, was_cached, "client ip update from network request")
-                logger.info("Updated GPU host for task %s to %s via network request analysis", task_id, ip)
-                return True
-        return False
-
     def _notify_instruction_waiters(self, task_id: str) -> None:
         """Wake up any pending long-polling requests (sync or async) waiting for this task's decision."""
         # 1. Wake up synchronous waiters
@@ -336,7 +290,7 @@ class TaskMailboxManager:
             now_iso = utc_now_iso()
 
             instruction = InstructionResponse(
-                ready=True,
+                has_instruction=True,
                 status=TaskState.RESOLVED,
                 instruction_id=inst_id,
                 action=action,
@@ -392,7 +346,7 @@ class TaskMailboxManager:
             auto_payload.setdefault("auto_resolved", True)
             auto_payload.setdefault("timeout_seconds", timeout_seconds)
             instruction = InstructionResponse(
-                ready=True,
+                has_instruction=True,
                 status=TaskState.RESOLVED,
                 instruction_id=inst_id,
                 action=action,
@@ -421,13 +375,13 @@ class TaskMailboxManager:
     ) -> InstructionResponse:
         """Poll instructions for a task with Long Polling support.
 
-        If wait_timeout > 0 and no instruction is ready, blocks up to wait_timeout
+        If wait_timeout > 0 and no instruction is available, blocks up to wait_timeout
         seconds waiting for submit_decision or try_auto_resolve, waking up immediately.
         """
-        # 1. Fast path: check if instruction is already ready
+        # 1. Fast path: check if instruction is already available
         with self._lock:
             task = self._get_existing(task_id)
-            if task.pending_instruction and task.pending_instruction.ready:
+            if task.pending_instruction and task.pending_instruction.has_instruction:
                 instruction = task.pending_instruction
                 if pop:
                     previous = copy.deepcopy(task)
@@ -450,7 +404,7 @@ class TaskMailboxManager:
 
             if wait_timeout <= 0.0:
                 return InstructionResponse(
-                    ready=False,
+                    has_instruction=False,
                     status=task.state,
                     instruction_id=None,
                     action=None,
@@ -473,7 +427,7 @@ class TaskMailboxManager:
                 waiters.remove(wait_event)
 
             task = self._get_existing(task_id)
-            if task.pending_instruction and task.pending_instruction.ready:
+            if task.pending_instruction and task.pending_instruction.has_instruction:
                 instruction = task.pending_instruction
                 if pop:
                     previous = copy.deepcopy(task)
@@ -495,7 +449,7 @@ class TaskMailboxManager:
                 return instruction
 
             return InstructionResponse(
-                ready=False,
+                has_instruction=False,
                 status=task.state,
                 instruction_id=None,
                 action=None,
@@ -512,10 +466,10 @@ class TaskMailboxManager:
         Does NOT block any OS thread or FastAPI/AnyIO thread pool.
         Wakes up immediately when submit_decision or try_auto_resolve is called.
         """
-        # 1. Fast path: check if instruction is already ready
+        # 1. Fast path: check if instruction is already available
         with self._lock:
             task = self._get_existing(task_id)
-            if task.pending_instruction and task.pending_instruction.ready:
+            if task.pending_instruction and task.pending_instruction.has_instruction:
                 instruction = task.pending_instruction
                 if pop:
                     previous = copy.deepcopy(task)
@@ -538,7 +492,7 @@ class TaskMailboxManager:
 
             if wait_timeout <= 0.0:
                 return InstructionResponse(
-                    ready=False,
+                    has_instruction=False,
                     status=task.state,
                     instruction_id=None,
                     action=None,
@@ -565,7 +519,7 @@ class TaskMailboxManager:
         # 3. Re-acquire lock and check again
         with self._lock:
             task = self._get_existing(task_id)
-            if task.pending_instruction and task.pending_instruction.ready:
+            if task.pending_instruction and task.pending_instruction.has_instruction:
                 instruction = task.pending_instruction
                 if pop:
                     previous = copy.deepcopy(task)
@@ -587,7 +541,7 @@ class TaskMailboxManager:
                 return instruction
 
             return InstructionResponse(
-                ready=False,
+                has_instruction=False,
                 status=task.state,
                 instruction_id=None,
                 action=None,
@@ -759,7 +713,6 @@ class TaskMailboxManager:
             state=task.state,
             created_at=task.created_at,
             updated_at=task.updated_at,
-            gpu_host=task.gpu_host,
             latest_step=task.latest_step,
             latest_epoch=task.latest_epoch,
             latest_metrics=task.latest_metrics,

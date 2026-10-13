@@ -2,7 +2,6 @@
 
 import os
 import subprocess
-import pytest
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 START_SH = os.path.join(PROJECT_ROOT, "start.sh")

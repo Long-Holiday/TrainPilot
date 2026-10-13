@@ -34,7 +34,7 @@ def test_sqlite_storage_crud_and_reload(temp_db):
         latest_metrics={"loss": 0.35},
         latest_message="Loss spike detected",
         pending_instruction=InstructionResponse(
-            ready=True,
+            has_instruction=True,
             status=TaskState.RESOLVED,
             instruction_id="inst_123",
             action="self_resolve",
@@ -139,7 +139,7 @@ def test_mailbox_integrated_with_sqlite_storage(temp_db):
     # 2. Submit decision & poll
     mailbox.submit_decision("task-mb-sql", action="self_resolve", operator="tester")
     instruction = mailbox.get_instruction("task-mb-sql", pop=True)
-    assert instruction.ready is True
+    assert instruction.has_instruction is True
     assert instruction.action == "self_resolve"
     assert mailbox.get_task("task-mb-sql").state == TaskState.RECOVERING
 
@@ -303,7 +303,6 @@ def test_disabled_persistence_uses_process_local_database():
             event_type=EventType.MILESTONE,
             message="Step 1",
             step=1,
-            gpu_host="127.0.0.1",
         )
     )
     assert mailbox.get_task("memory-only") is not None

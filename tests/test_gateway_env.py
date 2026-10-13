@@ -8,7 +8,6 @@ import pytest
 from trainpilot.common.gateway import (
     resolve_bind_host,
     resolve_gateway_url,
-    resolve_port,
     resolve_public_host,
 )
 from trainpilot.server.config import ServerSettings
@@ -84,15 +83,6 @@ def test_server_settings_effective_bind_host():
     s3 = ServerSettings(host="0.0.0.0", port=29580)
     assert s3.public_host == "127.0.0.1"
     assert s3.advertised_gateway_url == "http://127.0.0.1:29580"
-
-
-def test_client_uses_host_fallback(monkeypatch):
-    from trainpilot.agent.client import TrainPilotClient
-
-    monkeypatch.setenv("TRAINPILOT_HOST", "35.202.16.245")
-    monkeypatch.setenv("TRAINPILOT_PORT", "28780")
-    c = TrainPilotClient(task_id="t1")
-    assert c.gateway_url == "http://35.202.16.245:28780"
 
 
 def test_start_script_clean_flags():
