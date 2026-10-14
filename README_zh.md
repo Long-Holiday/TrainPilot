@@ -137,11 +137,14 @@ REST 面（`/api/tasks`）面向运维与看板，不面向 Agent：
 
 | 卡片 | 头部 | 触发 | 内容 |
 |:---|:---:|:---|:---|
-| **异常告警** | 红色 | `report(event_type="alert")` | 指标、异常详情、**Agent 自撰的异常判断**、30s 倒计时、`[终止训练]` / `[自行解决]` 按钮 |
+| **异常告警** | 红色 | `report(event_type="alert")` | 指标、异常详情、**Agent 自撰的异常判断**、30s 倒计时、`[终止训练]` / `[自行解决]` / `[⏳ 等待安排]` 按钮 |
 | **训练里程碑** | 绿色 | `report(event_type="milestone")` | 阶段进度、关键指标、**Agent 点评** |
-| **决策闭环** | 青色 | 点击按钮或超时 | 就地替换原告警卡片；展示操作人、所选动作、解决时间；移除按钮 |
+| **决策闭环** | 青色 | 点击按钮、`#fix` 消息或超时 | 就地替换原告警卡片；展示操作人、所选动作、解决时间；移除按钮 |
+| **等待人工安排** | 橙色 | 点击 `[⏳ 等待安排]` | 就地替换原告警卡片；自动决策已暂停、`#fix` 用法、兜底窗口 |
 | **自愈成功** | 绿色 | `ack_instruction(status="success")` | Agent 实际执行的处理方案 |
 | **下一步计划已登记** | 蓝色 | 群里 `@机器人 <计划>` | 计划编号、完整正文、绑定对象（某个任务或全局）、提交人 |
+| **修复方案已下发** | 青色 | 群里 `@机器人 #fix(<任务>) <方案>` | 方案下发到了哪个任务、方案正文、提交人、指令编号 |
+| **修复方案未下发** | 红色 | 下发失败的 `#fix` 消息 | 未下发的原因（任务不存在、没有等待中的告警、写法有误） |
 | **待办计划已清除** | 黄色 | `@机器人 清除` | 清除范围、清掉几条、操作人 |
 
 点击按钮时服务端返回 `type: "raw"`，飞书会在数秒内就地替换原卡片，避免并发重复点击；任务一旦
@@ -155,6 +158,8 @@ REST 面（`/api/tasks`）面向运维与看板，不面向 Agent：
 |:---|:---|
 | `@机器人 用 5e-5 重跑 10 个 epoch` | 全局计划 —— 每个任务的 `report` 都看得到 |
 | `@机器人 用 5e-5 重跑 #demo-llm-pretrain` | 绑定到 `demo-llm-pretrain`；`#…` 标签会从正文里剥掉 |
+| `@机器人 用 5e-5 重跑 #feat(demo-llm-pretrain)` | 与裸 `#…` 等价，`#feat(...)` 是显式写法 |
+| `@机器人 #fix(demo-llm-pretrain) 回滚到 step4` | 下发**修复方案**而不是排计划 —— 见下节 |
 | `@机器人 清除`（`取消` / `clear` 同样有效） | 清空所有未确认计划 |
 | `@机器人 清除 #demo-llm-pretrain` | 只清空该任务名下的未确认计划 |
 
@@ -168,6 +173,27 @@ task 行**，也不要求被绑定的任务已经存在，所以可以先把活�
 飞书对 ~3s 内没确认的事件会重投；`message_id` 是唯一键，所以重投既不会登记出第二条计划，也不会
 重发卡片。待确认的计划不会被清理服务回收（只有已确认的才会），清除除了「能在群里 @机器人」之外
 没有任何权限校验。
+
+### 在群里回应告警
+
+计划是给**下一轮**用的，救不了眼前卡住的告警。要自己写处理方案交给 Agent，先点告警卡片上的
+**⏳ 等待安排**，再在群里发 `@机器人 #fix(<任务名>) <你的处理方案>`：
+
+- 点击只暂停 30s 自动决策：不下发任何指令，任务仍是 `WAITING`，Agent 的长轮询继续挂着。告警卡片
+  会被就地换成橙色卡片，重复原告警信息，并写明该发什么 `#fix` 命令。
+- `#fix` 正文即成为该任务的决策（`action: "custom"`，方案在指令 payload 里），并唤醒 Agent 的
+  长轮询——与点按钮完全同一条路径。告警卡片随即被换成「决策闭环」，群里另回一张回执确认下发到了
+  哪个任务。
+- `#fix` 只对**已存在且正在等待告警**的任务生效。其余情况（任务名不存在、任务在跑、已经在恢复、
+  写法有误）一律拒绝：回一张红色回执，且不产生任何决策；`#fix` **永远不会创建 task 行**。
+- 不必先点按钮：在最初的 30s 窗口内直接发 `#fix` 同样有效。
+- 兜底：点击后 `TRAINPILOT_ARRANGEMENT_TIMEOUT_SECONDS`（默认 30 分钟）内仍没有 `#fix`，就照旧
+  自动 `self_resolve`，任务不会永久卡死。
+- 飞书对 ~3s 内未确认的事件会重投；重投的 `#fix` 既不会下发第二条指令，也不会重发第二张回执。
+
+`#fix` 与下一步计划共用同一个开关（`TRAINPILOT_ENABLE_NEXT_TASK_PLANS`），关掉计划也就同时关掉了
+`#fix`。标签大小写不敏感；若一条消息同时带 `#fix` 与 `#feat`/裸标签，按 `#fix` 处理，另一个标签
+照常从正文里剥掉。
 
 **应用开通：** 在[飞书开放平台](https://open.feishu.cn/)创建企业自建应用 → 从「凭证与基础信息」
 复制 `App ID` / `App Secret` / `Verification Token` → 把事件订阅 URL 与卡片回调 URL 都设为
@@ -213,7 +239,8 @@ docker run -d -p 28780:28780 -v $(pwd)/trainpilot.db:/app/trainpilot.db \
 | `TRAINPILOT_API_TOKEN` | – | MCP/REST 的 Bearer Token；留空为开放模式 |
 | `TRAINPILOT_FEISHU_APP_ID` / `_APP_SECRET` / `_RECEIVER_ID` | – | 卡片推送；未配置则进入 Mock 模式 |
 | `TRAINPILOT_ALERT_DECISION_TIMEOUT_SECONDS` | `30` | 超过该时长无人决策则自动 `self_resolve` |
-| `TRAINPILOT_ENABLE_NEXT_TASK_PLANS` | `true` | 飞书下一步计划：群里 `@机器人` 即登记一条；`false` 则忽略所有消息事件 |
+| `TRAINPILOT_ARRANGEMENT_TIMEOUT_SECONDS` | `1800` | 点「等待安排」后的兜底窗口；`0` 表示关闭该兜底 |
+| `TRAINPILOT_ENABLE_NEXT_TASK_PLANS` | `true` | 飞书群消息（`@机器人` 计划与 `#fix` 方案）；`false` 则忽略所有消息事件 |
 | `TRAINPILOT_LONG_POLL_TIMEOUT_SECONDS` | `20.0` | 服务端长轮询上限 |
 | `TRAINPILOT_SQLITE_PATH` | `trainpilot.db` | SQLite WAL 文件（`TRAINPILOT_ENABLE_SQLITE=false` 则仅内存） |
 | `TRAINPILOT_TASK_ID` | `train-task-default` | 工具调用省略 `task_id` 时的回退值 |

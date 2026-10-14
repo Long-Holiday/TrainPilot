@@ -66,6 +66,10 @@ class TaskRecord:
     last_alert_at: Optional[str] = None
     events_count: int = 0
     feishu_message_id: Optional[str] = None
+    # Set when a human clicked "wait for arrangement": the alert auto-decision is
+    # paused until a `#fix(task)` solution arrives or the fallback window expires.
+    arrangement_requested_at: Optional[str] = None
+    arrangement_requested_by: Optional[str] = None
 
 
 class TaskMailboxManager:
@@ -211,6 +215,9 @@ class TaskMailboxManager:
                     logger.info("Task %s duplicate alert ignored (idempotent): %s", req.task_id, req.message)
                 else:
                     task.pending_instruction = None
+                    # A fresh alert (not a retry of the same one) opens a new decision
+                    # window: any arrangement request for the previous alert is over.
+                    self._clear_arrangement(task)
                     logger.warning("Task %s transitioned to WAITING due to alert: %s", req.task_id, req.message)
             elif req.event_type == EventType.MILESTONE:
                 if task.state != TaskState.WAITING:
@@ -262,6 +269,40 @@ class TaskMailboxManager:
             except Exception as e:
                 logger.debug("Failed setting async event for %s: %s", task_id, e)
 
+    @staticmethod
+    def _clear_arrangement(task: TaskRecord) -> None:
+        """End the 'wait for arrangement' window.
+
+        Any queued instruction, and any fresh alert, closes the window opened by the
+        「等待安排」 button. Lives here so the three call sites cannot drift apart.
+        """
+        task.arrangement_requested_at = None
+        task.arrangement_requested_by = None
+
+    def _queue_instruction_locked(
+        self,
+        task: TaskRecord,
+        action: str,
+        payload: Optional[Dict[str, Any]],
+        operator: str,
+    ) -> InstructionResponse:
+        """Install a decision on a task and move it to RESOLVED (caller holds the lock)."""
+        now_iso = utc_now_iso()
+        instruction = InstructionResponse(
+            has_instruction=True,
+            status=TaskState.RESOLVED,
+            instruction_id=f"inst_{uuid.uuid4().hex[:12]}",
+            action=action,
+            payload=payload,
+            decision_by=operator,
+            decided_at=now_iso,
+        )
+        task.pending_instruction = instruction
+        task.state = TaskState.RESOLVED
+        task.updated_at = now_iso
+        self._clear_arrangement(task)
+        return instruction
+
     def submit_decision(
         self,
         task_id: str,
@@ -276,29 +317,15 @@ class TaskMailboxManager:
             previous = copy.deepcopy(task)
             if task.state in TERMINAL_STATES:
                 raise ValueError(f"Task '{task_id}' already in terminal state {task.state.value}, refusing new decision")
-            inst_id = f"inst_{uuid.uuid4().hex[:12]}"
-            now_iso = utc_now_iso()
 
-            instruction = InstructionResponse(
-                has_instruction=True,
-                status=TaskState.RESOLVED,
-                instruction_id=inst_id,
-                action=action,
-                payload=payload,
-                decision_by=operator,
-                decided_at=now_iso,
-            )
-
-            task.pending_instruction = instruction
-            task.state = TaskState.RESOLVED
-            task.updated_at = now_iso
+            instruction = self._queue_instruction_locked(task, action, payload, operator)
 
             self._persist_task_or_restore(
                 task, previous, was_cached, "operator decision"
             )
 
             logger.info("Decision submitted for task %s by %s: action=%s, id=%s",
-                        task_id, operator, action, inst_id)
+                        task_id, operator, action, instruction.instruction_id)
 
             # Wake up long-polling agents immediately
             self._notify_instruction_waiters(task_id)
@@ -312,8 +339,20 @@ class TaskMailboxManager:
         operator: str = "system_auto_resolve (30s timeout)",
         timeout_seconds: float = 30,
         payload: Optional[Dict[str, Any]] = None,
+        *,
+        stage: str = "alert",
     ) -> Optional[InstructionResponse]:
-        """Conditionally auto-resolve an alert that received no human decision in time."""
+        """Conditionally auto-resolve an alert that received no human decision in time.
+
+        Two mutually exclusive stages share this method, each with its own clock:
+
+        - ``"alert"`` (default): the ordinary N-second window after an alert. Refuses
+          to fire while a human has the arrangement window open.
+        - ``"arrangement"``: the long fallback after 「等待安排」. Fires only while that
+          window is actually open, and times from when it was opened.
+        """
+        if stage not in ("alert", "arrangement"):
+            raise ValueError(f"Unknown auto-resolve stage: {stage!r}")
         with self._lock:
             task = self._tasks.get(task_id)
             if not task:
@@ -322,7 +361,16 @@ class TaskMailboxManager:
                 return None
             if task.pending_instruction is not None:
                 return None
-            base_ts = task.last_alert_at or task.updated_at
+            if stage == "alert":
+                if task.arrangement_requested_at is not None:
+                    # Human asked for time to arrange a fix: the short window is off.
+                    return None
+                base_ts = task.last_alert_at or task.updated_at
+            else:
+                if task.arrangement_requested_at is None:
+                    # No open window (never deferred, or already closed): nothing to do.
+                    return None
+                base_ts = task.arrangement_requested_at
             base_dt = _parse_iso(base_ts)
             if base_dt is None:
                 return None
@@ -330,23 +378,10 @@ class TaskMailboxManager:
             if (now - base_dt).total_seconds() < timeout_seconds:
                 return None
             previous = copy.deepcopy(task)
-            inst_id = f"inst_{uuid.uuid4().hex[:12]}"
-            now_iso = utc_now_iso()
             auto_payload = dict(payload or {})
             auto_payload.setdefault("auto_resolved", True)
             auto_payload.setdefault("timeout_seconds", timeout_seconds)
-            instruction = InstructionResponse(
-                has_instruction=True,
-                status=TaskState.RESOLVED,
-                instruction_id=inst_id,
-                action=action,
-                payload=auto_payload,
-                decision_by=operator,
-                decided_at=now_iso,
-            )
-            task.pending_instruction = instruction
-            task.state = TaskState.RESOLVED
-            task.updated_at = now_iso
+            instruction = self._queue_instruction_locked(task, action, auto_payload, operator)
 
             self._persist_task_or_restore(
                 task, previous, True, "automatic resolution"
@@ -359,6 +394,101 @@ class TaskMailboxManager:
             self._notify_instruction_waiters(task_id)
 
             return instruction
+
+    def defer_alert(self, task_id: str, operator: str) -> TaskSummary:
+        """Open the 'wait for arrangement' window for a waiting alert.
+
+        The task stays in WAITING with no instruction queued: the agent keeps
+        long-polling, and the short auto-decision window is suppressed in favour of
+        the arrangement fallback. Deliberately does NOT touch `pending_instruction`
+        or `state`, and does NOT wake waiters — there is nothing to deliver.
+        """
+        with self._lock:
+            was_cached = task_id in self._tasks
+            task = self._get_existing(task_id)
+            previous = copy.deepcopy(task)
+            if task.state != TaskState.WAITING:
+                raise ValueError(
+                    f"Task '{task_id}' is in state {task.state.value}, "
+                    "only a WAITING alert can be deferred"
+                )
+            if task.arrangement_requested_at is None:
+                # First click defines the window; a duplicate click is already blocked
+                # by the in-place card replacement, so keep the original timestamp.
+                task.arrangement_requested_at = utc_now_iso()
+                task.arrangement_requested_by = operator
+                task.updated_at = task.arrangement_requested_at
+            self._persist_task_or_restore(
+                task, previous, was_cached, "arrangement request"
+            )
+            logger.warning(
+                "Task %s is now awaiting a human-arranged fix (requested by %s)",
+                task_id, task.arrangement_requested_by,
+            )
+            return self._build_summary(task)
+
+    def submit_fix_decision(
+        self,
+        task_id: str,
+        solution: str,
+        operator: str,
+        source_message_id: Optional[str] = None,
+    ) -> tuple[Optional[InstructionResponse], bool]:
+        """Dispatch a human-written fix as a `custom` decision (Feishu group message).
+
+        Returns ``(instruction, created)`` mirroring ``PlanRegistry.register``: a Feishu
+        redelivery of the same message yields ``(None, False)`` and must not send a
+        second receipt card. The dedupe check, the state gate and the queueing all run
+        under one lock, so a redelivery racing the 30s auto-decision cannot overwrite a
+        live instruction.
+
+        Never creates a task row: an unknown task raises `TaskNotFoundError`.
+        """
+        with self._lock:
+            was_cached = task_id in self._tasks
+            task = self._get_existing(task_id)
+            if source_message_id is not None:
+                # Feishu redelivers events it cannot confirm in ~3s. The earlier delivery
+                # may still be queued, or already popped into RECOVERING — either way it is
+                # the same message and must not produce a second decision or receipt card.
+                dispatched = [
+                    task.pending_instruction.payload if task.pending_instruction else None,
+                    (task.latest_instruction or {}).get("payload"),
+                ]
+                if any(
+                    (p or {}).get("source_message_id") == source_message_id
+                    for p in dispatched
+                ):
+                    logger.info(
+                        "Duplicate fix message %s for task %s; ignoring",
+                        source_message_id, task_id,
+                    )
+                    return None, False
+            if task.state != TaskState.WAITING:
+                raise ValueError(
+                    f"Task '{task_id}' is in state {task.state.value}, "
+                    "there is no alert waiting for a decision"
+                )
+            previous = copy.deepcopy(task)
+            payload = {
+                "solution": solution,
+                "source": "feishu_group_message",
+                "requested_by": operator,
+            }
+            if source_message_id is not None:
+                payload["source_message_id"] = source_message_id
+            instruction = self._queue_instruction_locked(
+                task, action="custom", payload=payload, operator=operator
+            )
+            self._persist_task_or_restore(
+                task, previous, was_cached, "fix decision"
+            )
+            logger.warning(
+                "Fix solution dispatched to task %s by %s (instruction %s)",
+                task_id, operator, instruction.instruction_id,
+            )
+            self._notify_instruction_waiters(task_id)
+            return instruction, True
 
     async def get_instruction_async(
         self, task_id: str, pop: bool = True, wait_timeout: float = 0.0
@@ -619,6 +749,9 @@ class TaskMailboxManager:
             latest_message=task.latest_message,
             pending_instruction=task.pending_instruction,
             events_count=count,
+            arrangement_requested_at=task.arrangement_requested_at,
+            arrangement_requested_by=task.arrangement_requested_by,
+            awaiting_arrangement=task.arrangement_requested_at is not None,
         )
 
 

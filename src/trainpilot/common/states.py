@@ -31,6 +31,12 @@ class ActionType(str, Enum):
     CUSTOM = "custom"  # Custom user-defined action with payload
 
 
+# Card-only control action: the engineer asked for more time to arrange a fix.
+# Deliberately NOT an ActionType member: those are the actions an agent can receive
+# from poll_instruction, and this one is never delivered to anyone.
+WAIT_FOR_ARRANGEMENT = "wait_for_arrangement"
+
+
 class PlanStatus(str, Enum):
     """Lifecycle of a next-task plan queued from a Feishu group message."""
 

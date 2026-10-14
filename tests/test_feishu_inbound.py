@@ -113,3 +113,80 @@ def test_clear_command_can_be_scoped_to_one_task():
 def test_multiline_plan_keeps_its_newlines():
     msg = parse_plan_message(_message_event("@_user_1 第一步：重跑\n第二步：评测"))
     assert msg.text == "第一步：重跑\n第二步：评测"
+
+
+# --------------------------------------------------------------------------
+# `#fix(task)` / `#feat(task)` constructs
+# --------------------------------------------------------------------------
+
+
+def test_fix_tag_binds_the_task_and_keeps_the_solution_body():
+    msg = parse_plan_message(
+        _message_event("@_user_1 #fix(demo-llm-pretrain) 回滚到 step4 检查点并把 lr 减半")
+    )
+    assert msg.fix_task_id == "demo-llm-pretrain"
+    assert msg.fix_error is None
+    assert msg.text == "回滚到 step4 检查点并把 lr 减半"
+    # A fix is not a plan: the plan binding must stay empty.
+    assert msg.task_id is None
+    assert msg.is_clear is False
+
+
+def test_fix_tag_is_case_insensitive_and_may_follow_prose():
+    msg = parse_plan_message(_message_event("@_user_1 先看日志，然后 #FIX(demo-llm) 回滚"))
+    assert msg.fix_task_id == "demo-llm"
+    assert msg.text == "先看日志，然后 回滚"
+
+
+def test_fix_solution_keeps_hash_tags_verbatim():
+    """`#3` in a solution is a checkpoint/issue reference, not a task binding."""
+    msg = parse_plan_message(_message_event("@_user_1 #fix(demo-llm) 回滚到 #3 检查点"))
+    assert msg.fix_task_id == "demo-llm"
+    assert msg.text == "回滚到 #3 检查点"
+
+
+def test_feat_tag_is_an_alias_for_the_bare_tag():
+    explicit = parse_plan_message(_message_event("@_user_1 #feat(demo-llm) 用 5e-5 重跑"))
+    implicit = parse_plan_message(_message_event("@_user_1 用 5e-5 重跑 #demo-llm"))
+    assert explicit.task_id == implicit.task_id == "demo-llm"
+    assert explicit.text == implicit.text == "用 5e-5 重跑"
+    assert explicit.fix_task_id is None
+
+
+def test_fix_wins_over_feat_and_bare_tags():
+    msg = parse_plan_message(_message_event("@_user_1 #fix(a) 按 #feat(b) 的思路重跑 #c"))
+    assert msg.fix_task_id == "a"
+    assert msg.task_id is None
+    assert msg.fix_error is None
+
+
+def test_a_construct_suppresses_the_bare_tag_scan():
+    """`#feat(a) 重跑 #b` must not silently rebind the plan to b."""
+    msg = parse_plan_message(_message_event("@_user_1 #feat(a) 重跑 #b"))
+    assert msg.task_id == "a"
+
+
+def test_parenthesis_less_fix_is_a_syntax_error_not_a_task_named_fix():
+    """The words fix/feat are reserved: binding a plan to a task named "fix" hides it."""
+    msg = parse_plan_message(_message_event("@_user_1 #fix 回滚到 step4"))
+    assert msg.fix_task_id is None
+    assert msg.task_id is None
+    assert "缺少任务名" in msg.fix_error
+
+    msg = parse_plan_message(_message_event("@_user_1 #feat 重跑"))
+    assert msg.task_id is None
+    assert "缺少任务名" in msg.fix_error
+
+
+def test_empty_fix_body_is_surfaced_as_an_error():
+    msg = parse_plan_message(_message_event("@_user_1 #fix(demo-llm)"))
+    assert msg is not None
+    assert msg.fix_task_id is None
+    assert "方案正文为空" in msg.fix_error
+
+
+def test_clear_words_inside_a_fix_body_are_part_of_the_solution():
+    msg = parse_plan_message(_message_event("@_user_1 #fix(demo-llm) 清除"))
+    assert msg.fix_task_id == "demo-llm"
+    assert msg.is_clear is False
+    assert msg.text == "清除"

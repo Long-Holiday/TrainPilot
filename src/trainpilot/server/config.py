@@ -69,6 +69,15 @@ class ServerSettings(BaseSettings):
         description="Seconds an alert card waits for human decision before auto self-resolve",
     )
 
+    # Fallback window after someone clicks "wait for arrangement" on the alert card:
+    # the 30s auto-decision is paused, and the task self-resolves only if no
+    # `#fix(task) <solution>` group message arrives within this many seconds.
+    # 0 (or negative) disables the fallback entirely, leaving the task waiting indefinitely.
+    arrangement_timeout_seconds: int = Field(
+        default=1800,
+        description="Seconds to wait for a human-arranged fix before falling back to self-resolve",
+    )
+
     # Next-task plans: any group message that @-mentions the bot registers one.
     # Kill switch for apps holding the broader `im:message` scope, where messages
     # @-mentioning other people would otherwise be registered too.

@@ -61,15 +61,18 @@ class SQLiteStorage:
                     latest_instruction_json TEXT,
                     last_alert_fingerprint TEXT,
                     last_alert_at TEXT,
-                    feishu_message_id TEXT
+                    feishu_message_id TEXT,
+                    arrangement_requested_at TEXT,
+                    arrangement_requested_by TEXT
                 );
                 """
             )
             # Column migrations for existing databases
             cur.execute("PRAGMA table_info(tasks);")
             cols = [r["name"] for r in cur.fetchall()]
-            if "feishu_message_id" not in cols:
-                cur.execute("ALTER TABLE tasks ADD COLUMN feishu_message_id TEXT;")
+            for added in ("feishu_message_id", "arrangement_requested_at", "arrangement_requested_by"):
+                if added not in cols:
+                    cur.execute(f"ALTER TABLE tasks ADD COLUMN {added} TEXT;")
             for obsolete in ("last_heartbeat_at", "gpu_host"):
                 if obsolete in cols:
                     try:
@@ -177,8 +180,9 @@ class SQLiteStorage:
                     task_id, state, created_at, updated_at,
                     latest_step, latest_epoch, latest_metrics_json, latest_message,
                     pending_instruction_json, latest_instruction_json,
-                    last_alert_fingerprint, last_alert_at, feishu_message_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    last_alert_fingerprint, last_alert_at, feishu_message_id,
+                    arrangement_requested_at, arrangement_requested_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(task_id) DO UPDATE SET
                     state = excluded.state,
                     updated_at = excluded.updated_at,
@@ -190,7 +194,13 @@ class SQLiteStorage:
                     latest_instruction_json = excluded.latest_instruction_json,
                     last_alert_fingerprint = excluded.last_alert_fingerprint,
                     last_alert_at = excluded.last_alert_at,
-                    feishu_message_id = COALESCE(excluded.feishu_message_id, tasks.feishu_message_id);
+                    feishu_message_id = COALESCE(excluded.feishu_message_id, tasks.feishu_message_id),
+                    -- Plain columns, deliberately NOT COALESCE-protected like feishu_message_id:
+                    -- the in-memory TaskRecord is authoritative for these two, so NULL must
+                    -- clear them (a fresh alert ends the previous arrangement window), and a
+                    -- COALESCE would silently keep the stale timestamp and hang the task.
+                    arrangement_requested_at = excluded.arrangement_requested_at,
+                    arrangement_requested_by = excluded.arrangement_requested_by;
                 """,
                 (
                     task.task_id,
@@ -206,6 +216,8 @@ class SQLiteStorage:
                     task.last_alert_fingerprint,
                     task.last_alert_at,
                     feishu_msg_id,
+                    getattr(task, "arrangement_requested_at", None),
+                    getattr(task, "arrangement_requested_by", None),
                 ),
             )
             if _commit:
@@ -432,6 +444,8 @@ class SQLiteStorage:
 
         keys = r.keys()
         feishu_msg_id = r["feishu_message_id"] if "feishu_message_id" in keys else None
+        arrangement_at = r["arrangement_requested_at"] if "arrangement_requested_at" in keys else None
+        arrangement_by = r["arrangement_requested_by"] if "arrangement_requested_by" in keys else None
 
         return TaskRecord(
             task_id=t_id,
@@ -447,6 +461,8 @@ class SQLiteStorage:
             last_alert_fingerprint=r["last_alert_fingerprint"],
             last_alert_at=r["last_alert_at"],
             feishu_message_id=feishu_msg_id,
+            arrangement_requested_at=arrangement_at,
+            arrangement_requested_by=arrangement_by,
         )
 
     def get_task(self, task_id: str) -> Optional[Any]:

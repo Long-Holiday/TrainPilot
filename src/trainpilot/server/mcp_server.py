@@ -50,9 +50,13 @@ _INSTRUCTIONS = (
     "the GPU job when you can; if it already exited, say so. WAITING means only that the control "
     "plane is waiting, not that a process stopped.\n"
     "Then poll_instruction on the same task until has_instruction=true. A poll timeout is not "
-    "permission to resume, and do not resend the alert. Stop polling on COMPLETED or FAILED.\n"
+    "permission to resume, and do not resend the alert. Stop polling on COMPLETED or FAILED. A task "
+    "may stay WAITING for a long time when the engineer asked for room to arrange a fix: keep "
+    "polling, and do not treat that long wait as an outage or resume on your own.\n"
     "Execute the returned action, verify the result, then ack_instruction with its instruction_id and "
-    "action: stop_training means stop the job, self_resolve permits a recovery attempt. ACK success "
+    "action: stop_training means stop the job, self_resolve permits a recovery attempt, and custom "
+    "means carry out the human-written solution in payload['solution'] exactly as specified (and say "
+    "what you did in solution). ACK success "
     "only for a verified result, otherwise ACK failed, and describe only what you actually did. After "
     "ACKing stop_training, report(event_type='failed').\n"
     "Every report response also carries next_task_plans: follow-up work a human queued in the Feishu "
@@ -102,15 +106,26 @@ def _dispatch_feishu_async(req: EventNotifyRequest) -> None:
     feishu_dispatcher.submit(_run)
 
 
-def _auto_self_resolve_callback(task_id: str, timeout_seconds: int) -> None:
+# Card copy for the arrangement-stage fallback, where the 30s wording would be wrong.
+_ARRANGEMENT_TRIGGER_NOTE = "超过等待安排窗口仍无方案，系统自动视为“自行解决”"
+
+
+def _auto_self_resolve_callback(task_id: str, timeout_seconds: int, *, stage: str = "alert") -> None:
     """Timer callback: auto self-resolve if no human decision arrived within timeout."""
+    if stage == "arrangement":
+        operator = f"系统自动决策（等待安排 {timeout_seconds}s 未收到方案）"
+        trigger_note = _ARRANGEMENT_TRIGGER_NOTE
+    else:
+        operator = f"系统自动决策（{timeout_seconds}s超时未决策）"
+        trigger_note = None
     try:
         instruction = default_mailbox.try_auto_resolve(
             task_id=task_id,
             action="self_resolve",
-            operator=f"系统自动决策（{timeout_seconds}s超时未决策）",
+            operator=operator,
             timeout_seconds=timeout_seconds,
-            payload={"timeout_seconds": timeout_seconds},
+            payload={"timeout_seconds": timeout_seconds, "arrangement": stage == "arrangement"},
+            stage=stage,
         )
         if instruction is None:
             return
@@ -120,6 +135,7 @@ def _auto_self_resolve_callback(task_id: str, timeout_seconds: int) -> None:
                 action="self_resolve",
                 operator=instruction.decision_by or "系统自动决策",
                 resolved_at=instruction.decided_at,
+                trigger_note=trigger_note,
             )
         except Exception as exc:
             logger.warning("Failed to patch card after auto self-resolve for %s: %s", task_id, exc)
@@ -127,22 +143,40 @@ def _auto_self_resolve_callback(task_id: str, timeout_seconds: int) -> None:
         logger.error("Auto self-resolve callback failed for task %s: %s", task_id, exc)
 
 
-def _schedule_auto_self_resolve(task_id: str) -> None:
-    """Schedule daemon timer to auto self-resolve alert upon timeout."""
+def schedule_auto_resolve(task_id: str, stage: str = "alert") -> None:
+    """Schedule the daemon timer that auto self-resolves an undecided alert.
+
+    ``stage="alert"`` is the ordinary N-second window started by `report`; the
+    arrangement stage is the long fallback armed when someone clicks 「等待安排」.
+    A non-positive timeout disables that stage entirely.
+    """
+    setting = (
+        settings.arrangement_timeout_seconds
+        if stage == "arrangement"
+        else settings.alert_decision_timeout_seconds
+    )
     try:
-        timeout_seconds = int(settings.alert_decision_timeout_seconds)
+        timeout_seconds = int(setting)
     except Exception:
-        timeout_seconds = 30
+        timeout_seconds = 1800 if stage == "arrangement" else 30
     if timeout_seconds <= 0:
+        logger.warning("Auto self-resolve (%s stage) disabled by a non-positive timeout", stage)
         return
     timer = threading.Timer(
         timeout_seconds,
         _auto_self_resolve_callback,
         args=(task_id, timeout_seconds),
+        kwargs={"stage": stage},
     )
     timer.daemon = True
     timer.start()
-    logger.info("Scheduled auto self-resolve for task %s in %ss", task_id, timeout_seconds)
+    logger.info("Scheduled auto self-resolve (%s stage) for task %s in %ss",
+                stage, task_id, timeout_seconds)
+
+
+def _schedule_auto_self_resolve(task_id: str) -> None:
+    """Schedule daemon timer to auto self-resolve alert upon timeout."""
+    schedule_auto_resolve(task_id, stage="alert")
 
 
 # ---------------------------------------------------------------------------
@@ -279,12 +313,13 @@ def ack_instruction(
     Pass the instruction_id and action returned by poll_instruction. See the server
     instructions for what counts as a verified result. A successful self_resolve ACK
     returns the task to RUNNING and queues a Feishu recovery card built from the
-    task's last reported step/metrics, so you need not re-send them.
+    task's last reported step/metrics, so you need not re-send them. A custom ACK is
+    the same, and carries the human-written fix from payload['solution'].
 
     Args:
         task_id: Defaults to the server-configured task.
         instruction_id: ID of the instruction you executed.
-        action: The action you performed ('self_resolve' or 'stop_training').
+        action: The action you performed ('self_resolve', 'stop_training' or 'custom').
         status: 'success' or 'failed'.
         solution: What you actually did, in human-readable form.
     """

@@ -141,11 +141,14 @@ The REST surface (`/api/tasks`) is for operators and dashboards, not for agents:
 
 | Card | Header | Trigger | Content |
 |:---|:---:|:---|:---|
-| **Anomaly alert** | red | `report(event_type="alert")` | Metrics, anomaly detail, **agent's own assessment**, 30s countdown, `[Stop Training]` / `[Self Resolve]` buttons |
+| **Anomaly alert** | red | `report(event_type="alert")` | Metrics, anomaly detail, **agent's own assessment**, 30s countdown, `[Stop Training]` / `[Self Resolve]` / `[⏳ Wait for Arrangement]` buttons |
 | **Milestone** | green | `report(event_type="milestone")` | Progress, key metrics, **agent's review** |
-| **Decision closed** | turquoise | button click or timeout | Replaces the alert card in place; shows operator, action, time; buttons removed |
+| **Decision closed** | turquoise | button click, `#fix` message, or timeout | Replaces the alert card in place; shows operator, action, time; buttons removed |
+| **Awaiting arrangement** | orange | `[⏳ Wait for Arrangement]` click | Replaces the alert card in place; countdown paused, how to send a `#fix`, fallback window |
 | **Self-healing succeeded** | green | `ack_instruction(status="success")` | The solution the agent actually applied |
 | **Next-task plan registered** | blue | `@bot <plan>` in the group | Plan id, full text, binding (one task or global), submitter |
+| **Fix dispatched** | turquoise | `@bot #fix(<task>) <solution>` in the group | Which task the solution reached, its text, submitter, instruction id |
+| **Fix not dispatched** | red | `@bot #fix(...)` that could not be delivered | Why nothing was dispatched (unknown task, no alert waiting, syntax) |
 | **Next-task plans cleared** | yellow | `@bot clear` | Scope, how many plans were dropped, operator |
 
 Card clicks return `type: "raw"` so Feishu replaces the original card in place within seconds —
@@ -161,6 +164,8 @@ becomes a **next-task plan**:
 |:---|:---|
 | `@bot retrain with 5e-5 for 10 epochs` | Global plan — appears in every task's `report` |
 | `@bot retrain with 5e-5 #demo-llm-pretrain` | Bound to `demo-llm-pretrain`; the `#…` tag is stripped from the body |
+| `@bot retrain with 5e-5 #feat(demo-llm-pretrain)` | Same as the bare `#…` tag — `#feat(...)` is the explicit spelling |
+| `@bot #fix(demo-llm-pretrain) roll back to step 4` | Dispatches a **fix** to that alert instead of queueing a plan — see below |
 | `@bot clear` (`取消` / `清除` also work) | Drops every unacknowledged plan |
 | `@bot clear #demo-llm-pretrain` | Drops only that task's unacknowledged plans |
 
@@ -176,6 +181,31 @@ card is the only feedback channel, which is how you catch a `#tag` that was mean
 it cannot confirm within ~3s; the `message_id` is unique, so a retry registers neither a second plan nor
 a second card. Pending plans are never expired by cleanup — only acknowledged or cleared ones are
 reaped — and clearing has no permission check beyond being able to mention the bot.
+
+### Answering an alert from the group
+
+A plan is for the *next* run, so it cannot unblock the alert in front of you. To hand the agent a
+solution you wrote yourself, click **⏳ Wait for Arrangement** on the alert card and then send
+`@bot #fix(<task>) <your solution>`:
+
+- The click queues nothing and leaves the task `WAITING` with its long-poll alive; it only pauses the
+  30s auto-decision. The alert card is replaced in place by an orange one repeating the anomaly and
+  the exact `#fix` command to type.
+- The `#fix` body becomes the task's decision (`action: "custom"`, solution in the instruction
+  payload) and wakes the agent's long poll, exactly like a button click. The alert card is replaced
+  by the usual decision-closed card, and the group gets a receipt confirming which task was reached.
+- `#fix` is accepted only for a task that already exists **and** is waiting on an alert. Anything
+  else — an unknown id, a task that is running or already recovering, a malformed `#fix` — is refused
+  with a red receipt and dispatch nothing; `#fix` never creates a task row.
+- No need to click first: a `#fix` sent inside the original 30s window works too.
+- The fallback: with no `#fix` within `TRAINPILOT_ARRANGEMENT_TIMEOUT_SECONDS` (default 30 minutes)
+  of the click, the alert auto-resolves to `self_resolve` as usual, so a task can never hang forever.
+- Feishu retries an unconfirmed event within ~3s. A retried `#fix` dispatches nothing and sends no
+  second receipt, so the two are safe to send twice.
+
+`#fix` and next-task plans share one switch (`TRAINPILOT_ENABLE_NEXT_TASK_PLANS`), so turning plans
+off also stops `#fix` from being read. Tags are case-insensitive; `#fix` wins if a message carries
+both, and the other tag is still stripped from the body.
 
 **App setup:** create an enterprise app on the [Feishu Open Platform](https://open.feishu.cn/) →
 copy `App ID` / `App Secret` / `Verification Token` from *Credentials & Basic Info* → set both the
@@ -222,7 +252,8 @@ intranet GPU client — are documented inline there, variable by variable. The o
 | `TRAINPILOT_API_TOKEN` | – | Bearer token for MCP/REST; empty = open |
 | `TRAINPILOT_FEISHU_APP_ID` / `_APP_SECRET` / `_RECEIVER_ID` | – | Card delivery; unset = Mock mode |
 | `TRAINPILOT_ALERT_DECISION_TIMEOUT_SECONDS` | `30` | Auto-`self_resolve` after this long with no human decision |
-| `TRAINPILOT_ENABLE_NEXT_TASK_PLANS` | `true` | Feishu next-task plans: `@bot` in the group queues one; `false` ignores every message event |
+| `TRAINPILOT_ARRANGEMENT_TIMEOUT_SECONDS` | `1800` | Fallback window after `[⏳ Wait for Arrangement]`; `0` disables it |
+| `TRAINPILOT_ENABLE_NEXT_TASK_PLANS` | `true` | Feishu group messages (`@bot` plans and `#fix` solutions); `false` ignores every message event |
 | `TRAINPILOT_LONG_POLL_TIMEOUT_SECONDS` | `20.0` | Server-side long-poll ceiling |
 | `TRAINPILOT_SQLITE_PATH` | `trainpilot.db` | SQLite WAL file (`TRAINPILOT_ENABLE_SQLITE=false` for memory-only) |
 | `TRAINPILOT_TASK_ID` | `train-task-default` | Fallback when a tool call omits `task_id` |

@@ -4,6 +4,8 @@ import pytest
 
 from trainpilot.server.feishu.cards import (
     build_alert_card,
+    build_deferred_card,
+    build_fix_card,
     build_milestone_card,
     build_plan_card,
     build_plan_cleared_card,
@@ -43,15 +45,21 @@ def test_build_alert_card(timeout_seconds, shown):
     assert card["header"]["template"] == "red"
     assert "llm-task-1" in card["header"]["title"]["content"]
 
-    # Verify action buttons: only 停止训练 & 自行解决
+    # Verify action buttons: 停止训练、自行解决，以及暂停倒计时的「等待安排」
     actions = _action_values(card)
-    assert [a["action"] for a in actions] == ["stop_training", "self_resolve"]
+    assert [a["action"] for a in actions] == [
+        "stop_training",
+        "self_resolve",
+        "wait_for_arrangement",
+    ]
     for action in actions:
         assert action["task_id"] == "llm-task-1"
 
     # 超时提示必须出现在卡片文案中
     contents = _div_text(card)
     assert shown in contents and "自行解决" in contents
+    # 「等待安排」的用法必须写在卡片上，否则没人知道下一步该做什么
+    assert "#fix(llm-task-1)" in contents
 
 
 def test_build_milestone_card():
@@ -116,6 +124,80 @@ def test_build_resolved_card(operator, expected_reason):
         assert "⏳ 触发原因" not in contents
     else:
         assert expected_reason in contents
+
+
+def test_build_resolved_card_labels_a_custom_fix_and_its_trigger():
+    card = build_resolved_card(
+        task_id="llm-task-1",
+        action_name="custom",
+        operator="ou_engineer",
+        trigger_note="超过等待安排窗口仍无方案",
+    )
+    contents = _div_text(card)
+    assert "🛠️ 按群里下发的方案处理" in contents
+    # The 30-second wording would be a lie for the arrangement fallback
+    assert "超过 30 秒" not in contents
+
+
+def test_build_deferred_card_pauses_the_countdown():
+    card = build_deferred_card(
+        task_id="llm-task-1",
+        operator="ou_engineer",
+        timeout_seconds=1800,
+        requested_at="2026-10-14T08:00:00+00:00",
+        original_message="CUDA Out Of Memory",
+        step=500,
+        epoch=2,
+    )
+    assert card["header"]["template"] == "orange"
+    assert "【等待人工安排】" in card["header"]["title"]["content"]
+    # No buttons: the only way out is the group message (or the fallback)
+    assert _action_values(card) is None
+
+    contents = _div_text(card)
+    # The exact command is spelled out, with the real task id, ready to copy
+    assert "`@机器人 #fix(llm-task-1) 你的处理方案`" in contents
+    assert "30 分钟" in contents
+    assert "自动决策已暂停" in contents
+    # The card replaces the alert in place, so the anomaly context must survive
+    assert "CUDA Out Of Memory" in contents
+    assert "ou_engineer" in contents
+
+
+def test_build_fix_card_confirms_the_task_it_reached():
+    card = build_fix_card(
+        task_id="llm-task-1",
+        solution="回滚到 step4 检查点并把 lr 减半",
+        operator="ou_engineer",
+        instruction_id="inst_abc123",
+        dispatched_at="2026-10-14T08:00:00+00:00",
+    )
+    assert card["header"]["template"] == "turquoise"
+    assert "【修复方案已下发】" in card["header"]["title"]["content"]
+    assert "llm-task-1" in card["header"]["title"]["content"]
+    assert _action_values(card) is None
+
+    contents = _div_text(card)
+    assert "`llm-task-1`" in contents
+    assert "`inst_abc123`" in contents
+    assert "回滚到 step4 检查点并把 lr 减半" in contents
+    assert "ou_engineer" in contents
+
+
+def test_build_fix_card_with_a_reason_is_the_rejection_form():
+    card = build_fix_card(
+        task_id="llm-task-1",
+        solution="回滚到 step4",
+        operator="ou_engineer",
+        reason="任务当前状态为 RECOVERING，没有等待中的决策",
+    )
+    assert card["header"]["template"] == "red"
+    assert "【修复方案未下发】" in card["header"]["title"]["content"]
+
+    contents = _div_text(card)
+    assert "任务当前状态为 RECOVERING" in contents
+    # Points at the right escape hatch for follow-up work
+    assert "#feat(任务名)" in contents
 
 
 def test_build_recovery_card():

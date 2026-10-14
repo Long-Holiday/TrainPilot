@@ -82,6 +82,70 @@ def test_sqlite_storage_crud_and_reload(temp_db):
     reloaded_storage.close()
 
 
+def test_arrangement_columns_migrate_an_old_database(temp_db):
+    """A production DB created before this feature must gain the columns in place."""
+    import sqlite3
+
+    # A `tasks` table shaped like the previous release (no arrangement columns).
+    conn = sqlite3.connect(temp_db)
+    conn.execute(
+        """
+        CREATE TABLE tasks (
+            task_id TEXT PRIMARY KEY,
+            state TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            latest_step INTEGER,
+            latest_epoch INTEGER,
+            latest_metrics_json TEXT,
+            latest_message TEXT,
+            pending_instruction_json TEXT,
+            latest_instruction_json TEXT,
+            last_alert_fingerprint TEXT,
+            last_alert_at TEXT,
+            feishu_message_id TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO tasks (task_id, state, created_at, updated_at) VALUES (?, ?, ?, ?)",
+        ("legacy-task", "WAITING", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+    )
+    conn.commit()
+    conn.close()
+
+    storage = SQLiteStorage(temp_db)
+    cols = {r[1] for r in storage._conn.execute("PRAGMA table_info(tasks);").fetchall()}
+    assert {"arrangement_requested_at", "arrangement_requested_by"} <= cols
+
+    # The legacy row survives, and the new fields round-trip.
+    assert storage.get_task("legacy-task").state == TaskState.WAITING
+    storage.save_task(
+        TaskRecord(
+            task_id="legacy-task",
+            state=TaskState.WAITING,
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:01:00+00:00",
+            arrangement_requested_at="2026-01-01T00:01:00+00:00",
+            arrangement_requested_by="ou_engineer",
+        )
+    )
+    reloaded = SQLiteStorage(temp_db).get_task("legacy-task")
+    assert reloaded.arrangement_requested_by == "ou_engineer"
+
+    # Clearing must persist as NULL, not be silently kept (the COALESCE trap).
+    storage.save_task(
+        TaskRecord(
+            task_id="legacy-task",
+            state=TaskState.WAITING,
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:02:00+00:00",
+        )
+    )
+    assert storage.get_task("legacy-task").arrangement_requested_at is None
+    storage.close()
+
+
 def test_sqlite_storage_automatic_retention_pruning(temp_db):
     """Verify that when event count exceeds max_events, old events are automatically deleted."""
     storage = SQLiteStorage(temp_db)

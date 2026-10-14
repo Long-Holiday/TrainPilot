@@ -260,6 +260,69 @@ def test_auto_self_resolve_callback_only_fires_past_the_timeout_window():
     assert server.default_feishu_client.update_card_to_resolved.call_args.kwargs["task_id"] == task_id
 
 
+def test_auto_self_resolve_callback_alert_stage_skips_a_deferred_task():
+    """A human asked for time: the 30s timer must no longer resolve the alert."""
+    task_id = "test-deferred-auto-resolve"
+    report(task_id=task_id, message="Loss NaN", event_type="alert", step=10)
+    default_mailbox.defer_alert(task_id, "ou_engineer")
+
+    server._auto_self_resolve_callback(task_id, 0)
+    assert default_mailbox.get_task(task_id).state == TaskState.WAITING
+    server.default_feishu_client.update_card_to_resolved.assert_not_called()
+
+
+def test_auto_self_resolve_callback_arrangement_stage_resolves_the_fallback():
+    task_id = "test-arrangement-auto-resolve"
+    report(task_id=task_id, message="Loss NaN", event_type="alert", step=10)
+
+    # Not deferred yet: the arrangement stage has no window to close.
+    server._auto_self_resolve_callback(task_id, 0, stage="arrangement")
+    assert default_mailbox.get_task(task_id).state == TaskState.WAITING
+
+    default_mailbox.defer_alert(task_id, "ou_engineer")
+    # 0 = the window has elapsed, without waiting 30 minutes for it
+    server._auto_self_resolve_callback(task_id, 0, stage="arrangement")
+
+    task = default_mailbox.get_task(task_id)
+    assert task.state == TaskState.RESOLVED
+    assert task.pending_instruction.payload["arrangement"] is True
+    assert "等待安排" in task.pending_instruction.decision_by
+    # The card must not claim a 30-second timeout when the window is the long one
+    patch_kwargs = server.default_feishu_client.update_card_to_resolved.call_args.kwargs
+    assert "超过等待安排窗口" in patch_kwargs["trigger_note"]
+    assert "30 秒" not in patch_kwargs["trigger_note"]
+    # …and the alert-stage path keeps the default wording (no trigger_note)
+    assert server.default_feishu_client.update_card_to_resolved.call_count == 1
+
+
+def test_schedule_auto_resolve_picks_the_stage_window(monkeypatch):
+    """Neither stage may arm a real timer here; capture what would have been armed."""
+    armed = []
+
+    class FakeTimer:
+        def __init__(self, interval, function, args=(), kwargs=None):
+            armed.append((interval, function, args, kwargs or {}))
+            self.daemon = False
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(server.threading, "Timer", FakeTimer)
+
+    server.schedule_auto_resolve("task-alert", stage="alert")
+    server.schedule_auto_resolve("task-arranged", stage="arrangement")
+    assert [a[0] for a in armed] == [
+        settings.alert_decision_timeout_seconds,
+        settings.arrangement_timeout_seconds,
+    ]
+    assert [a[3]["stage"] for a in armed] == ["alert", "arrangement"]
+
+    # A non-positive window disables that stage instead of arming an instant timer
+    monkeypatch.setattr(settings, "arrangement_timeout_seconds", 0)
+    server.schedule_auto_resolve("task-disabled", stage="arrangement")
+    assert len(armed) == 2
+
+
 def test_auto_self_resolve_callback_ignores_unknown_and_non_waiting_tasks():
     server._auto_self_resolve_callback("test-never-reported", 0)
     assert default_mailbox.get_task("test-never-reported") is None

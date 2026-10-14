@@ -108,3 +108,7 @@ class TaskSummary(BaseModel):
     latest_message: Optional[str] = None
     pending_instruction: Optional[InstructionResponse] = None
     events_count: int = 0
+    # Set while an engineer asked for time to arrange a fix (alert auto-decision paused).
+    arrangement_requested_at: Optional[str] = None
+    arrangement_requested_by: Optional[str] = None
+    awaiting_arrangement: bool = False

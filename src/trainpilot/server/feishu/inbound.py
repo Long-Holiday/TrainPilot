@@ -26,6 +26,17 @@ _AT_TAG_RE = re.compile(r"<at[^>]*>.*?</at>", re.DOTALL)
 # so `#/detail` and `C#` are left alone; the tag is removed from the plan body.
 _TASK_TAG_RE = re.compile(r"#([A-Za-z0-9][A-Za-z0-9_.:/-]{0,63})")
 
+# `#fix(task)` dispatches a human-written solution to a task that is already waiting;
+# `#feat(task)` is the explicit spelling of the bare `#task` tag. Both are matched
+# BEFORE `_TASK_TAG_RE` above -- the words `fix`/`feat` are themselves valid bare tags,
+# and would otherwise be bound as tasks named "fix"/"feat".
+_FIX_TAG_RE = re.compile(r"#fix\s*\(([^()\s]{1,64})\)", re.IGNORECASE)
+_FEAT_TAG_RE = re.compile(r"#feat\s*\(([^()\s]{1,64})\)", re.IGNORECASE)
+
+# Words reserved by the tag vocabulary: a bare `#fix`/`#feat` is a mistyped construct,
+# never a task id.
+_RESERVED_TAG_WORDS = frozenset({"fix", "feat"})
+
 
 @dataclass(frozen=True)
 class InboundPlanMessage:
@@ -38,6 +49,11 @@ class InboundPlanMessage:
     text: str
     task_id: Optional[str]
     is_clear: bool
+    # Set when the message carried a `#fix(task) <solution>`: the solution body is in
+    # `text` and the target task in `fix_task_id`. `fix_error` explains why a fix-shaped
+    # message cannot be dispatched (bad syntax, empty solution).
+    fix_task_id: Optional[str] = None
+    fix_error: Optional[str] = None
 
 
 def is_message_event(data: Dict[str, Any]) -> bool:
@@ -95,6 +111,11 @@ def _has_mention(raw: str, message: Dict[str, Any]) -> bool:
     return isinstance(mentions, list) and len(mentions) > 0
 
 
+def _splice(text: str, match: "re.Match[str]") -> str:
+    """Cut a matched tag out of the message body, leaving the rest in place."""
+    return text[: match.start()] + text[match.end() :]
+
+
 def parse_plan_message(data: Dict[str, Any]) -> Optional[InboundPlanMessage]:
     """Turn a message event into a plan, or None when it must be ignored."""
     event = data.get("event")
@@ -136,17 +157,58 @@ def parse_plan_message(data: Dict[str, Any]) -> Optional[InboundPlanMessage]:
     text = _strip_mentions(raw_text, message)
 
     task_id: Optional[str] = None
-    tag = _TASK_TAG_RE.search(text)
-    if tag:
-        task_id = tag.group(1)
-        text = text[: tag.start()] + text[tag.end() :]
+    fix_task_id: Optional[str] = None
+    fix_error: Optional[str] = None
+
+    # Construct tags are resolved first and in this order; once one matched, the bare
+    # `#task` scan is skipped so a trailing `#other` cannot silently rebind the message.
+    matched_construct = True
+    fix = _FIX_TAG_RE.search(text)
+    if fix:
+        # Everything else in a fix message is the human's solution, kept verbatim:
+        # `#fix(demo) 回滚到 #3 检查点` must not lose the `#3`.
+        fix_task_id = fix.group(1)
+        text = _FIX_TAG_RE.sub(" ", text)
+    else:
+        feat = _FEAT_TAG_RE.search(text)
+        if feat:
+            task_id = feat.group(1)
+            text = _FEAT_TAG_RE.sub(" ", text)
+        else:
+            matched_construct = False
+
+    if not matched_construct:
+        tag = _TASK_TAG_RE.search(text)
+        if tag:
+            if tag.group(1).casefold() in _RESERVED_TAG_WORDS:
+                # `#fix 回滚到 step4` (parenthesis forgotten): binding a plan to a task
+                # named "fix" would silently queue work nobody will ever see.
+                fix_error = (
+                    "缺少任务名：请写成 `#fix(任务名) <方案>`（或 `#feat(任务名) <计划>`）"
+                    if tag.group(1).casefold() == "fix"
+                    else "缺少任务名：请写成 `#feat(任务名) <计划>`，或直接用 `#任务名`"
+                )
+            else:
+                task_id = tag.group(1)
+            text = _splice(text, tag)
 
     text = re.sub(r"[ \t]{2,}", " ", text).strip()
-    if not text:
+
+    if fix_task_id and not text:
+        fix_error = "方案正文为空：请在 `#fix(任务名)` 后面写上具体怎么做"
+        fix_task_id = None
+
+    if not text and not (fix_task_id or fix_error):
+        # A fix-shaped message with an empty body still reaches the router so it can
+        # answer with a rejection receipt; everything else here is unusable chatter.
         logger.info("Ignoring Feishu message with no plan text after cleanup")
         return None
 
-    is_clear = text.strip("。.!！?？").strip().casefold() in CLEAR_COMMANDS
+    is_clear = (
+        not fix_task_id
+        and not fix_error
+        and text.strip("。.!！?？").strip().casefold() in CLEAR_COMMANDS
+    )
 
     return InboundPlanMessage(
         chat_id=chat_id,
@@ -156,4 +218,6 @@ def parse_plan_message(data: Dict[str, Any]) -> Optional[InboundPlanMessage]:
         text=text,
         task_id=task_id,
         is_clear=is_clear,
+        fix_task_id=fix_task_id,
+        fix_error=fix_error,
     )

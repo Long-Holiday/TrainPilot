@@ -5,17 +5,24 @@ import logging
 from typing import Any, Dict
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, status
 
+from trainpilot.common.states import TaskState, WAIT_FOR_ARRANGEMENT
 from trainpilot.server.background import feishu_dispatcher
 from trainpilot.server.config import settings
 from trainpilot.server.feishu.cards import (
+    build_deferred_card,
+    build_fix_card,
     build_plan_card,
     build_plan_cleared_card,
     build_resolved_card,
 )
 from trainpilot.server.feishu.client import default_feishu_client
-from trainpilot.server.feishu.inbound import is_message_event, parse_plan_message
-from trainpilot.server.mailbox import default_mailbox
-from trainpilot.server.plans import default_plans
+from trainpilot.server.feishu.inbound import (
+    InboundPlanMessage,
+    is_message_event,
+    parse_plan_message,
+)
+from trainpilot.server.mailbox import TaskNotFoundError, default_mailbox
+from trainpilot.server.plans import MAX_PLAN_TEXT_CHARS, default_plans
 
 logger = logging.getLogger("trainpilot.webhook.feishu")
 
@@ -34,6 +41,11 @@ def _handle_message_event(data: Dict[str, Any]) -> Dict[str, Any]:
     msg = parse_plan_message(data)
     if msg is None:
         return {"code": 0, "msg": "Ignored Feishu message event"}
+
+    # `#fix(task) <solution>` comes first: it addresses a task explicitly, so a bare
+    # `清除` in its body is part of the solution, not a clear command.
+    if msg.fix_task_id or msg.fix_error:
+        return _handle_fix_message(msg)
 
     if msg.is_clear:
         if msg.task_id:
@@ -82,6 +94,80 @@ def _handle_message_event(data: Dict[str, Any]) -> Dict[str, Any]:
         plan_id=plan.plan_id,
     )
     return {"code": 0, "msg": "Plan registered"}
+
+
+def _handle_fix_message(msg: InboundPlanMessage) -> Dict[str, Any]:
+    """Dispatch a human-written fix to the task that is waiting for one.
+
+    Reuses the plan path's conventions: the receipt card is the only feedback channel,
+    it is sent only when something was actually dispatched, and a redelivered message
+    is a silent no-op. A fix NEVER creates a task row -- an unknown task is refused.
+    """
+    def _reject(reason: str, task_id: str) -> Dict[str, Any]:
+        feishu_dispatcher.submit(
+            default_feishu_client.send_card_to_chat,
+            chat_id=msg.chat_id,
+            card_dict=build_fix_card(
+                task_id=task_id,
+                solution=msg.text,
+                operator=msg.sender_open_id,
+                reason=reason,
+            ),
+            card_type="fix_rejected",
+        )
+        return {"code": 0, "msg": "Fix not dispatched"}
+
+    if msg.fix_error or not msg.fix_task_id:
+        return _reject(msg.fix_error or "缺少任务名：请写成 `#fix(任务名) <方案>`", "-")
+
+    task_id = msg.fix_task_id
+    solution = msg.text
+    if len(solution) > MAX_PLAN_TEXT_CHARS:
+        logger.warning("Truncating fix solution for %s from %d to %d chars",
+                       task_id, len(solution), MAX_PLAN_TEXT_CHARS)
+        solution = solution[:MAX_PLAN_TEXT_CHARS]
+
+    try:
+        instruction, created = default_mailbox.submit_fix_decision(
+            task_id=task_id,
+            solution=solution,
+            operator=msg.sender_open_id,
+            source_message_id=msg.message_id,
+        )
+    except TaskNotFoundError:
+        logger.warning("Refusing fix for unknown task %s (no task row is created)", task_id)
+        return _reject(f"任务 `{task_id}` 不存在（#fix 不会为它创建任务行）", task_id)
+    except ValueError as exc:
+        logger.warning("Refusing fix for %s: %s", task_id, exc)
+        return _reject(str(exc), task_id)
+
+    if not created:
+        logger.info("Duplicate fix message %s for task %s; no card sent", msg.message_id, task_id)
+        return {"code": 0, "msg": "Duplicate fix message ignored"}
+
+    logger.warning("Fix dispatched to task %s by %s via group message",
+                   task_id, msg.sender_open_id)
+    feishu_dispatcher.submit(
+        default_feishu_client.send_card_to_chat,
+        chat_id=msg.chat_id,
+        card_dict=build_fix_card(
+            task_id=task_id,
+            solution=solution,
+            operator=msg.sender_open_id,
+            instruction_id=instruction.instruction_id if instruction else None,
+            dispatched_at=instruction.decided_at if instruction else None,
+        ),
+        card_type="fix_dispatched",
+    )
+    # Replace the alert / waiting card in place, so the group sees one closed decision.
+    feishu_dispatcher.submit(
+        default_feishu_client.update_card_to_resolved,
+        task_id=task_id,
+        action="custom",
+        operator=msg.sender_open_id,
+        resolved_at=instruction.decided_at if instruction else None,
+    )
+    return {"code": 0, "msg": "Fix dispatched"}
 
 
 @router.post("/feishu")
@@ -144,6 +230,50 @@ async def feishu_webhook(request: Request, background_tasks: BackgroundTasks) ->
 
     logger.info("Received Feishu card action: task_id=%s, action=%s, operator=%s",
                 task_id, action, operator_name)
+
+    # 4b. 「等待安排」 is not a decision: it only pauses the auto-decision countdown and
+    # asks the human to send `#fix(task) <solution>` in the group. The task stays WAITING
+    # with nothing queued, so the agent keeps long-polling.
+    if action == WAIT_FOR_ARRANGEMENT:
+        try:
+            summary = default_mailbox.defer_alert(task_id, operator_name)
+        except ValueError as exc:
+            logger.warning("Arrangement request rejected for task %s: %s", task_id, exc)
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+
+        # Imported lazily so tests can patch `mcp_server.schedule_auto_resolve` by name.
+        from trainpilot.server.mcp_server import schedule_auto_resolve
+
+        schedule_auto_resolve(task_id, stage="arrangement")
+        deferred_card = build_deferred_card(
+            task_id=task_id,
+            operator=operator_name,
+            timeout_seconds=settings.arrangement_timeout_seconds,
+            requested_at=summary.arrangement_requested_at,
+            original_message=summary.latest_message,
+            step=summary.latest_step,
+            epoch=summary.latest_epoch,
+        )
+        background_tasks.add_task(
+            default_feishu_client.update_card_to_deferred,
+            task_id=task_id,
+            operator=operator_name,
+            timeout_seconds=settings.arrangement_timeout_seconds,
+            requested_at=summary.arrangement_requested_at,
+            original_message=summary.latest_message,
+            step=summary.latest_step,
+            epoch=summary.latest_epoch,
+        )
+        return {
+            "toast": {
+                "type": "success",
+                "content": f"已暂停自动决策，请在群里 @机器人 发送 #fix({task_id}) <方案>",
+            },
+            "card": {
+                "type": "raw",
+                "data": deferred_card,
+            },
+        }
 
     # 5. Save decision into Task Mailbox
     try:

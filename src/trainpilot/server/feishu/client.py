@@ -6,9 +6,11 @@ from collections import deque
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone
 
+from trainpilot.common.states import WAIT_FOR_ARRANGEMENT
 from trainpilot.server.config import ServerSettings, settings
 from trainpilot.server.feishu.cards import (
     build_alert_card,
+    build_deferred_card,
     build_milestone_card,
     build_recovery_card,
     build_resolved_card,
@@ -136,6 +138,7 @@ class FeishuCardClient:
         operator: str = "专家工程师",
         original_message: Optional[str] = None,
         resolved_at: Optional[str] = None,
+        trigger_note: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Update existing card to 'Resolved' status on Feishu to prevent multiple clicks."""
         resolved_card = build_resolved_card(
@@ -144,8 +147,46 @@ class FeishuCardClient:
             operator=operator,
             original_message=original_message,
             resolved_at=resolved_at,
+            trigger_note=trigger_note,
+        )
+        return self._patch_task_card(
+            task_id, resolved_card, "resolved_update",
+            {"action": action, "operator": operator},
         )
 
+    def update_card_to_deferred(
+        self,
+        task_id: str,
+        operator: str = "专家工程师",
+        timeout_seconds: int = 1800,
+        requested_at: Optional[str] = None,
+        original_message: Optional[str] = None,
+        step: Optional[int] = None,
+        epoch: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Replace the alert card with the 'waiting for arrangement' status card."""
+        deferred_card = build_deferred_card(
+            task_id=task_id,
+            operator=operator,
+            timeout_seconds=timeout_seconds,
+            requested_at=requested_at,
+            original_message=original_message,
+            step=step,
+            epoch=epoch,
+        )
+        return self._patch_task_card(
+            task_id, deferred_card, "arrangement_update",
+            {"action": WAIT_FOR_ARRANGEMENT, "operator": operator},
+        )
+
+    def _patch_task_card(
+        self,
+        task_id: str,
+        card_dict: Dict[str, Any],
+        card_type: str,
+        extra: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """PATCH the task's latest Feishu message in place, recording history either way."""
         # Retrieve message_id from SQLite/mailbox first (survives restarts), fallback to local map
         message_id = None
         try:
@@ -159,12 +200,11 @@ class FeishuCardClient:
         record = {
             "task_id": task_id,
             "message_id": message_id,
-            "action": action,
-            "operator": operator,
-            "card": resolved_card,
+            **extra,
+            "card": card_dict,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-        self._sent_cards_history.append({"type": "resolved_update", "data": record})
+        self._sent_cards_history.append({"type": card_type, "data": record})
 
         if self._lark_client and message_id:
             try:
@@ -173,7 +213,7 @@ class FeishuCardClient:
                 request = PatchMessageRequest.builder() \
                     .message_id(message_id) \
                     .request_body(PatchMessageRequestBody.builder()
-                                  .content(json.dumps(resolved_card))
+                                  .content(json.dumps(card_dict))
                                   .build()) \
                     .build()
 
@@ -182,11 +222,12 @@ class FeishuCardClient:
                     logger.error("Failed to patch Feishu message %s: code=%s, msg=%s",
                                  message_id, response.code, response.msg)
                 else:
-                    logger.info("Successfully patched Feishu message %s to resolved for task %s", message_id, task_id)
+                    logger.info("Successfully patched Feishu message %s (%s) for task %s",
+                                message_id, card_type, task_id)
             except Exception as e:
                 logger.error("Exception occurred while patching Feishu card: %s", e)
 
-        return resolved_card
+        return card_dict
 
     def _send_card(
         self,
