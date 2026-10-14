@@ -9,24 +9,11 @@ from fastapi.testclient import TestClient
 
 from trainpilot.common.schemas import EventNotifyRequest
 from trainpilot.common.states import EventType
+from trainpilot.server.background import feishu_dispatcher
+from trainpilot.server.feishu.client import default_feishu_client
 from trainpilot.server.main import app
 from trainpilot.server.mailbox import default_mailbox
 from trainpilot.server.mcp_server import ack_instruction
-from trainpilot.server.config import settings
-
-
-@pytest.fixture(autouse=True)
-def reset_mailbox():
-    default_mailbox.reset()
-    old_token = settings.feishu_verification_token
-    old_api_token = settings.api_token
-    # 测试必须与本地 .env 解耦: 强制关闭 API 鉴权与 Webhook 校验
-    settings.feishu_verification_token = None
-    settings.api_token = None
-    yield
-    settings.feishu_verification_token = old_token
-    settings.api_token = old_api_token
-    default_mailbox.reset()
 
 
 @pytest.fixture
@@ -49,18 +36,19 @@ def test_health_endpoint(client: TestClient):
 
 
 @pytest.mark.asyncio
-async def test_alert_and_decision_flow(client: TestClient):
+async def test_decision_and_recovery_card_flow(client: TestClient):
+    """Alert -> operator decision over REST -> agent poll/ack over MCP -> recovery card."""
     task_id = "test-api-task"
 
-    # 1. Agent reports an alert over MCP -> WAITING
-    assert _record(task_id, step=100, epoch=1, metrics={"loss": 10000.0}).value == "WAITING"
+    # 1. Agent reports an alert -> WAITING
+    assert _record(task_id, message="Loss exploded", step=60, epoch=1).value == "WAITING"
 
     # 2. Nothing decided yet -> no instruction
-    poll = await default_mailbox.get_instruction_async(task_id, pop=False, wait_timeout=0.0)
-    assert poll.has_instruction is False
-    assert poll.status.value == "WAITING"
+    idle_poll = await default_mailbox.get_instruction_async(task_id, pop=False, wait_timeout=0.0)
+    assert idle_poll.has_instruction is False
+    assert idle_poll.status.value == "WAITING"
 
-    # 3. Simulate human decision via API
+    # 3. Human submits a decision via the operator API
     dec_resp = client.post(
         f"/api/tasks/{task_id}/decision",
         json={"task_id": task_id, "action": "self_resolve", "operator": "Dr. Wang"},
@@ -69,25 +57,33 @@ async def test_alert_and_decision_flow(client: TestClient):
     assert dec_resp.json()["action"] == "self_resolve"
 
     # 4. Poll after decision -> has_instruction: true, pops into RECOVERING
-    poll2 = await default_mailbox.get_instruction_async(task_id, pop=True, wait_timeout=0.0)
-    assert poll2.has_instruction is True
-    assert poll2.action == "self_resolve"
-    assert poll2.instruction_id is not None
+    poll = await default_mailbox.get_instruction_async(task_id, pop=True, wait_timeout=0.0)
+    assert poll.has_instruction is True
+    assert poll.instruction_id is not None
+    assert client.get(f"/api/tasks/{task_id}/status").json()["state"] == "RECOVERING"
 
-    status_resp = client.get(f"/api/tasks/{task_id}/status")
-    assert status_resp.status_code == 200
-    assert status_resp.json()["state"] == "RECOVERING"
-
-    # 5. Agent acks over MCP -> back to RUNNING
+    # 5. Agent acks over MCP -> back to RUNNING; step/epoch are backfilled from the TaskRecord
     ack = ack_instruction(
         task_id=task_id,
-        instruction_id=poll2.instruction_id,
+        instruction_id=poll.instruction_id,
         action="self_resolve",
         status="success",
-        solution="Self-resolved and continued training",
+        solution="已跳过异常 Batch 并恢复正常训练。",
     )
     assert ack["success"] is True
     assert ack["state"] == "RUNNING"
+
+    # 6. The recovery card carries the step from the last report, not from the ack
+    assert feishu_dispatcher.wait_idle(timeout=2.0)
+    rec_cards = [
+        c for c in default_feishu_client.sent_cards_history
+        if c.get("type") == "recovery" and c.get("task_id") == task_id
+    ]
+    assert len(rec_cards) == 1
+    card_dict = rec_cards[0]["card"]
+    assert "【异常已自行解决】" in card_dict["header"]["title"]["content"]
+    assert "Step `60`" in str(card_dict)
+    assert "已跳过异常 Batch" in str(card_dict)
 
 
 def test_decision_rejected_for_unknown_task(client: TestClient):
@@ -177,45 +173,3 @@ def test_feishu_webhook_flow(client: TestClient):
     assert inst["has_instruction"] is True
     assert inst["action"] == "stop_training"
     assert inst["decision_by"] == "ou_feishu_engineer"
-
-
-@pytest.mark.asyncio
-async def test_ack_recovery_card_flow(client: TestClient):
-    from trainpilot.server.feishu.client import default_feishu_client
-
-    task_id = "ack-recovery-test-task"
-
-    # 1. 触发告警 (Agent 通过 MCP report)
-    assert _record(task_id, message="Loss exploded", step=60, epoch=1).value == "WAITING"
-
-    # 2. 模拟下发决策
-    dec_resp = client.post(
-        f"/api/tasks/{task_id}/decision",
-        json={"task_id": task_id, "action": "self_resolve"},
-    )
-    assert dec_resp.status_code == 200
-    assert dec_resp.json()["action"] == "self_resolve"
-
-    # 3. Agent 消费指令并 ACK; step/epoch 由控制面从 TaskRecord 补齐
-    poll = await default_mailbox.get_instruction_async(task_id, pop=True, wait_timeout=0.0)
-    resp = ack_instruction(
-        task_id=task_id,
-        instruction_id=poll.instruction_id,
-        action="self_resolve",
-        status="success",
-        solution="已跳过异常 Batch 并恢复正常训练。",
-    )
-    assert resp["success"] is True
-    assert resp["state"] == "RUNNING"
-
-    # 4. 验证 FeishuClient 接收到恢复卡片, 且带上了最近一次上报的 step
-    from trainpilot.server.background import feishu_dispatcher
-    assert feishu_dispatcher.wait_idle(timeout=2.0)
-
-    history = default_feishu_client.sent_cards_history
-    rec_cards = [c for c in history if c.get("type") == "recovery" and c.get("task_id") == task_id]
-    assert len(rec_cards) == 1
-    card_dict = rec_cards[0]["card"]
-    assert "【异常已自行解决】" in card_dict["header"]["title"]["content"]
-    # step/epoch are backfilled from the TaskRecord, not re-sent by the agent
-    assert "Step `60`" in str(card_dict)

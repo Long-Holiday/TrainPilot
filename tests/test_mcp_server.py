@@ -1,5 +1,6 @@
 """Unit and integration tests for TrainPilot MCP Server."""
 
+import asyncio
 from unittest.mock import Mock
 import pytest
 from trainpilot.common.states import TaskState
@@ -26,19 +27,6 @@ def mock_notifications(monkeypatch):
     for name in ("send_alert", "send_milestone", "send_recovery", "update_card_to_resolved"):
         monkeypatch.setattr(server.default_feishu_client, name, Mock())
     monkeypatch.setattr(server, "_schedule_auto_self_resolve", Mock())
-
-
-@pytest.fixture(autouse=True)
-def clean_mailbox():
-    """Ensure clean mailbox state for each test."""
-    default_mailbox.reset()
-    yield
-    default_mailbox.reset()
-
-
-def test_mcp_server_metadata_and_tools():
-    """Verify MCP Server metadata and exposed tools."""
-    assert mcp_server.name == "TrainPilot"
 
 
 def test_report_milestone_tool():
@@ -155,17 +143,6 @@ def test_report_rejects_invalid_event_type():
     assert default_mailbox.get_task("test-bad-type") is None
 
 
-def test_report_terminal_event_types():
-    """completed/failed event types are accepted by the unified tool."""
-    res_done = report(task_id="test-done", message="Training finished", event_type="completed")
-    assert res_done["success"] is True
-    assert res_done["state"] == TaskState.COMPLETED.value
-
-    res_fail = report(task_id="test-fail", message="Crashed", event_type="failed")
-    assert res_fail["success"] is True
-    assert res_fail["state"] == TaskState.FAILED.value
-
-
 def test_get_task_status_unknown_task_does_not_create_it():
     """Reading an unknown task reports not-found instead of fabricating a task row."""
     res = get_task_status(task_id="test-unknown-task")
@@ -176,9 +153,16 @@ def test_get_task_status_unknown_task_does_not_create_it():
     assert default_mailbox.list_tasks() == []
 
 
-@pytest.mark.asyncio
-async def test_agent_guidance_exposed_in_mcp_metadata():
+@pytest.fixture(scope="module")
+def mcp_tools():
+    """The tool objects an MCP client actually sees, fetched once for both contract tests."""
+    return {tool.name: tool for tool in asyncio.run(mcp_server.list_tools())}
+
+
+def test_mcp_surface_metadata_and_guidance(mcp_tools):
     """Check metadata seen by AI clients, not just Python function docstrings."""
+    assert mcp_server.name == "TrainPilot"
+
     instructions = mcp_server.instructions
     assert "report(event_type='alert')" in instructions
     assert "process exit status" in instructions
@@ -187,27 +171,24 @@ async def test_agent_guidance_exposed_in_mcp_metadata():
     assert "instruction_id" in instructions
     assert "Connecting MCP does not monitor or pause GPU processes" in instructions
 
-    tools = {tool.name: tool for tool in await mcp_server.list_tools()}
-    assert set(tools) == {
+    assert set(mcp_tools) == {
         "report", "poll_instruction", "ack_instruction", "get_task_status",
     }
     # Behaviour rules belong to `instructions`; docstrings must point there, not restate them.
-    assert "specified in the server instructions" in tools["report"].description
-    assert "has_instruction" in tools["poll_instruction"].description
-    assert "after you have executed it" in tools["ack_instruction"].description
-    assert "instruction_id" in tools["ack_instruction"].description
-    assert "instruction-mailbox summary" in tools["get_task_status"].description
-    assert tools["report"].input_schema["properties"]["event_type"]["default"] == "milestone"
+    assert "specified in the server instructions" in mcp_tools["report"].description
+    assert "has_instruction" in mcp_tools["poll_instruction"].description
+    assert "after you have executed it" in mcp_tools["ack_instruction"].description
+    assert "instruction_id" in mcp_tools["ack_instruction"].description
+    assert "instruction-mailbox summary" in mcp_tools["get_task_status"].description
+    assert mcp_tools["report"].input_schema["properties"]["event_type"]["default"] == "milestone"
 
 
-@pytest.mark.asyncio
-async def test_tool_input_schemas_are_exactly_the_agent_contract():
+def test_tool_input_schemas_are_exactly_the_agent_contract(mcp_tools):
     """Pin the exposed parameter sets so signature drift cannot slip through.
 
     Every other test calls these tools as Python functions, which is blind to a
     leftover (or missing) parameter in the MCP schema.
     """
-    tools = {tool.name: tool for tool in await mcp_server.list_tools()}
     expected = {
         "report": {"message", "event_type", "task_id", "step", "epoch", "metrics", "agent_note"},
         "poll_instruction": {"task_id", "wait_timeout"},
@@ -215,11 +196,11 @@ async def test_tool_input_schemas_are_exactly_the_agent_contract():
         "get_task_status": {"task_id"},
     }
     for name, props in expected.items():
-        assert set(tools[name].input_schema["properties"]) == props, name
-    assert tools["report"].input_schema["required"] == ["message"]
+        assert set(mcp_tools[name].input_schema["properties"]) == props, name
+    assert mcp_tools["report"].input_schema["required"] == ["message"]
 
     # The agent surface is tools-only; the resource listings were removed.
-    assert await mcp_server.list_resources() == []
+    assert asyncio.run(mcp_server.list_resources()) == []
 
 
 @pytest.mark.parametrize("message,metrics", [
@@ -251,7 +232,7 @@ def test_alert_delivery_and_next_action(message, metrics):
     server._schedule_auto_self_resolve.assert_called_once_with("test-agent-error")
 
 
-def test_auto_self_resolve_callback_respects_the_timeout_window():
+def test_auto_self_resolve_callback_only_fires_past_the_timeout_window():
     """The timer callback must not resolve an alert that may still get a human decision."""
     task_id = "test-auto-resolve"
     report(task_id=task_id, message="Loss NaN", event_type="alert", step=10)
@@ -263,14 +244,8 @@ def test_auto_self_resolve_callback_respects_the_timeout_window():
     assert task.pending_instruction is None
     server.default_feishu_client.update_card_to_resolved.assert_not_called()
 
-
-def test_auto_self_resolve_callback_resolves_on_timeout():
-    """Past the window, the alert is auto-resolved and the Feishu card is patched."""
-    task_id = "test-auto-resolve-elapsed"
-    report(task_id=task_id, message="Loss NaN", event_type="alert", step=10)
-
+    # Past the window, the alert is auto-resolved and the Feishu card is patched.
     server._auto_self_resolve_callback(task_id, 0)
-
     task = default_mailbox.get_task(task_id)
     assert task.state == TaskState.RESOLVED
     assert task.pending_instruction is not None
@@ -295,7 +270,9 @@ def test_auto_self_resolve_callback_ignores_unknown_and_non_waiting_tasks():
     ("failed", TaskState.FAILED),
 ])
 def test_non_alert_reports_do_not_request_decision(event_type, state):
+    """milestone/completed/failed are accepted and never open a decision window."""
     result = report(task_id="test-non-alert", message="Training update", event_type=event_type)
+    assert result["success"] is True
     assert result["state"] == state.value
     assert "next_action" not in result
     server.default_feishu_client.send_alert.assert_not_called()

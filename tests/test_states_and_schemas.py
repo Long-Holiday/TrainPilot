@@ -1,38 +1,32 @@
 """Unit tests for states and schemas."""
 
 from trainpilot.common.schemas import (
-    EventNotifyRequest,
     InstructionResponse,
 )
 from trainpilot.common.states import ActionType, EventType, TaskState
 
 
-def test_task_states_and_events():
-    assert TaskState.RUNNING == "RUNNING"
-    assert TaskState.WAITING == "WAITING"
-    assert TaskState.RESOLVED == "RESOLVED"
-    assert TaskState.RECOVERING == "RECOVERING"
-    assert TaskState.COMPLETED == "COMPLETED"
-
-    assert EventType.ALERT == "alert"
-    assert EventType.MILESTONE == "milestone"
-    assert [e.value for e in EventType] == ["alert", "milestone", "completed", "failed"]
-    assert ActionType.STOP_TRAINING == "stop_training"
-    assert ActionType.SELF_RESOLVE == "self_resolve"
-
-
-def test_event_notify_serialization():
-    req = EventNotifyRequest(
-        task_id="task-001",
-        event_type=EventType.ALERT,
-        message="Loss NaN exploded",
-        step=120,
-        epoch=1,
-        metrics={"loss": float("nan"), "lr": 1e-4},
-    )
-    assert req.task_id == "task-001"
-    assert req.step == 120
-    assert req.event_type == EventType.ALERT
+def test_state_and_action_values_are_the_wire_contract():
+    """These exact strings cross the MCP/REST/Feishu boundary; pin every member at once."""
+    assert {s.name: s.value for s in TaskState} == {
+        "RUNNING": "RUNNING",
+        "WAITING": "WAITING",
+        "RESOLVED": "RESOLVED",
+        "RECOVERING": "RECOVERING",
+        "COMPLETED": "COMPLETED",
+        "FAILED": "FAILED",
+    }
+    assert {e.name: e.value for e in EventType} == {
+        "ALERT": "alert",
+        "MILESTONE": "milestone",
+        "COMPLETED": "completed",
+        "FAILED": "failed",
+    }
+    assert {a.name: a.value for a in ActionType} == {
+        "STOP_TRAINING": "stop_training",
+        "SELF_RESOLVE": "self_resolve",
+        "CUSTOM": "custom",
+    }
 
 
 def test_instruction_response_serialization():

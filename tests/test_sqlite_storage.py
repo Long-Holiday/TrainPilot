@@ -2,6 +2,8 @@
 
 import os
 import tempfile
+from datetime import datetime, timezone
+
 import pytest
 
 from trainpilot.common.schemas import EventNotifyRequest, InstructionResponse
@@ -115,7 +117,8 @@ def test_sqlite_storage_automatic_retention_pruning(temp_db):
     storage.close()
 
 
-def test_mailbox_integrated_with_sqlite_storage(temp_db):
+@pytest.mark.asyncio
+async def test_mailbox_integrated_with_sqlite_storage(temp_db):
     """Test TaskMailboxManager integrated with SQLite storage."""
     storage = SQLiteStorage(temp_db)
     mailbox = TaskMailboxManager(max_events_per_task=4, storage=storage)
@@ -138,7 +141,7 @@ def test_mailbox_integrated_with_sqlite_storage(temp_db):
 
     # 2. Submit decision & poll
     mailbox.submit_decision("task-mb-sql", action="self_resolve", operator="tester")
-    instruction = mailbox.get_instruction("task-mb-sql", pop=True)
+    instruction = await mailbox.get_instruction_async("task-mb-sql", pop=True)
     assert instruction.has_instruction is True
     assert instruction.action == "self_resolve"
     assert mailbox.get_task("task-mb-sql").state == TaskState.RECOVERING
@@ -181,62 +184,38 @@ def test_storage_tasks_count_and_active_only(temp_db):
     storage.close()
 
 
-def test_storage_clean_expired_tasks(temp_db):
-    """Verify clean_expired_tasks deletes old completed/failed tasks."""
-    storage = SQLiteStorage(temp_db)
-    t_old = TaskRecord(
-        task_id="old-completed",
-        state=TaskState.COMPLETED,
-        updated_at="2020-01-01T00:00:00+00:00",
-    )
-    t_new = TaskRecord(
-        task_id="recent-completed",
-        state=TaskState.COMPLETED,
-        updated_at="2099-01-01T00:00:00+00:00",
-    )
-    storage.save_task(t_old)
-    storage.save_task(t_new)
-
-    deleted = storage.clean_expired_tasks(max_age_seconds=3600)
-    assert deleted == 1
-    assert storage.get_task("old-completed") is None
-    assert storage.get_task("recent-completed") is not None
-    storage.close()
-
-
-def test_storage_cleanup_deletes_events_but_preserves_active_tasks(temp_db):
-    """Expired terminal cleanup is atomic in scope and never touches active tasks."""
+def test_storage_expired_cleanup_only_removes_old_terminal_tasks(temp_db):
+    """Cleanup takes expired terminal tasks (and their events) and nothing else."""
     storage = SQLiteStorage(temp_db)
     old_timestamp = "2020-01-01T00:00:00+00:00"
-    expired = TaskRecord(
-        task_id="expired-failed",
-        state=TaskState.FAILED,
-        updated_at=old_timestamp,
+    expired = TaskRecord(task_id="expired-failed", state=TaskState.FAILED, updated_at=old_timestamp)
+    # "Recent" is real clock time, not a far-future placeholder: it has to sit inside the
+    # retention window, otherwise a wrong cutoff direction would still look correct here.
+    recent = TaskRecord(
+        task_id="recent-completed",
+        state=TaskState.COMPLETED,
+        updated_at=datetime.now(timezone.utc).isoformat(),
     )
-    active = TaskRecord(
-        task_id="old-but-running",
-        state=TaskState.RUNNING,
-        updated_at=old_timestamp,
-    )
-    storage.save_task(expired)
-    storage.save_task(active)
-    for task_id in (expired.task_id, active.task_id):
+    active = TaskRecord(task_id="old-but-running", state=TaskState.RUNNING, updated_at=old_timestamp)
+    for task in (expired, recent, active):
+        storage.save_task(task)
         storage.append_event(
-            task_id,
-            {
-                "event_type": "milestone",
-                "message": "event",
-                "timestamp": old_timestamp,
-            },
+            task.task_id,
+            {"event_type": "milestone", "message": "event", "timestamp": old_timestamp},
         )
 
     expired_ids = storage.delete_expired_tasks(max_age_seconds=3600)
 
     assert expired_ids == ["expired-failed"]
+    # 过期任务的 event 一并清除, 活跃与未过期任务不受影响
     assert storage.get_task(expired.task_id) is None
     assert storage.get_events_count(expired.task_id) == 0
+    assert storage.get_task(recent.task_id) is not None
     assert storage.get_task(active.task_id) is not None
     assert storage.get_events_count(active.task_id) == 1
+
+    # clean_expired_tasks 是同一逻辑的计数封装
+    assert storage.clean_expired_tasks(max_age_seconds=3600) == 0
     storage.close()
 
 

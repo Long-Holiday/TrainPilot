@@ -9,13 +9,6 @@ from trainpilot.common.states import EventType
 from trainpilot.server.mailbox import default_mailbox
 
 
-@pytest.fixture(autouse=True)
-def clean_mailbox():
-    default_mailbox.reset()
-    yield
-    default_mailbox.reset()
-
-
 @pytest.mark.asyncio
 async def test_async_long_polling_immediate_return():
     """Async fast path returns immediately when instruction is already available."""

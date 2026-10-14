@@ -86,7 +86,6 @@ class TaskMailboxManager:
         self._lock = threading.Lock()
         self._tasks: Dict[str, TaskRecord] = {}
         self._max_events = max(1, int(max_events_per_task))
-        self._instruction_waiters: Dict[str, List[threading.Event]] = defaultdict(list)
         self._async_instruction_waiters: Dict[str, List[asyncio.Event]] = defaultdict(list)
 
         # Initialize SQLite Storage
@@ -251,16 +250,7 @@ class TaskMailboxManager:
             return task.state
 
     def _notify_instruction_waiters(self, task_id: str) -> None:
-        """Wake up any pending long-polling requests (sync or async) waiting for this task's decision."""
-        # 1. Wake up synchronous waiters
-        sync_waiters = list(self._instruction_waiters.get(task_id, []))
-        for ev in sync_waiters:
-            try:
-                ev.set()
-            except Exception as e:
-                logger.debug("Failed setting sync event for %s: %s", task_id, e)
-
-        # 2. Wake up AsyncIO waiters
+        """Wake up any pending long-polling requests waiting for this task's decision."""
         async_waiters = list(self._async_instruction_waiters.get(task_id, []))
         for a_ev in async_waiters:
             try:
@@ -369,94 +359,6 @@ class TaskMailboxManager:
             self._notify_instruction_waiters(task_id)
 
             return instruction
-
-    def get_instruction(
-        self, task_id: str, pop: bool = True, wait_timeout: float = 0.0
-    ) -> InstructionResponse:
-        """Poll instructions for a task with Long Polling support.
-
-        If wait_timeout > 0 and no instruction is available, blocks up to wait_timeout
-        seconds waiting for submit_decision or try_auto_resolve, waking up immediately.
-        """
-        # 1. Fast path: check if instruction is already available
-        with self._lock:
-            task = self._get_existing(task_id)
-            if task.pending_instruction and task.pending_instruction.has_instruction:
-                instruction = task.pending_instruction
-                if pop:
-                    previous = copy.deepcopy(task)
-                    task.pending_instruction = None
-                    task.state = TaskState.RECOVERING
-                    task.updated_at = utc_now_iso()
-                    task.latest_instruction = {
-                        "instruction_id": instruction.instruction_id,
-                        "action": instruction.action,
-                        "payload": instruction.payload,
-                        "decision_by": instruction.decision_by,
-                        "popped_at": task.updated_at,
-                    }
-                    self._persist_task_or_restore(
-                        task, previous, True, "instruction consumption"
-                    )
-                    logger.info("Task %s polled instruction %s (%s), transitioned to RECOVERING",
-                                task_id, instruction.instruction_id, instruction.action)
-                return instruction
-
-            if wait_timeout <= 0.0:
-                return InstructionResponse(
-                    has_instruction=False,
-                    status=task.state,
-                    instruction_id=None,
-                    action=None,
-                    payload=None,
-                    decision_by=None,
-                    decided_at=None,
-                )
-
-            # Register long-poll waiter
-            wait_event = threading.Event()
-            self._instruction_waiters[task_id].append(wait_event)
-
-        # 2. Long Polling wait (outside the global lock so others are not blocked)
-        wait_event.wait(timeout=wait_timeout)
-
-        # 3. Re-acquire lock and check again
-        with self._lock:
-            waiters = self._instruction_waiters.get(task_id, [])
-            if wait_event in waiters:
-                waiters.remove(wait_event)
-
-            task = self._get_existing(task_id)
-            if task.pending_instruction and task.pending_instruction.has_instruction:
-                instruction = task.pending_instruction
-                if pop:
-                    previous = copy.deepcopy(task)
-                    task.pending_instruction = None
-                    task.state = TaskState.RECOVERING
-                    task.updated_at = utc_now_iso()
-                    task.latest_instruction = {
-                        "instruction_id": instruction.instruction_id,
-                        "action": instruction.action,
-                        "payload": instruction.payload,
-                        "decision_by": instruction.decision_by,
-                        "popped_at": task.updated_at,
-                    }
-                    self._persist_task_or_restore(
-                        task, previous, True, "instruction consumption"
-                    )
-                    logger.info("Task %s (long-polled) obtained instruction %s (%s) -> RECOVERING",
-                                task_id, instruction.instruction_id, instruction.action)
-                return instruction
-
-            return InstructionResponse(
-                has_instruction=False,
-                status=task.state,
-                instruction_id=None,
-                action=None,
-                payload=None,
-                decision_by=None,
-                decided_at=None,
-            )
 
     async def get_instruction_async(
         self, task_id: str, pop: bool = True, wait_timeout: float = 0.0
@@ -647,7 +549,6 @@ class TaskMailboxManager:
             expired_ids = self._storage.delete_expired_tasks(max_age_seconds)
             for task_id in expired_ids:
                 self._tasks.pop(task_id, None)
-                self._instruction_waiters.pop(task_id, None)
                 self._async_instruction_waiters.pop(task_id, None)
             return expired_ids
 
@@ -697,7 +598,6 @@ class TaskMailboxManager:
         """Reset all tasks (mainly for testing)."""
         with self._lock:
             self._tasks.clear()
-            self._instruction_waiters.clear()
             self._async_instruction_waiters.clear()
             try:
                 self._storage.reset()

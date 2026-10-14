@@ -13,7 +13,8 @@ def mailbox():
     return TaskMailboxManager()
 
 
-def test_mailbox_lifecycle_state_machine(mailbox: TaskMailboxManager):
+@pytest.mark.asyncio
+async def test_mailbox_lifecycle_state_machine(mailbox: TaskMailboxManager):
     task_id = "test-task-lifecycle"
 
     # 1. Start with milestone -> RUNNING
@@ -38,7 +39,7 @@ def test_mailbox_lifecycle_state_machine(mailbox: TaskMailboxManager):
     assert st == TaskState.WAITING
 
     # 3. Before decision, polling returns has_instruction=False
-    inst = mailbox.get_instruction(task_id, pop=False)
+    inst = await mailbox.get_instruction_async(task_id, pop=False)
     assert inst.has_instruction is False
     assert inst.status == TaskState.WAITING
 
@@ -55,7 +56,7 @@ def test_mailbox_lifecycle_state_machine(mailbox: TaskMailboxManager):
     assert task.state == TaskState.RESOLVED
 
     # 5. Agent polls with pop=True -> RECOVERING
-    inst_polled = mailbox.get_instruction(task_id, pop=True)
+    inst_polled = await mailbox.get_instruction_async(task_id, pop=True)
     assert inst_polled.has_instruction is True
     assert inst_polled.action == "self_resolve"
 
@@ -63,7 +64,7 @@ def test_mailbox_lifecycle_state_machine(mailbox: TaskMailboxManager):
     assert task_after_pop.state == TaskState.RECOVERING
 
     # Subsequent poll before ack returns has_instruction=False
-    empty_poll = mailbox.get_instruction(task_id, pop=True)
+    empty_poll = await mailbox.get_instruction_async(task_id, pop=True)
     assert empty_poll.has_instruction is False
 
     # 6. Agent acks success -> RUNNING
@@ -87,30 +88,26 @@ def test_mailbox_lifecycle_state_machine(mailbox: TaskMailboxManager):
     assert st_final == TaskState.COMPLETED
 
 
-def test_mailbox_tasks_count(mailbox: TaskMailboxManager):
-    """Verify get_tasks_count behaves consistently."""
-    initial_count = mailbox.get_tasks_count()
-    mailbox._get_or_create("count-task-1")
-    mailbox._get_or_create("count-task-2")
-    assert mailbox.get_tasks_count() == initial_count + 2
+def test_mailbox_lazily_reloads_an_evicted_task_from_storage(mailbox: TaskMailboxManager):
+    """Counts are served by storage, and get_task restores a task evicted from RAM."""
+    before = mailbox.get_tasks_count()
 
-
-def test_mailbox_lazy_load_from_storage(mailbox: TaskMailboxManager):
-    """Verify get_task can lazily retrieve a task from storage even if evicted from RAM."""
-    task_id = "test-lazy-evicted-task"
-    rec = mailbox._get_or_create(task_id)
+    rec = mailbox._get_or_create("test-lazy-evicted-task")
     rec.state = TaskState.COMPLETED
     mailbox._storage.save_task(rec)
+    assert mailbox.get_tasks_count() == before + 1
+    assert mailbox.get_events_count(rec.task_id) == 0
 
     # Manually remove from RAM
-    mailbox._tasks.pop(task_id, None)
-    assert task_id not in mailbox._tasks
+    mailbox._tasks.pop(rec.task_id, None)
+    assert rec.task_id not in mailbox._tasks
 
     # get_task should lazily restore summary from SQLite
-    summary = mailbox.get_task(task_id)
+    summary = mailbox.get_task(rec.task_id)
     assert summary is not None
-    assert summary.task_id == task_id
+    assert summary.task_id == rec.task_id
     assert summary.state == TaskState.COMPLETED
+    assert mailbox.get_tasks_count() == before + 1
 
 
 @pytest.mark.asyncio
@@ -118,8 +115,6 @@ async def test_control_calls_do_not_create_unknown_tasks(mailbox: TaskMailboxMan
     """Read/control typos should return not-found without creating ghost tasks."""
     before = mailbox.get_tasks_count()
 
-    with pytest.raises(ValueError, match="not found"):
-        mailbox.get_instruction("missing-task", wait_timeout=0)
     with pytest.raises(ValueError, match="not found"):
         await mailbox.get_instruction_async("missing-task", wait_timeout=0)
     with pytest.raises(ValueError, match="not found"):
@@ -133,11 +128,3 @@ async def test_control_calls_do_not_create_unknown_tasks(mailbox: TaskMailboxMan
         )
 
     assert mailbox.get_tasks_count() == before
-
-
-def test_existing_task_with_no_events_has_zero_event_count(mailbox: TaskMailboxManager):
-    task = mailbox._get_or_create("zero-events")
-    mailbox._storage.save_task(task)
-    mailbox._tasks.pop(task.task_id)
-
-    assert mailbox.get_events_count(task.task_id) == 0

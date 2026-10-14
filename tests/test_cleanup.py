@@ -1,19 +1,10 @@
 """Unit tests for TaskCleanupService and retention housekeeping."""
 
-import pytest
-
 from trainpilot.common.states import TaskState
 from trainpilot.server.cleanup import TaskCleanupService
 from trainpilot.server.config import ServerSettings
-from trainpilot.server.mailbox import TaskMailboxManager, default_mailbox
+from trainpilot.server.mailbox import TaskMailboxManager
 from trainpilot.server.storage import SQLiteStorage
-
-
-@pytest.fixture(autouse=True)
-def clean_env():
-    default_mailbox.reset()
-    yield
-    default_mailbox.reset()
 
 
 def test_scheduled_task_cleanup_runs(tmp_path):

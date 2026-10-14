@@ -1,18 +1,10 @@
 """Unit and integration tests for MCP Server authentication middleware."""
 
-import pytest
 from fastapi.testclient import TestClient
 
 from trainpilot.server.auth import is_api_token_valid
 from trainpilot.server.config import settings
 from trainpilot.server.main import app
-
-
-@pytest.fixture(autouse=True)
-def reset_auth_settings():
-    old_token = settings.api_token
-    yield
-    settings.api_token = old_token
 
 
 def test_is_api_token_valid_logic():
@@ -28,9 +20,13 @@ def test_is_api_token_valid_logic():
     assert is_api_token_valid("any") is True
 
 
-def test_mcp_endpoint_auth_enforced_when_token_configured():
-    settings.api_token = "test-mcp-key-xyz"
+def test_mcp_endpoint_auth_follows_the_configured_token():
+    # Dev mode: without api_token the request is never blocked by auth
+    settings.api_token = None
+    with TestClient(app) as client:
+        assert client.get("/mcp").status_code != 401
 
+    settings.api_token = "test-mcp-key-xyz"
     with TestClient(app) as client:
         # 1. No token -> 401 Unauthorized
         resp = client.get("/mcp")
@@ -52,12 +48,3 @@ def test_mcp_endpoint_auth_enforced_when_token_configured():
         # 5. OPTIONS preflight -> Allowed without credentials (for browser/CORS)
         resp_opt = client.options("/mcp")
         assert resp_opt.status_code != 401
-
-
-def test_mcp_endpoint_open_in_dev_mode():
-    settings.api_token = None
-
-    with TestClient(app) as client:
-        resp = client.get("/mcp")
-        # In dev mode without api_token, request is never blocked by auth (status != 401)
-        assert resp.status_code != 401
