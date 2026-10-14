@@ -29,3 +29,12 @@ class ActionType(str, Enum):
     STOP_TRAINING = "stop_training"  # Terminate training safely and retain artifacts
     SELF_RESOLVE = "self_resolve"  # Agent resolves by itself, continue training without intervention
     CUSTOM = "custom"  # Custom user-defined action with payload
+
+
+class PlanStatus(str, Enum):
+    """Lifecycle of a next-task plan queued from a Feishu group message."""
+
+    PENDING = "pending"  # Queued, still returned by every matching report
+    DONE = "done"  # Agent carried it out and acknowledged it
+    FAILED = "failed"  # Agent tried and could not
+    SKIPPED = "skipped"  # Agent judged it not applicable

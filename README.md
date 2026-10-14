@@ -122,14 +122,15 @@ to copy into your agent's system prompt. Restart the agent after upgrading Train
 
 ## MCP Interface
 
-Four tools. `message` is the only required argument across all of them.
+Five tools: four for the task loop, plus `ack_plan` for the next-task plans humans queue in Feishu.
 
 | Tool | Inputs | Effect |
 |:---|:---|:---|
-| **`report`** | `message`, `event_type` (`milestone`/`alert`/`completed`/`failed`, default `milestone`), `task_id`, `step`, `epoch`, `metrics`, `agent_note` | `milestone` → green card with the agent's own `agent_note`; `alert` → state `WAITING`, red approval card, 30s auto-decision timer; `completed`/`failed` → terminal |
+| **`report`** | `message`, `event_type` (`milestone`/`alert`/`completed`/`failed`, default `milestone`), `task_id`, `step`, `epoch`, `metrics`, `agent_note` | `milestone` → green card with the agent's own `agent_note`; `alert` → state `WAITING`, red approval card, 30s auto-decision timer; `completed`/`failed` → terminal. Every response carries `next_task_plans` (empty list when there are none) |
 | **`poll_instruction`** | `task_id`, `wait_timeout` (default 20s) | Long-polls until a decision arrives; consumes it and moves the task to `RECOVERING` |
 | **`ack_instruction`** | `task_id`, `instruction_id`, `action`, `status`, `solution` | Records the verified outcome, returns the task to `RUNNING`, pushes a self-healing card built from the task's last reported step/metrics |
 | **`get_task_status`** | `task_id` | Current state, last metrics, pending instruction, event count |
+| **`ack_plan`** | `plan_id`, `status` (`done`/`failed`/`skipped`, default `done`), `note` | Marks a queued next-task plan as handled so it stops appearing in `report` responses |
 
 The REST surface (`/api/tasks`) is for operators and dashboards, not for agents:
 `GET ""`, `GET /{task_id}/status`, `GET /{task_id}/events`, `POST /{task_id}/decision`.
@@ -144,15 +145,45 @@ The REST surface (`/api/tasks`) is for operators and dashboards, not for agents:
 | **Milestone** | green | `report(event_type="milestone")` | Progress, key metrics, **agent's review** |
 | **Decision closed** | turquoise | button click or timeout | Replaces the alert card in place; shows operator, action, time; buttons removed |
 | **Self-healing succeeded** | green | `ack_instruction(status="success")` | The solution the agent actually applied |
+| **Next-task plan registered** | blue | `@bot <plan>` in the group | Plan id, full text, binding (one task or global), submitter |
+| **Next-task plans cleared** | yellow | `@bot clear` | Scope, how many plans were dropped, operator |
 
 Card clicks return `type: "raw"` so Feishu replaces the original card in place within seconds —
 no duplicate clicks. Once a task leaves `WAITING`, further decisions are rejected, and an `ack` must
 carry the matching `instruction_id`.
 
+### Queueing the next task from Feishu
+
+Mentioning the bot in the group is the whole trigger — there is no keyword or prefix. The message body
+becomes a **next-task plan**:
+
+| Group message | Effect |
+|:---|:---|
+| `@bot retrain with 5e-5 for 10 epochs` | Global plan — appears in every task's `report` |
+| `@bot retrain with 5e-5 #demo-llm-pretrain` | Bound to `demo-llm-pretrain`; the `#…` tag is stripped from the body |
+| `@bot clear` (`取消` / `清除` also work) | Drops every unacknowledged plan |
+| `@bot clear #demo-llm-pretrain` | Drops only that task's unacknowledged plans |
+
+Each `report` carries the plans that apply to the reporting task — those bound to it plus the global
+ones — in `next_task_plans`, and the server's MCP instructions tell the agent to execute them at a safe
+point and then confirm with `ack_plan`. An unacknowledged plan reappears on every report; that is what
+lets it survive a crashed or restarted agent, and it is not a repeat instruction. A plan never creates a
+task row and need not name a task that exists yet, so you can queue work before the run starts.
+
+The bot answers with a confirmation card in the same group echoing the `plan_id` and the binding — that
+card is the only feedback channel, which is how you catch a `#tag` that was meant as ordinary prose
+("see issue #123") and silently bound the plan to a task that will never report. Feishu retries an event
+it cannot confirm within ~3s; the `message_id` is unique, so a retry registers neither a second plan nor
+a second card. Pending plans are never expired by cleanup — only acknowledged or cleared ones are
+reaped — and clearing has no permission check beyond being able to mention the bot.
+
 **App setup:** create an enterprise app on the [Feishu Open Platform](https://open.feishu.cn/) →
 copy `App ID` / `App Secret` / `Verification Token` from *Credentials & Basic Info* → set both the
 event subscription URL and the card callback URL to `http://<PUBLIC_SERVER_IP>:28780/webhook/feishu`
-→ grant `im:message` scopes → add the bot to the group and copy the `chat_id` (or use an `open_id`).
+→ grant `im:message` scopes, plus `im:message.group_at_msg` to receive group messages that mention the
+bot → add the bot to the group and copy the `chat_id` (or use an `open_id`). Leave *Encrypt Key* empty:
+the webhook does not decrypt events. Restrict who can mention the bot if you do not want every group
+member to be able to queue and clear plans.
 
 Without credentials the server runs in Mock mode and prints cards to the console instead.
 
@@ -191,6 +222,7 @@ intranet GPU client — are documented inline there, variable by variable. The o
 | `TRAINPILOT_API_TOKEN` | – | Bearer token for MCP/REST; empty = open |
 | `TRAINPILOT_FEISHU_APP_ID` / `_APP_SECRET` / `_RECEIVER_ID` | – | Card delivery; unset = Mock mode |
 | `TRAINPILOT_ALERT_DECISION_TIMEOUT_SECONDS` | `30` | Auto-`self_resolve` after this long with no human decision |
+| `TRAINPILOT_ENABLE_NEXT_TASK_PLANS` | `true` | Feishu next-task plans: `@bot` in the group queues one; `false` ignores every message event |
 | `TRAINPILOT_LONG_POLL_TIMEOUT_SECONDS` | `20.0` | Server-side long-poll ceiling |
 | `TRAINPILOT_SQLITE_PATH` | `trainpilot.db` | SQLite WAL file (`TRAINPILOT_ENABLE_SQLITE=false` for memory-only) |
 | `TRAINPILOT_TASK_ID` | `train-task-default` | Fallback when a tool call omits `task_id` |

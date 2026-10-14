@@ -170,15 +170,18 @@ def test_mcp_surface_metadata_and_guidance(mcp_tools):
     assert "has_instruction=true" in instructions
     assert "instruction_id" in instructions
     assert "Connecting MCP does not monitor or pause GPU processes" in instructions
+    assert "next_task_plans" in instructions
+    assert "ack_plan" in instructions
 
     assert set(mcp_tools) == {
-        "report", "poll_instruction", "ack_instruction", "get_task_status",
+        "report", "poll_instruction", "ack_instruction", "ack_plan", "get_task_status",
     }
     # Behaviour rules belong to `instructions`; docstrings must point there, not restate them.
     assert "specified in the server instructions" in mcp_tools["report"].description
     assert "has_instruction" in mcp_tools["poll_instruction"].description
     assert "after you have executed it" in mcp_tools["ack_instruction"].description
     assert "instruction_id" in mcp_tools["ack_instruction"].description
+    assert "specified in the server instructions" in mcp_tools["ack_plan"].description
     assert "instruction-mailbox summary" in mcp_tools["get_task_status"].description
     assert mcp_tools["report"].input_schema["properties"]["event_type"]["default"] == "milestone"
 
@@ -193,11 +196,13 @@ def test_tool_input_schemas_are_exactly_the_agent_contract(mcp_tools):
         "report": {"message", "event_type", "task_id", "step", "epoch", "metrics", "agent_note"},
         "poll_instruction": {"task_id", "wait_timeout"},
         "ack_instruction": {"task_id", "instruction_id", "action", "status", "solution"},
+        "ack_plan": {"plan_id", "status", "note"},
         "get_task_status": {"task_id"},
     }
     for name, props in expected.items():
         assert set(mcp_tools[name].input_schema["properties"]) == props, name
     assert mcp_tools["report"].input_schema["required"] == ["message"]
+    assert mcp_tools["ack_plan"].input_schema["required"] == ["plan_id"]
 
     # The agent surface is tools-only; the resource listings were removed.
     assert asyncio.run(mcp_server.list_resources()) == []
@@ -277,3 +282,75 @@ def test_non_alert_reports_do_not_request_decision(event_type, state):
     assert "next_action" not in result
     server.default_feishu_client.send_alert.assert_not_called()
     server._schedule_auto_self_resolve.assert_not_called()
+
+
+def test_report_carries_only_matching_pending_plans():
+    """Global plans reach every task; a bound plan only reaches its own task."""
+    global_plan, _ = server.default_plans.register("用 5e-5 重跑", created_by="ou_human")
+    bound_plan, _ = server.default_plans.register("评测 checkpoint", task_id="task-a")
+    other_plan, _ = server.default_plans.register("别的任务", task_id="task-b")
+
+    result = report(task_id="task-a", message="step 10 done", step=10)
+    assert [p["plan_id"] for p in result["next_task_plans"]] == [
+        global_plan.plan_id,
+        bound_plan.plan_id,
+    ]
+    assert other_plan.plan_id not in [p["plan_id"] for p in result["next_task_plans"]]
+
+    entry = result["next_task_plans"][1]
+    assert set(entry) == {"plan_id", "text", "task_id", "created_by", "created_at"}
+    assert entry["text"] == "评测 checkpoint"
+    assert entry["task_id"] == "task-a"
+    assert "next_task_plans_guidance" in result
+
+
+@pytest.mark.parametrize("event_type", ["milestone", "completed", "failed"])
+def test_reports_without_plans_carry_an_empty_list(event_type):
+    """`[]` is the explicit 'I checked, nothing queued' signal; no guidance key."""
+    result = report(task_id="test-no-plans", message="Training update", event_type=event_type)
+    assert result["next_task_plans"] == []
+    assert "next_task_plans_guidance" not in result
+
+
+def test_alert_carries_plans_alongside_the_alert_contract():
+    """Plan keys must not displace the alert-specific next_action/guidance pair."""
+    server.default_plans.register("重跑评测", task_id="test-alert-with-plan")
+    result = report(task_id="test-alert-with-plan", message="Loss NaN", event_type="alert", step=3)
+    assert result["state"] == TaskState.WAITING.value
+    assert result["next_action"] == {
+        "tool": "poll_instruction",
+        "arguments": {"task_id": "test-alert-with-plan"},
+    }
+    assert len(result["next_task_plans"]) == 1
+    assert "Alert recorded" in result["guidance"]
+
+
+def test_ack_plan_removes_the_plan_from_later_reports():
+    plan, _ = server.default_plans.register("跑评测", task_id="test-ack-plan")
+
+    assert len(report(task_id="test-ack-plan", message="m1")["next_task_plans"]) == 1
+
+    ack = server.ack_plan(plan_id=plan.plan_id, status="done", note="已跑完评测")
+    assert ack["success"] is True
+    assert ack["status"] == "done"
+    assert ack["acked_at"]
+
+    after = report(task_id="test-ack-plan", message="m2")
+    assert after["next_task_plans"] == []
+    assert "next_task_plans_guidance" not in after
+
+
+def test_ack_plan_rejects_unknown_duplicate_and_bad_status():
+    bad_status = server.ack_plan(plan_id="plan_missing", status="whatever")
+    assert bad_status["success"] is False
+    assert "Invalid status 'whatever'" in bad_status["error"]
+
+    unknown = server.ack_plan(plan_id="plan_missing")
+    assert unknown["success"] is False
+    assert "not found" in unknown["error"]
+
+    plan, _ = server.default_plans.register("一次性任务", task_id="test-ack-plan-twice")
+    assert server.ack_plan(plan_id=plan.plan_id)["success"] is True
+    duplicate = server.ack_plan(plan_id=plan.plan_id)
+    assert duplicate["success"] is False
+    assert "already acknowledged" in duplicate["error"]

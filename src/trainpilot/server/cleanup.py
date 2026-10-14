@@ -25,6 +25,7 @@ class TaskCleanupService:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._tasks_expired_total = 0
+        self._plans_expired_total = 0
         self._last_cleanup_at: Optional[str] = None
         self._last_cleanup_monotonic: Optional[float] = None
 
@@ -39,7 +40,9 @@ class TaskCleanupService:
             "task_cleanup_enabled": self.settings.enable_task_cleanup,
             "task_retention_hours": self.settings.task_retention_hours,
             "task_cleanup_interval_seconds": self.settings.task_cleanup_interval_seconds,
+            "plan_retention_hours": self.settings.plan_retention_hours,
             "tasks_expired_total": self._tasks_expired_total,
+            "plans_expired_total": self._plans_expired_total,
             "last_cleanup_at": self._last_cleanup_at,
         }
 
@@ -77,6 +80,7 @@ class TaskCleanupService:
         """Perform a single maintenance and cleanup sweep."""
         trimmed = 0
         cleaned_tasks = 0
+        cleaned_plans = 0
         vacuum_reclaimed = False
         if self.mailbox._storage:
             cleanup_due = (
@@ -96,12 +100,17 @@ class TaskCleanupService:
                     expired_ids = self.mailbox.clean_expired_tasks(retention_seconds)
                     cleaned_tasks = len(expired_ids)
                     self._tasks_expired_total += cleaned_tasks
+                    # Acknowledged next-task plans only; pending ones never expire.
+                    cleaned_plans = self.mailbox._storage.delete_expired_plans(
+                        max_age_seconds=self.settings.plan_retention_hours * 3600
+                    )
+                    self._plans_expired_total += cleaned_plans
                     self._last_cleanup_at = datetime.now(timezone.utc).isoformat()
                     self._last_cleanup_monotonic = time.monotonic()
                 except Exception as exc:
                     logger.error("Failed to clean expired tasks: %s", exc)
 
-            if trimmed > 0 or cleaned_tasks > 0:
+            if trimmed > 0 or cleaned_tasks > 0 or cleaned_plans > 0:
                 try:
                     self.mailbox._storage.checkpoint_and_vacuum()
                     vacuum_reclaimed = True
@@ -115,6 +124,7 @@ class TaskCleanupService:
         return {
             "events_trimmed": trimmed,
             "tasks_expired": cleaned_tasks,
+            "plans_expired": cleaned_plans,
             "vacuum_reclaimed": vacuum_reclaimed,
             "last_cleanup_at": self._last_cleanup_at,
         }

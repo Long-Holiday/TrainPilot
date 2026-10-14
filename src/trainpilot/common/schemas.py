@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from pydantic import AliasChoices, BaseModel, Field
 
-from trainpilot.common.states import EventType, TaskState
+from trainpilot.common.states import EventType, PlanStatus, TaskState
 
 
 def utc_now_iso() -> str:
@@ -61,6 +61,38 @@ class FeishuCardActionPayload(BaseModel):
     task_id: str = Field(..., description="Task identifier to steer")
     action: str = Field(..., description="Selected action")
     payload: Optional[Dict[str, Any]] = Field(default=None, description="Additional params")
+
+
+class NextTaskPlan(BaseModel):
+    """A 'next task' queued by a human through the Feishu group.
+
+    Plans are read by the GPU Agent from every `report` response and stay pending --
+    and therefore keep reappearing -- until acknowledged with `ack_plan` or cleared.
+    A plan never creates or requires a task row: `task_id` is None for a global plan
+    and otherwise only a routing filter for which reports carry it.
+    """
+
+    plan_id: str = Field(..., description="Unique ID used to acknowledge the plan")
+    text: str = Field(..., description="Plan body as typed in Feishu, task tag stripped")
+    task_id: Optional[str] = Field(None, description="Bound task id; None means every task")
+    status: PlanStatus = Field(default=PlanStatus.PENDING, description="Pending until acknowledged")
+    created_at: str = Field(default_factory=utc_now_iso, description="ISO timestamp of registration")
+    created_by: Optional[str] = Field(None, description="Feishu open_id of the sender")
+    source: str = Field(default="feishu", description="Where the plan was registered from")
+    chat_id: Optional[str] = Field(None, description="Originating Feishu chat, used for the receipt card")
+    source_message_id: Optional[str] = Field(None, description="Feishu message id, the idempotency key")
+    acked_at: Optional[str] = Field(None, description="Timestamp of the acknowledgement")
+    ack_note: Optional[str] = Field(None, description="What the agent reported after carrying it out")
+
+    def brief(self) -> Dict[str, Any]:
+        """The projection the GPU Agent sees inside a `report` response."""
+        return {
+            "plan_id": self.plan_id,
+            "text": self.text,
+            "task_id": self.task_id,
+            "created_by": self.created_by,
+            "created_at": self.created_at,
+        }
 
 
 class TaskSummary(BaseModel):

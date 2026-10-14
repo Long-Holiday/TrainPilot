@@ -203,6 +203,9 @@ class TrainPilotMCPClient:
     ) -> Dict[str, Any]:
         """Report any training event (milestone/alert/completed/failed) via the unified MCP tool.
 
+        The response carries `next_task_plans`, the follow-up work humans queued in the
+        Feishu group; acknowledge each one with `ack_plan` once carried out.
+
         Milestone reports fail silently by default so a transient gateway hiccup never
         interrupts the training loop; alerts are always raised on failure.
         """
@@ -265,6 +268,21 @@ class TrainPilotMCPClient:
             args["instruction_id"] = instruction_id
 
         return self.call_tool("ack_instruction", args)
+
+    def ack_plan(
+        self,
+        plan_id: str,
+        status: str = "done",
+        note: str = "",
+    ) -> Dict[str, Any]:
+        """Acknowledge a next-task plan read from a report response.
+
+        Until acknowledged, the plan keeps reappearing in `report` responses.
+        """
+        return self.call_tool(
+            "ack_plan",
+            {"plan_id": plan_id, "status": status, "note": note},
+        )
 
     def get_task_status(self, task_id: Optional[str] = None) -> Dict[str, Any]:
         """Query task state and mailbox via MCP Server."""

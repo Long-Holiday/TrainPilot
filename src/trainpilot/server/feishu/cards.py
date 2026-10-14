@@ -316,3 +316,112 @@ def build_recovery_card(
     }
 
 
+def build_plan_card(
+    plan_id: str,
+    text: str,
+    task_id: Optional[str] = None,
+    created_by: Optional[str] = None,
+    created_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Construct the receipt card for a next-task plan registered from the group.
+
+    这是登记成功唯一的反馈通道（群里 @机器人 即登记），因此必须回显计划编号、
+    完整正文与绑定对象；同时告知撤销方式。
+    """
+    time_str = created_at or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    binding = f"`{task_id}`" if task_id else "全局（适用所有任务）"
+
+    markdown_lines = [
+        f"**🆔 计划编号**: `{plan_id}`",
+        f"**🎯 绑定任务**: {binding}",
+        f"**📝 计划内容**: \n> {text}",
+        f"**👤 提交人**: {created_by or '飞书工程师'}",
+        f"**🕒 登记时间**: `{time_str}`",
+        "",
+        "> 📌 Agent 将在下次 report 汇报时读取并按顺序执行；执行完成后以 `ack_plan` 确认。"
+        "计划在被确认或清除之前会一直保留。",
+    ]
+
+    elements: List[Dict[str, Any]] = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": "\n".join(markdown_lines),
+            },
+        },
+        {
+            "tag": "note",
+            "elements": [
+                {
+                    "tag": "plain_text",
+                    "content": "TrainPilot 下一步计划 • 撤销：@机器人 发送「清除」或「清除 #任务ID」",
+                }
+            ],
+        },
+    ]
+
+    return {
+        "config": {"wide_screen_mode": True, "enable_forward": True},
+        "header": {
+            "template": "blue",
+            "title": {
+                "tag": "plain_text",
+                "content": "📌【下一步计划已登记】",
+            },
+        },
+        "elements": elements,
+    }
+
+
+def build_plan_cleared_card(
+    cleared_count: int,
+    scope_task_id: Optional[str] = None,
+    operator: Optional[str] = None,
+    cleared_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Construct the receipt card for a clear command (sent even when nothing matched)."""
+    time_str = cleared_at or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    scope = f"任务 `{scope_task_id}`" if scope_task_id else "全局（所有未确认计划）"
+
+    markdown_lines = [
+        f"**🎯 清除范围**: {scope}",
+        f"**🗑 已清除条数**: `{cleared_count}`",
+        f"**👤 操作人**: {operator or '飞书工程师'}",
+        f"**🕒 操作时间**: `{time_str}`",
+        "",
+        "> 🧹 如仍需该计划，请重新 @机器人 发送。此处的清除只影响尚未被 Agent 确认的计划。",
+    ]
+
+    elements: List[Dict[str, Any]] = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": "\n".join(markdown_lines),
+            },
+        },
+        {
+            "tag": "note",
+            "elements": [
+                {
+                    "tag": "plain_text",
+                    "content": "TrainPilot 下一步计划 • 已清除的计划不会再出现在 report 响应中",
+                }
+            ],
+        },
+    ]
+
+    return {
+        "config": {"wide_screen_mode": True, "enable_forward": True},
+        "header": {
+            "template": "yellow",
+            "title": {
+                "tag": "plain_text",
+                "content": "🧹【待办计划已清除】",
+            },
+        },
+        "elements": elements,
+    }
+
+

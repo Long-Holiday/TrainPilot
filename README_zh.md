@@ -118,14 +118,15 @@ TrainPilot 后重启 Agent 即可刷新。任何工具的 `task_id` 都可省略
 
 ## MCP 接口
 
-共 4 个工具，其中 `message` 是唯一必填参数。
+共 5 个工具：前四个覆盖任务闭环，`ack_plan` 用于确认人类在飞书群里排的下一步计划。
 
 | 工具 | 入参 | 效果 |
 |:---|:---|:---|
-| **`report`** | `message`、`event_type`（`milestone`/`alert`/`completed`/`failed`，默认 `milestone`）、`task_id`、`step`、`epoch`、`metrics`、`agent_note` | `milestone` → 绿色卡片并展示 Agent 自撰的 `agent_note`；`alert` → 状态置 `WAITING`、推送红色审批卡片并启动 30s 自动决策定时器；`completed`/`failed` → 终态 |
+| **`report`** | `message`、`event_type`（`milestone`/`alert`/`completed`/`failed`，默认 `milestone`）、`task_id`、`step`、`epoch`、`metrics`、`agent_note` | `milestone` → 绿色卡片并展示 Agent 自撰的 `agent_note`；`alert` → 状态置 `WAITING`、推送红色审批卡片并启动 30s 自动决策定时器；`completed`/`failed` → 终态。每次响应都携带 `next_task_plans`（没有计划时为空列表） |
 | **`poll_instruction`** | `task_id`、`wait_timeout`（默认 20s） | 长轮询挂起直至决策到达；消费该指令并把任务推进到 `RECOVERING` |
 | **`ack_instruction`** | `task_id`、`instruction_id`、`action`、`status`、`solution` | 记录已核实的执行结果，任务回到 `RUNNING`，并推送由任务最近一次上报的 step/metrics 构建的自愈卡片 |
 | **`get_task_status`** | `task_id` | 当前状态、最近指标、待处理指令、事件计数 |
+| **`ack_plan`** | `plan_id`、`status`（`done`/`failed`/`skipped`，默认 `done`）、`note` | 确认某条下一步计划已处理，之后它不再出现在 `report` 响应里 |
 
 REST 面（`/api/tasks`）面向运维与看板，不面向 Agent：
 `GET ""`、`GET /{task_id}/status`、`GET /{task_id}/events`、`POST /{task_id}/decision`。
@@ -140,14 +141,40 @@ REST 面（`/api/tasks`）面向运维与看板，不面向 Agent：
 | **训练里程碑** | 绿色 | `report(event_type="milestone")` | 阶段进度、关键指标、**Agent 点评** |
 | **决策闭环** | 青色 | 点击按钮或超时 | 就地替换原告警卡片；展示操作人、所选动作、解决时间；移除按钮 |
 | **自愈成功** | 绿色 | `ack_instruction(status="success")` | Agent 实际执行的处理方案 |
+| **下一步计划已登记** | 蓝色 | 群里 `@机器人 <计划>` | 计划编号、完整正文、绑定对象（某个任务或全局）、提交人 |
+| **待办计划已清除** | 黄色 | `@机器人 清除` | 清除范围、清掉几条、操作人 |
 
 点击按钮时服务端返回 `type: "raw"`，飞书会在数秒内就地替换原卡片，避免并发重复点击；任务一旦
 离开 `WAITING`，后续决策一律拒绝，且 ack 必须携带匹配的 `instruction_id`。
 
+### 在群里排下一步任务
+
+群里 @机器人 就是全部触发条件，**没有关键字、没有前缀**，消息正文即一条「下一步计划」：
+
+| 群消息 | 效果 |
+|:---|:---|
+| `@机器人 用 5e-5 重跑 10 个 epoch` | 全局计划 —— 每个任务的 `report` 都看得到 |
+| `@机器人 用 5e-5 重跑 #demo-llm-pretrain` | 绑定到 `demo-llm-pretrain`；`#…` 标签会从正文里剥掉 |
+| `@机器人 清除`（`取消` / `clear` 同样有效） | 清空所有未确认计划 |
+| `@机器人 清除 #demo-llm-pretrain` | 只清空该任务名下的未确认计划 |
+
+每次 `report` 都会在 `next_task_plans` 里带回适用于该任务的计划（绑定本任务的 + 全局的），
+服务端的 MCP instructions 会指示 Agent 在安全点执行、然后用 `ack_plan` 确认。未确认的计划会
+**每次 report 都重新出现**——这正是它能扛住 Agent 崩溃/重启的原因，不是重复指令。计划**永远不创建
+task 行**，也不要求被绑定的任务已经存在，所以可以先把活排上、再等开跑。
+
+机器人会在原群回一张确认卡片，回显 `plan_id` 与绑定对象；这是唯一的反馈通道，也是你发现
+「正文里的 `#123` 本来只是引用 issue，却把计划悄悄绑到了一个永远不会汇报的任务上」的方式。
+飞书对 ~3s 内没确认的事件会重投；`message_id` 是唯一键，所以重投既不会登记出第二条计划，也不会
+重发卡片。待确认的计划不会被清理服务回收（只有已确认的才会），清除除了「能在群里 @机器人」之外
+没有任何权限校验。
+
 **应用开通：** 在[飞书开放平台](https://open.feishu.cn/)创建企业自建应用 → 从「凭证与基础信息」
 复制 `App ID` / `App Secret` / `Verification Token` → 把事件订阅 URL 与卡片回调 URL 都设为
-`http://<公网服务器IP>:28780/webhook/feishu` → 申请 `im:message` 权限 → 把机器人拉进群并复制
-`chat_id`（或使用个人 `open_id`）。
+`http://<公网服务器IP>:28780/webhook/feishu` → 申请 `im:message` 权限，另外为「接收群里 @机器人
+的消息」申请 `im:message.group_at_msg` → 把机器人拉进群并复制 `chat_id`（或使用个人 `open_id`）。
+「加密策略」的 Encrypt Key 请留空：webhook 不解密事件。若不希望群里所有人都能排/清计划，请自行
+限制谁能 @机器人。
 
 未配置凭据时服务端进入 Mock 模式，卡片直接打印到控制台。
 
@@ -186,6 +213,7 @@ docker run -d -p 28780:28780 -v $(pwd)/trainpilot.db:/app/trainpilot.db \
 | `TRAINPILOT_API_TOKEN` | – | MCP/REST 的 Bearer Token；留空为开放模式 |
 | `TRAINPILOT_FEISHU_APP_ID` / `_APP_SECRET` / `_RECEIVER_ID` | – | 卡片推送；未配置则进入 Mock 模式 |
 | `TRAINPILOT_ALERT_DECISION_TIMEOUT_SECONDS` | `30` | 超过该时长无人决策则自动 `self_resolve` |
+| `TRAINPILOT_ENABLE_NEXT_TASK_PLANS` | `true` | 飞书下一步计划：群里 `@机器人` 即登记一条；`false` 则忽略所有消息事件 |
 | `TRAINPILOT_LONG_POLL_TIMEOUT_SECONDS` | `20.0` | 服务端长轮询上限 |
 | `TRAINPILOT_SQLITE_PATH` | `trainpilot.db` | SQLite WAL 文件（`TRAINPILOT_ENABLE_SQLITE=false` 则仅内存） |
 | `TRAINPILOT_TASK_ID` | `train-task-default` | 工具调用省略 `task_id` 时的回退值 |

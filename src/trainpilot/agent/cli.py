@@ -101,7 +101,15 @@ def main(argv=None) -> int:
     p_ack.add_argument("--solution", default="", help="What you actually did")
     p_ack.add_argument("--instruction-id", default=None, help="Instruction ID from poll")
 
-    # 4. status
+    # 4. ack-plan
+    p_ack_plan = subparsers.add_parser("ack-plan", help="Acknowledge a next-task plan from a report")
+    p_ack_plan.add_argument("--plan-id", required=True, help="plan_id from a report's next_task_plans")
+    p_ack_plan.add_argument(
+        "--status", default="done", choices=["done", "failed", "skipped"], help="What happened"
+    )
+    p_ack_plan.add_argument("--note", default="", help="What you actually did")
+
+    # 5. status
     subparsers.add_parser("status", help="Get current task status")
 
     args = parser.parse_args(argv)
@@ -133,6 +141,13 @@ def main(argv=None) -> int:
                 status=args.status,
                 solution=args.solution,
                 instruction_id=args.instruction_id,
+            )
+
+        elif args.subcommand == "ack-plan":
+            res = client.ack_plan(
+                plan_id=args.plan_id,
+                status=args.status,
+                note=args.note,
             )
 
         else:  # status

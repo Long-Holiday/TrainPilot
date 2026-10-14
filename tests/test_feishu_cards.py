@@ -5,6 +5,8 @@ import pytest
 from trainpilot.server.feishu.cards import (
     build_alert_card,
     build_milestone_card,
+    build_plan_card,
+    build_plan_cleared_card,
     build_recovery_card,
     build_resolved_card,
 )
@@ -134,3 +136,51 @@ def test_build_recovery_card():
     assert "问题已解决，训练任务已恢复正常运行" in contents
     assert "150" in contents
     assert "Epoch `2`" in contents
+
+
+def test_build_plan_card_echoes_id_text_and_binding():
+    card = build_plan_card(
+        plan_id="plan_abc123",
+        text="用 5e-5 重跑 10 个 epoch",
+        task_id="demo-llm-pretrain",
+        created_by="ou_engineer",
+        created_at="2026-10-14T08:00:00+00:00",
+    )
+    assert card["header"]["template"] == "blue"
+    assert "【下一步计划已登记】" in card["header"]["title"]["content"]
+    assert _action_values(card) is None
+
+    contents = _div_text(card)
+    assert "`plan_abc123`" in contents
+    assert "用 5e-5 重跑 10 个 epoch" in contents
+    assert "`demo-llm-pretrain`" in contents
+    assert "ou_engineer" in contents
+    assert "ack_plan" in contents
+
+
+def test_build_plan_card_marks_a_global_plan():
+    card = build_plan_card(plan_id="plan_global", text="跑评测")
+    contents = _div_text(card)
+    assert "全局（适用所有任务）" in contents
+    assert "跑评测" in contents
+
+
+def test_build_plan_cleared_card_reports_scope_count_and_operator():
+    card = build_plan_cleared_card(
+        cleared_count=2,
+        scope_task_id="demo-llm-pretrain",
+        operator="ou_engineer",
+        cleared_at="2026-10-14T08:05:00+00:00",
+    )
+    assert card["header"]["template"] == "yellow"
+    assert "【待办计划已清除】" in card["header"]["title"]["content"]
+
+    contents = _div_text(card)
+    assert "`2`" in contents
+    assert "`demo-llm-pretrain`" in contents
+    assert "ou_engineer" in contents
+
+    # An unscoped clear still renders as global, and a zero count still sends the card.
+    global_card = build_plan_cleared_card(cleared_count=0)
+    assert "全局（所有未确认计划）" in _div_text(global_card)
+    assert "`0`" in _div_text(global_card)

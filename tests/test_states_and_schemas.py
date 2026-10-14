@@ -3,7 +3,7 @@
 from trainpilot.common.schemas import (
     InstructionResponse,
 )
-from trainpilot.common.states import ActionType, EventType, TaskState
+from trainpilot.common.states import ActionType, EventType, PlanStatus, TaskState
 
 
 def test_state_and_action_values_are_the_wire_contract():
@@ -26,6 +26,12 @@ def test_state_and_action_values_are_the_wire_contract():
         "STOP_TRAINING": "stop_training",
         "SELF_RESOLVE": "self_resolve",
         "CUSTOM": "custom",
+    }
+    assert {p.name: p.value for p in PlanStatus} == {
+        "PENDING": "pending",
+        "DONE": "done",
+        "FAILED": "failed",
+        "SKIPPED": "skipped",
     }
 
 

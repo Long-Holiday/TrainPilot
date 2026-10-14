@@ -3,6 +3,8 @@
 from trainpilot.server.feishu.cards import (
     build_alert_card,
     build_milestone_card,
+    build_plan_card,
+    build_plan_cleared_card,
     build_resolved_card,
 )
 from trainpilot.server.feishu.client import FeishuCardClient, default_feishu_client
@@ -10,6 +12,8 @@ from trainpilot.server.feishu.client import FeishuCardClient, default_feishu_cli
 __all__ = [
     "build_alert_card",
     "build_milestone_card",
+    "build_plan_card",
+    "build_plan_cleared_card",
     "build_resolved_card",
     "FeishuCardClient",
     "default_feishu_client",

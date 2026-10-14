@@ -7,7 +7,7 @@ human-in-the-loop decision loop against this control plane.
 
 import logging
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from mcp.server.mcpserver import MCPServer
 
 from trainpilot.common.schemas import (
@@ -18,8 +18,17 @@ from trainpilot.server.config import settings
 from trainpilot.server.background import feishu_dispatcher
 from trainpilot.server.feishu.client import default_feishu_client
 from trainpilot.server.mailbox import default_mailbox
+from trainpilot.server.plans import ACK_STATUSES, default_plans
 
 logger = logging.getLogger("trainpilot.server.mcp")
+
+_PLANS_GUIDANCE = (
+    "The human queued the next-task plans above in Feishu. They stay pending until "
+    "acknowledged: carry each one out at the next safe point (never mid-step, never before an "
+    "open alert is resolved), then call ack_plan with its plan_id, status, and a note describing "
+    "what you did. An unacknowledged plan reappears on every report -- that is not a repeat "
+    "instruction."
+)
 
 # Event types accepted by the unified `report` tool.
 _REPORTABLE_STATES = {
@@ -45,7 +54,14 @@ _INSTRUCTIONS = (
     "Execute the returned action, verify the result, then ack_instruction with its instruction_id and "
     "action: stop_training means stop the job, self_resolve permits a recovery attempt. ACK success "
     "only for a verified result, otherwise ACK failed, and describe only what you actually did. After "
-    "ACKing stop_training, report(event_type='failed')."
+    "ACKing stop_training, report(event_type='failed').\n"
+    "Every report response also carries next_task_plans: follow-up work a human queued in the Feishu "
+    "group, to do after the current run. A plan stays pending until you ack it, so the same plan_id "
+    "reappears on every report -- it is the same plan, not a repeat instruction, and never redo work "
+    "you already finished. At the next safe point, carry out each plan, then call ack_plan with its "
+    "plan_id, a status (done, failed, or skipped), and a note saying what you actually did. A plan "
+    "with task_id null applies to every task; one bound to a task_id only appears on that task's "
+    "reports. While an alert is open, the alert protocol above comes first."
 )
 
 # Initialize central MCP Server instance
@@ -139,6 +155,15 @@ def _resolve_task_id(task_id: Optional[str]) -> str:
     return task_id or settings.task_id
 
 
+def _pending_plans_for(task_id: str) -> List[Dict[str, Any]]:
+    """Next-task plans visible to this task. A read failure must never fail a report."""
+    try:
+        return [plan.brief() for plan in default_plans.list_pending(task_id)]
+    except Exception as exc:
+        logger.error("Failed to read next-task plans for task %s: %s", task_id, exc)
+        return []
+
+
 @mcp_server.tool()
 def report(
     message: str,
@@ -190,7 +215,11 @@ def report(
         "task_id": tid,
         "state": current_state.value,
         "message": f"Event '{key}' recorded. Current state: {current_state.value}",
+        # Always present, on every event type: [] is the explicit "I checked, nothing queued".
+        "next_task_plans": _pending_plans_for(tid),
     }
+    if response["next_task_plans"]:
+        response["next_task_plans_guidance"] = _PLANS_GUIDANCE
     if resolved_type == EventType.ALERT:
         response["next_action"] = {
             "tool": "poll_instruction",
@@ -296,6 +325,41 @@ def ack_instruction(
         "task_id": tid,
         "state": new_state.value,
         "message": f"Instruction acknowledged with status '{status}'",
+    }
+
+
+@mcp_server.tool()
+def ack_plan(plan_id: str, status: str = "done", note: str = "") -> Dict[str, Any]:
+    """Acknowledge a next-task plan you have carried out.
+
+    Plans arrive in the next_task_plans field of every report response; how to execute
+    and acknowledge them is specified in the server instructions. Until you acknowledge
+    one, it keeps reappearing on every report.
+
+    Args:
+        plan_id: The plan_id from a report response's next_task_plans entry. Required.
+        status: 'done' (default), 'failed', or 'skipped'.
+        note: One or two sentences on what you actually did.
+    """
+    normalized = (status or "").strip().lower()
+    if normalized not in ACK_STATUSES:
+        return {
+            "success": False,
+            "plan_id": plan_id,
+            "error": f"Invalid status '{status}'. Use one of: {', '.join(ACK_STATUSES)}",
+        }
+    try:
+        plan = default_plans.ack(plan_id, status=normalized, note=note)
+    except ValueError as exc:
+        return {"success": False, "plan_id": plan_id, "error": str(exc)}
+
+    logger.info("Next-task plan %s acknowledged as '%s'", plan_id, normalized)
+    return {
+        "success": True,
+        "plan_id": plan.plan_id,
+        "status": normalized,
+        "acked_at": plan.acked_at,
+        "message": f"Plan '{plan.plan_id}' acknowledged as '{normalized}'",
     }
 
 

@@ -5,14 +5,83 @@ import logging
 from typing import Any, Dict
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, status
 
+from trainpilot.server.background import feishu_dispatcher
 from trainpilot.server.config import settings
-from trainpilot.server.feishu.cards import build_resolved_card
+from trainpilot.server.feishu.cards import (
+    build_plan_card,
+    build_plan_cleared_card,
+    build_resolved_card,
+)
 from trainpilot.server.feishu.client import default_feishu_client
+from trainpilot.server.feishu.inbound import is_message_event, parse_plan_message
 from trainpilot.server.mailbox import default_mailbox
+from trainpilot.server.plans import default_plans
 
 logger = logging.getLogger("trainpilot.webhook.feishu")
 
 router = APIRouter(prefix="/webhook", tags=["Feishu Webhook"])
+
+
+def _handle_message_event(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Register (or clear) a next-task plan from an @-bot group message.
+
+    Feishu retries a callback it does not see answered quickly, so this path does one
+    INSERT and one dispatcher submit; the receipt card is sent out of band.
+    """
+    if not settings.enable_next_task_plans:
+        return {"code": 0, "msg": "Next-task plans are disabled"}
+
+    msg = parse_plan_message(data)
+    if msg is None:
+        return {"code": 0, "msg": "Ignored Feishu message event"}
+
+    if msg.is_clear:
+        if msg.task_id:
+            cleared = default_plans.clear_pending_for_task(msg.task_id)
+        else:
+            cleared = default_plans.clear_all_pending()
+        logger.info(
+            "Feishu clear command from %s cleared %d pending plan(s) (scope=%s)",
+            msg.sender_open_id, cleared, msg.task_id or "global",
+        )
+        feishu_dispatcher.submit(
+            default_feishu_client.send_card_to_chat,
+            chat_id=msg.chat_id,
+            card_dict=build_plan_cleared_card(
+                cleared_count=cleared,
+                scope_task_id=msg.task_id,
+                operator=msg.sender_open_id,
+            ),
+            card_type="plan_cleared",
+        )
+        return {"code": 0, "msg": "Cleared pending next-task plans"}
+
+    plan, created = default_plans.register(
+        text=msg.text,
+        task_id=msg.task_id,
+        created_by=msg.sender_open_id,
+        chat_id=msg.chat_id,
+        source_message_id=msg.message_id,
+    )
+    if not created:
+        logger.info("Duplicate Feishu message %s; plan %s already registered",
+                    msg.message_id, plan.plan_id)
+        return {"code": 0, "msg": "Duplicate plan message ignored"}
+
+    feishu_dispatcher.submit(
+        default_feishu_client.send_card_to_chat,
+        chat_id=msg.chat_id,
+        card_dict=build_plan_card(
+            plan_id=plan.plan_id,
+            text=plan.text,
+            task_id=plan.task_id,
+            created_by=plan.created_by,
+            created_at=plan.created_at,
+        ),
+        card_type="plan_registered",
+        plan_id=plan.plan_id,
+    )
+    return {"code": 0, "msg": "Plan registered"}
 
 
 @router.post("/feishu")
@@ -41,7 +110,12 @@ async def feishu_webhook(request: Request, background_tasks: BackgroundTasks) ->
         logger.warning("Received invalid or missing token on Feishu webhook")
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unauthorized token")
 
-    # 3. Handle interactive card action trigger (card.action.trigger)
+    # 3. Handle group messages (@-mentioning the bot) carrying a next-task plan.
+    # Must run before the card-action extraction below, whose empty value short-circuits.
+    if is_message_event(data):
+        return _handle_message_event(data)
+
+    # 4. Handle interactive card action trigger (card.action.trigger)
     # Extract action value and operator across v1 and v2 payload shapes
     action_value = {}
     operator_name = "飞书工程师"
@@ -71,7 +145,7 @@ async def feishu_webhook(request: Request, background_tasks: BackgroundTasks) ->
     logger.info("Received Feishu card action: task_id=%s, action=%s, operator=%s",
                 task_id, action, operator_name)
 
-    # 4. Save decision into Task Mailbox
+    # 5. Save decision into Task Mailbox
     try:
         instruction = default_mailbox.submit_decision(
             task_id=task_id,
@@ -84,7 +158,7 @@ async def feishu_webhook(request: Request, background_tasks: BackgroundTasks) ->
         logger.warning("Webhook decision rejected for task %s: %s", task_id, exc)
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
 
-    # 5. Build resolved card for in-place card replacement (anti-duplicate click)
+    # 6. Build resolved card for in-place card replacement (anti-duplicate click)
     resolved_card = build_resolved_card(
         task_id=task_id,
         action_name=action,

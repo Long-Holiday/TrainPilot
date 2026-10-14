@@ -42,3 +42,35 @@ def test_scheduled_task_cleanup_runs(tmp_path):
     assert cleanup.run_cleanup_once()["tasks_expired"] == 1
     assert mailbox.get_task("expired-second") is None
     storage.close()
+
+
+def test_cleanup_expires_acked_plans_but_never_pending_ones(tmp_path):
+    """A plan must not silently disappear before the agent ran it."""
+    from trainpilot.server.plans import PlanRegistry
+
+    storage = SQLiteStorage(str(tmp_path / "plans.db"))
+    registry = PlanRegistry(storage=storage)
+    mailbox = TaskMailboxManager(storage=storage)
+    cleanup = TaskCleanupService(
+        mailbox=mailbox,
+        server_settings=ServerSettings(
+            enable_task_cleanup=True,
+            plan_retention_hours=168,
+            task_cleanup_interval_seconds=3600,
+        ),
+    )
+
+    acked, _ = registry.register("旧计划")
+    registry.ack(acked.plan_id)
+    pending, _ = registry.register("还没做")
+
+    # Force every acknowledged plan past its retention window.
+    cleanup.settings.plan_retention_hours = -1
+    result = cleanup.run_cleanup_once()
+
+    assert result["plans_expired"] == 1
+    assert cleanup.get_stats()["plans_expired_total"] == 1
+    assert cleanup.get_stats()["plan_retention_hours"] == -1
+    assert storage.get_plan(acked.plan_id) is None
+    assert storage.get_plan(pending.plan_id) is not None
+    storage.close()
