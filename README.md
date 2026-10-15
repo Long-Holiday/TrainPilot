@@ -153,8 +153,9 @@ The REST surface (`/api/tasks`) is for operators and dashboards, not for agents:
 | **Next-task plans cleared** | yellow | `@bot clear` | Scope, how many plans were dropped, operator |
 
 Card clicks return `type: "raw"` so Feishu replaces the original card in place within seconds —
-no duplicate clicks. Once a task leaves `WAITING`, further decisions are rejected, and an `ack` must
-carry the matching `instruction_id`.
+no duplicate clicks. Once a task leaves `WAITING`, further decisions are rejected — as an HTTP 200
+carrying an error toast, never as a 4xx, because Feishu renders any non-200 answer to a card callback
+as the opaque client error `200671` — and an `ack` must carry the matching `instruction_id`.
 
 ### Queueing the next task from Feishu
 

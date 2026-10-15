@@ -386,9 +386,85 @@ def test_feishu_wait_for_arrangement_is_rejected_outside_an_alert(client: TestCl
     _record(task_id, event_type=EventType.MILESTONE, message="epoch 1 done")
 
     resp = _card_values_webhook(client, task_id, "wait_for_arrangement")
-    assert resp.status_code == 409
+    # A refused click is still HTTP 200: Feishu renders any non-200 from a card callback
+    # as the opaque client error 200671, so the refusal travels in the toast instead.
+    assert resp.status_code == 200
+    assert resp.json()["toast"]["type"] == "error"
+    assert task_id in resp.json()["toast"]["content"]
+    assert "card" not in resp.json()
     assert client.get(f"/api/tasks/{task_id}/status").json()["awaiting_arrangement"] is False
     assert armed == []
+
+
+def test_feishu_card_action_for_a_finished_task_is_a_toast_not_an_http_error(client: TestClient):
+    task_id = "feishu-click-after-completion"
+    _record(task_id, event_type=EventType.COMPLETED, message="training finished")
+
+    resp = _card_values_webhook(client, task_id, "stop_training")
+
+    assert resp.status_code == 200
+    assert resp.json()["toast"]["type"] == "error"
+    assert "COMPLETED" in resp.json()["toast"]["content"]
+    assert client.get(f"/api/tasks/{task_id}/status").json()["state"] == "COMPLETED"
+
+
+@pytest.mark.parametrize("action", ["stop_training", "wait_for_arrangement"])
+def test_feishu_card_action_for_an_unknown_task_never_creates_one(client: TestClient, action):
+    resp = _card_values_webhook(client, "feishu-ghost", action)
+
+    assert resp.status_code == 200
+    assert resp.json()["toast"]["type"] == "error"
+    assert client.get("/api/tasks/feishu-ghost/status").status_code == 404
+
+
+def test_feishu_card_action_with_a_bad_token_answers_200_and_dispatches_nothing(
+    client: TestClient, monkeypatch
+):
+    monkeypatch.setattr(settings, "feishu_verification_token", "expected_token")
+    task_id = "feishu-card-bad-token"
+    _record(task_id, message="Loss NaN at step 6")
+
+    payload = {
+        "schema": "2.0",
+        "header": {"event_type": "card.action.trigger", "token": "wrong"},
+        "event": {
+            "operator": {"open_id": "ou_engineer"},
+            "action": {"tag": "button", "value": {"task_id": task_id, "action": "self_resolve"}},
+        },
+    }
+    resp = client.post("/webhook/feishu", json=payload)
+
+    assert resp.status_code == 200
+    assert resp.json()["toast"]["type"] == "error"
+    status = client.get(f"/api/tasks/{task_id}/status").json()
+    assert status["state"] == "WAITING"
+    assert status["pending_instruction"] is None
+
+
+def test_feishu_legacy_card_callback_reports_the_shape_instead_of_a_bare_403(
+    client: TestClient, monkeypatch
+):
+    """The v1 payload's `token` is the c-xxxx card credential, not the verification token."""
+    monkeypatch.setattr(settings, "feishu_verification_token", "expected_token")
+
+    resp = _card_values_webhook(client, "feishu-legacy-shape", "self_resolve")
+
+    assert resp.status_code == 200
+    assert "旧版卡片回调" in resp.json()["toast"]["content"]
+
+
+def test_feishu_card_callback_url_with_a_trailing_slash_is_served(client: TestClient):
+    """A stray "/" in the console URL used to be swallowed by the MCP mount and 404ed."""
+    task_id = "feishu-trailing-slash"
+    _record(task_id, message="Loss NaN at step 6")
+
+    resp = client.post("/webhook/feishu/", json={
+        "open_id": "ou_engineer",
+        "action": {"tag": "button", "value": {"task_id": task_id, "action": "self_resolve"}},
+    })
+
+    assert resp.status_code == 200
+    assert resp.json()["toast"]["type"] == "success"
 
 
 def test_feishu_fix_message_dispatches_a_custom_decision(client: TestClient):
