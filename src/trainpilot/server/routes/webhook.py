@@ -2,7 +2,7 @@
 
 import json
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, status
 
 from trainpilot.common.states import TaskState, WAIT_FOR_ARRANGEMENT
@@ -22,7 +22,7 @@ from trainpilot.server.feishu.inbound import (
     parse_plan_message,
 )
 from trainpilot.server.mailbox import TaskNotFoundError, default_mailbox
-from trainpilot.server.plans import MAX_PLAN_TEXT_CHARS, default_plans
+from trainpilot.server.plans import MAX_PLAN_TEXT_CHARS, PlanBindingError, default_plans
 
 logger = logging.getLogger("trainpilot.webhook.feishu")
 
@@ -68,13 +68,19 @@ def _handle_message_event(data: Dict[str, Any]) -> Dict[str, Any]:
         )
         return {"code": 0, "msg": "Cleared pending next-task plans"}
 
-    plan, created = default_plans.register(
-        text=msg.text,
-        task_id=msg.task_id,
-        created_by=msg.sender_open_id,
-        chat_id=msg.chat_id,
-        source_message_id=msg.message_id,
-    )
+    try:
+        plan, created = default_plans.register(
+            text=msg.text,
+            task_id=msg.task_id,
+            created_by=msg.sender_open_id,
+            chat_id=msg.chat_id,
+            source_message_id=msg.message_id,
+        )
+    except PlanBindingError as exc:
+        # Every plan is bound to an existing task: a plan no report ever carries is
+        # invisible for good, so a wrong task name is refused instead of stored.
+        return _reject_plan(msg, exc.task_id)
+
     if not created:
         logger.info("Duplicate Feishu message %s; plan %s already registered",
                     msg.message_id, plan.plan_id)
@@ -94,6 +100,32 @@ def _handle_message_event(data: Dict[str, Any]) -> Dict[str, Any]:
         plan_id=plan.plan_id,
     )
     return {"code": 0, "msg": "Plan registered"}
+
+
+def _reject_plan(msg: InboundPlanMessage, task_id: Optional[str]) -> Dict[str, Any]:
+    """Refuse a plan whose binding is unusable and say why in the group.
+
+    `task_id` is the one the sender named, or None when the message named no task. The
+    receipt lists the tasks that do exist so the sender can correct the name in place.
+    """
+    reason = (
+        f"任务 `{task_id}` 不存在" if task_id else "缺少任务名：请写成 `#任务名 <计划>`"
+    )
+    logger.warning("Refusing next-task plan from %s (task=%s)",
+                   msg.sender_open_id, task_id or "none")
+    feishu_dispatcher.submit(
+        default_feishu_client.send_card_to_chat,
+        chat_id=msg.chat_id,
+        card_dict=build_plan_card(
+            text=msg.text,
+            task_id=task_id,
+            created_by=msg.sender_open_id,
+            reason=reason,
+            known_task_ids=[t.task_id for t in default_mailbox.list_tasks(limit=5)],
+        ),
+        card_type="plan_rejected",
+    )
+    return {"code": 0, "msg": "Plan not registered"}
 
 
 def _handle_fix_message(msg: InboundPlanMessage) -> Dict[str, Any]:

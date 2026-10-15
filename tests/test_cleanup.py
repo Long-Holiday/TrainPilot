@@ -46,6 +46,8 @@ def test_scheduled_task_cleanup_runs(tmp_path):
 
 def test_cleanup_expires_acked_plans_but_never_pending_ones(tmp_path):
     """A plan must not silently disappear before the agent ran it."""
+    from trainpilot.common.schemas import EventNotifyRequest
+    from trainpilot.common.states import EventType
     from trainpilot.server.plans import PlanRegistry
 
     storage = SQLiteStorage(str(tmp_path / "plans.db"))
@@ -60,9 +62,13 @@ def test_cleanup_expires_acked_plans_but_never_pending_ones(tmp_path):
         ),
     )
 
-    acked, _ = registry.register("旧计划")
+    # Plans are bound to a task that must already exist; a report is what creates one.
+    mailbox.record_event(
+        EventNotifyRequest(task_id="task-a", event_type=EventType.MILESTONE, message="step 1 done")
+    )
+    acked, _ = registry.register("旧计划", task_id="task-a")
     registry.ack(acked.plan_id)
-    pending, _ = registry.register("还没做")
+    pending, _ = registry.register("还没做", task_id="task-a")
 
     # Force every acknowledged plan past its retention window.
     cleanup.settings.plan_retention_hours = -1

@@ -68,13 +68,15 @@ class NextTaskPlan(BaseModel):
 
     Plans are read by the GPU Agent from every `report` response and stay pending --
     and therefore keep reappearing -- until acknowledged with `ack_plan` or cleared.
-    A plan never creates or requires a task row: `task_id` is None for a global plan
-    and otherwise only a routing filter for which reports carry it.
+    Every plan is bound to one task and only that task's reports carry it: the binding
+    is validated against the task table at registration and never creates a task row.
+    `task_id` is optional only because rows written before strict binding may still sit
+    in an existing database.
     """
 
     plan_id: str = Field(..., description="Unique ID used to acknowledge the plan")
     text: str = Field(..., description="Plan body as typed in Feishu, task tag stripped")
-    task_id: Optional[str] = Field(None, description="Bound task id; None means every task")
+    task_id: Optional[str] = Field(None, description="Bound task id; the only task whose reports carry it")
     status: PlanStatus = Field(default=PlanStatus.PENDING, description="Pending until acknowledged")
     created_at: str = Field(default_factory=utc_now_iso, description="ISO timestamp of registration")
     created_by: Optional[str] = Field(None, description="Feishu open_id of the sender")

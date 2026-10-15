@@ -69,6 +69,26 @@ def test_slash_and_csharp_are_not_task_tags():
     assert "#/detail" in msg.text and "C#" in msg.text
 
 
+def test_a_chinese_task_name_binds_like_an_ascii_one():
+    """#fix(任务名) always accepted CJK; the bare tag must not silently degrade instead."""
+    msg = parse_plan_message(_message_event("@_user_1 用 5e-5 重跑 #训练任务A"))
+    assert msg.task_id == "训练任务A"
+    assert msg.text == "用 5e-5 重跑"
+
+
+def test_a_mixed_script_task_name_binds_whole():
+    msg = parse_plan_message(_message_event("@_user_1 继续 #第3次实验"))
+    assert msg.task_id == "第3次实验"
+    assert msg.text == "继续"
+
+
+def test_cjk_prose_after_a_hash_is_not_a_tag():
+    """Only a word directly after `#` binds; punctuation keeps the text as ordinary prose."""
+    msg = parse_plan_message(_message_event("@_user_1 参考 #【重要】那条 再跑一遍"))
+    assert msg.task_id is None
+    assert "#【重要】" in msg.text
+
+
 def test_group_message_without_a_mention_is_ignored():
     assert parse_plan_message(_message_event("下一步跑评测", mentions=False)) is None
 

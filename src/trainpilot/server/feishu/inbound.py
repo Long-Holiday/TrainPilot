@@ -23,8 +23,12 @@ _MENTION_TOKEN_RE = re.compile(r"@_user_\d+")
 _AT_TAG_RE = re.compile(r"<at[^>]*>.*?</at>", re.DOTALL)
 
 # `#task-id` binds the plan to one task. The first character may not be `/` or `#`
-# so `#/detail` and `C#` are left alone; the tag is removed from the plan body.
-_TASK_TAG_RE = re.compile(r"#([A-Za-z0-9][A-Za-z0-9_.:/-]{0,63})")
+# so `#/detail` and `C#` are left alone; the tag is removed from the plan body. CJK is
+# allowed because `#fix(...)`/`#feat(...)` already accept it -- a Chinese task name must
+# not silently degrade into a global plan, and the existence check rejects it loudly if
+# no such task exists. The literal `-` is escaped so `/-` cannot read as a range bound.
+_CJK = r"一-鿿"  # CJK unified ideographs
+_TASK_TAG_RE = re.compile(rf"#([{_CJK}A-Za-z0-9][{_CJK}A-Za-z0-9_.:/\-]{{0,63}})")
 
 # `#fix(task)` dispatches a human-written solution to a task that is already waiting;
 # `#feat(task)` is the explicit spelling of the bare `#task` tag. Both are matched

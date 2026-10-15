@@ -66,6 +66,11 @@ def _record(task_id, event_type=EventType.ALERT, message="Loss NaN at step 100",
     )
 
 
+def _seed_task(task_id):
+    """Create a task row the supported way -- a report. Plans only bind to live tasks."""
+    return _record(task_id, event_type=EventType.MILESTONE, message="epoch 1 done")
+
+
 def test_health_endpoint(client: TestClient):
     resp = client.get("/health")
     assert resp.status_code == 200
@@ -217,7 +222,8 @@ def _plan_cards(card_type):
 
 
 def test_feishu_group_at_message_registers_a_plan(client: TestClient):
-    """@-mentioning the bot is the whole trigger; the tag binds it to one task."""
+    """@-mentioning the bot is the whole trigger; the tag binds it to one live task."""
+    _seed_task("demo-llm-pretrain")
     resp = client.post("/webhook/feishu", json=_message_event(
         "@_user_1 用 5e-5 重跑 10 个 epoch #demo-llm-pretrain"
     ))
@@ -240,8 +246,47 @@ def test_feishu_group_at_message_registers_a_plan(client: TestClient):
     assert "`demo-llm-pretrain`" in card_text
 
 
+def test_feishu_plan_for_an_unknown_task_is_refused(client: TestClient):
+    """A plan nobody's report ever carries would be invisible for good, so it is refused."""
+    _seed_task("demo-llm-pretrain")
+    resp = client.post("/webhook/feishu", json=_message_event(
+        "@_user_1 用 5e-5 重跑 #demo-llm-pretrain-typo"
+    ))
+    assert resp.status_code == 200
+    assert resp.json() == {"code": 0, "msg": "Plan not registered"}
+
+    # Nothing was stored, and no task row was fabricated for the typo either.
+    assert default_plans.list_pending("demo-llm-pretrain-typo") == []
+    assert default_plans.list_pending("demo-llm-pretrain") == []
+    assert default_mailbox.get_task("demo-llm-pretrain-typo") is None
+
+    assert feishu_dispatcher.wait_idle(2.0)
+    assert _plan_cards("plan_registered") == []
+    rejects = _plan_cards("plan_rejected")
+    assert len(rejects) == 1
+    card_text = rejects[0]["card"]["elements"][0]["text"]["content"]
+    assert "不存在" in card_text
+    assert "`demo-llm-pretrain-typo`" in card_text
+    # The tasks that do exist are listed, so the corrected name is one copy-paste away.
+    assert "`demo-llm-pretrain`" in card_text
+
+
+def test_feishu_plan_without_a_task_name_is_refused(client: TestClient):
+    """There are no global plans: every plan names the task whose reports carry it."""
+    _seed_task("demo-llm-pretrain")
+    resp = client.post("/webhook/feishu", json=_message_event("@_user_1 跑评测"))
+    assert resp.json() == {"code": 0, "msg": "Plan not registered"}
+    assert default_plans.list_pending("demo-llm-pretrain") == []
+
+    assert feishu_dispatcher.wait_idle(2.0)
+    rejects = _plan_cards("plan_rejected")
+    assert len(rejects) == 1
+    assert "缺少任务名" in rejects[0]["card"]["elements"][0]["text"]["content"]
+
+
 def test_feishu_group_message_without_mention_is_ignored(client: TestClient):
     """Group chatter that does not @ the bot must never become a task."""
+    _seed_task("demo-llm-pretrain")
     resp = client.post("/webhook/feishu", json=_message_event("大家中午吃什么", mentions=False))
     assert resp.status_code == 200
     assert default_plans.list_pending("demo-llm-pretrain") == []
@@ -249,7 +294,8 @@ def test_feishu_group_message_without_mention_is_ignored(client: TestClient):
 
 def test_feishu_retried_message_event_registers_only_one_plan(client: TestClient):
     """Feishu redelivers events it cannot confirm; the second delivery must be a no-op."""
-    payload = _message_event("@_user_1 跑评测")
+    _seed_task("demo-llm-pretrain")
+    payload = _message_event("@_user_1 跑评测 #demo-llm-pretrain")
     first = client.post("/webhook/feishu", json=payload)
     second = client.post("/webhook/feishu", json=payload)
 
@@ -262,8 +308,11 @@ def test_feishu_retried_message_event_registers_only_one_plan(client: TestClient
 
 
 def test_feishu_clear_command_drops_pending_plans(client: TestClient):
-    client.post("/webhook/feishu", json=_message_event("@_user_1 跑评测"))
-    client.post("/webhook/feishu", json=_message_event("@_user_1 再跑一次", message_id="om_plan_2"))
+    _seed_task("demo-llm-pretrain")
+    client.post("/webhook/feishu", json=_message_event("@_user_1 跑评测 #demo-llm-pretrain"))
+    client.post("/webhook/feishu", json=_message_event(
+        "@_user_1 再跑一次 #demo-llm-pretrain", message_id="om_plan_2"
+    ))
     assert len(default_plans.list_pending("demo-llm-pretrain")) == 2
 
     resp = client.post("/webhook/feishu", json=_message_event("@_user_1 清除", message_id="om_plan_3"))
@@ -449,6 +498,7 @@ def test_feishu_fix_without_a_task_name_is_refused_with_a_hint(client: TestClien
 
 
 def test_feishu_feat_message_registers_a_plan_bound_to_the_task(client: TestClient):
+    _seed_task("demo-llm-pretrain")
     resp = client.post("/webhook/feishu", json=_message_event(
         "@_user_1 #feat(demo-llm-pretrain) 用 5e-5 重跑 10 个 epoch"
     ))

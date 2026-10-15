@@ -240,11 +240,34 @@ def test_build_plan_card_echoes_id_text_and_binding():
     assert "ack_plan" in contents
 
 
-def test_build_plan_card_marks_a_global_plan():
-    card = build_plan_card(plan_id="plan_global", text="跑评测")
+def test_build_plan_card_with_a_reason_is_the_rejection_form():
+    card = build_plan_card(
+        text="用 5e-5 重跑 10 个 epoch",
+        task_id="demo-llm-pretrain",
+        created_by="ou_engineer",
+        created_at="2026-10-14T08:00:00+00:00",
+        reason="任务 `demo-llm-pretrain` 不存在",
+        known_task_ids=["llm-task-1", "llm-task-2"],
+    )
+    assert card["header"]["template"] == "red"
+    assert "【下一步计划未登记】" in card["header"]["title"]["content"]
+
     contents = _div_text(card)
-    assert "全局（适用所有任务）" in contents
-    assert "跑评测" in contents
+    assert "任务 `demo-llm-pretrain` 不存在" in contents
+    # The body is echoed back so the sender can fix the tag and resend it
+    assert "用 5e-5 重跑 10 个 epoch" in contents
+    # The tasks that do exist are listed so the right name is one copy-paste away
+    assert "`llm-task-1`" in contents and "`llm-task-2`" in contents
+    # Nothing was stored, so there is no plan id to acknowledge
+    assert "计划编号" not in contents
+
+
+def test_build_plan_card_rejection_without_a_task_named_lists_no_tasks():
+    card = build_plan_card(text="跑评测", reason="缺少任务名：请写成 `#任务名 <计划>`")
+    contents = _div_text(card)
+    assert "缺少任务名" in contents
+    assert "你绑定的任务" not in contents
+    assert "当前已有任务" not in contents
 
 
 def test_build_plan_cleared_card_reports_scope_count_and_operator():

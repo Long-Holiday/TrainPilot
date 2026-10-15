@@ -670,31 +670,24 @@ class SQLiteStorage:
     def list_pending_plans(
         self, task_id: Optional[str] = None, limit: int = 20
     ) -> List[NextTaskPlan]:
-        """Pending plans visible to a task: globals plus ones bound to it.
+        """Pending plans bound to one task; a caller with no task id matches nothing.
 
         Ordering is FIFO (insertion order) so plans are executed in the order the
-        humans queued them. `task_id=None` returns global plans only.
+        humans queued them. Rows predating the strict binding rule carry a NULL task_id;
+        no query returns them -- `clear_all_pending_plans` is how they are dropped.
         """
+        if not task_id:
+            return []
         with self._lock:
             cur = self._conn.cursor()
-            if task_id is None:
-                cur.execute(
-                    """
-                    SELECT * FROM next_task_plans
-                    WHERE status = ? AND task_id IS NULL
-                    ORDER BY id ASC LIMIT ?
-                    """,
-                    (PlanStatus.PENDING.value, limit),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT * FROM next_task_plans
-                    WHERE status = ? AND (task_id IS NULL OR task_id = ?)
-                    ORDER BY id ASC LIMIT ?
-                    """,
-                    (PlanStatus.PENDING.value, task_id, limit),
-                )
+            cur.execute(
+                """
+                SELECT * FROM next_task_plans
+                WHERE status = ? AND task_id = ?
+                ORDER BY id ASC LIMIT ?
+                """,
+                (PlanStatus.PENDING.value, task_id, limit),
+            )
             return [self._row_to_plan(r) for r in cur.fetchall()]
 
     def get_plan(self, plan_id: str) -> Optional[NextTaskPlan]:

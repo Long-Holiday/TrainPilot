@@ -16,6 +16,11 @@ from trainpilot.server.mcp_server import (
 )
 
 
+def _seed_task(task_id):
+    """Create a task row the supported way -- a report. Plans only bind to live tasks."""
+    return report(task_id=task_id, message="epoch 1 done", event_type="milestone")
+
+
 @pytest.fixture(autouse=True)
 def mock_notifications(monkeypatch):
     """Exercise delivery synchronously without external requests or live timers."""
@@ -348,19 +353,17 @@ def test_non_alert_reports_do_not_request_decision(event_type, state):
 
 
 def test_report_carries_only_matching_pending_plans():
-    """Global plans reach every task; a bound plan only reaches its own task."""
-    global_plan, _ = server.default_plans.register("用 5e-5 重跑", created_by="ou_human")
+    """A plan is carried by its own task's reports and by no other task's."""
+    _seed_task("task-a")
+    _seed_task("task-b")
     bound_plan, _ = server.default_plans.register("评测 checkpoint", task_id="task-a")
     other_plan, _ = server.default_plans.register("别的任务", task_id="task-b")
 
     result = report(task_id="task-a", message="step 10 done", step=10)
-    assert [p["plan_id"] for p in result["next_task_plans"]] == [
-        global_plan.plan_id,
-        bound_plan.plan_id,
-    ]
+    assert [p["plan_id"] for p in result["next_task_plans"]] == [bound_plan.plan_id]
     assert other_plan.plan_id not in [p["plan_id"] for p in result["next_task_plans"]]
 
-    entry = result["next_task_plans"][1]
+    entry = result["next_task_plans"][0]
     assert set(entry) == {"plan_id", "text", "task_id", "created_by", "created_at"}
     assert entry["text"] == "评测 checkpoint"
     assert entry["task_id"] == "task-a"
@@ -377,6 +380,7 @@ def test_reports_without_plans_carry_an_empty_list(event_type):
 
 def test_alert_carries_plans_alongside_the_alert_contract():
     """Plan keys must not displace the alert-specific next_action/guidance pair."""
+    _seed_task("test-alert-with-plan")
     server.default_plans.register("重跑评测", task_id="test-alert-with-plan")
     result = report(task_id="test-alert-with-plan", message="Loss NaN", event_type="alert", step=3)
     assert result["state"] == TaskState.WAITING.value
@@ -389,6 +393,7 @@ def test_alert_carries_plans_alongside_the_alert_contract():
 
 
 def test_ack_plan_removes_the_plan_from_later_reports():
+    _seed_task("test-ack-plan")
     plan, _ = server.default_plans.register("跑评测", task_id="test-ack-plan")
 
     assert len(report(task_id="test-ack-plan", message="m1")["next_task_plans"]) == 1
@@ -412,6 +417,7 @@ def test_ack_plan_rejects_unknown_duplicate_and_bad_status():
     assert unknown["success"] is False
     assert "not found" in unknown["error"]
 
+    _seed_task("test-ack-plan-twice")
     plan, _ = server.default_plans.register("一次性任务", task_id="test-ack-plan-twice")
     assert server.ack_plan(plan_id=plan.plan_id)["success"] is True
     duplicate = server.ack_plan(plan_id=plan.plan_id)

@@ -63,9 +63,9 @@ _INSTRUCTIONS = (
     "group, to do after the current run. A plan stays pending until you ack it, so the same plan_id "
     "reappears on every report -- it is the same plan, not a repeat instruction, and never redo work "
     "you already finished. At the next safe point, carry out each plan, then call ack_plan with its "
-    "plan_id, a status (done, failed, or skipped), and a note saying what you actually did. A plan "
-    "with task_id null applies to every task; one bound to a task_id only appears on that task's "
-    "reports. While an alert is open, the alert protocol above comes first."
+    "plan_id, a status (done, failed, or skipped), and a note saying what you actually did. A plan is "
+    "always bound to one task and only appears on that task's reports. While an alert is open, the "
+    "alert protocol above comes first."
 )
 
 # Initialize central MCP Server instance

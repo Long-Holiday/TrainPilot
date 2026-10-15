@@ -374,19 +374,45 @@ def _receipt_card(
 
 
 def build_plan_card(
-    plan_id: str,
-    text: str,
+    plan_id: Optional[str] = None,
+    text: str = "",
     task_id: Optional[str] = None,
     created_by: Optional[str] = None,
     created_at: Optional[str] = None,
+    reason: Optional[str] = None,
+    known_task_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Construct the receipt card for a next-task plan registered from the group.
 
     这是登记成功唯一的反馈通道（群里 @机器人 即登记），因此必须回显计划编号、
-    完整正文与绑定对象；同时告知撤销方式。
+    完整正文与绑定对象；同时告知撤销方式。带 `reason` 时切换为拒绝形态：说明为什么
+    没有登记，并回显绑定的任务名与现有任务名，便于改正后重发。
     """
     time_str = created_at or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    binding = f"`{task_id}`" if task_id else "全局（适用所有任务）"
+
+    if reason is not None:
+        markdown_lines = [f"**⚠️ 未登记原因**: {reason}"]
+        if task_id:
+            markdown_lines.append(f"**🎯 你绑定的任务**: `{task_id}`")
+        if known_task_ids:
+            listed = "、".join(f"`{tid}`" for tid in known_task_ids)
+            markdown_lines.append(f"**📋 当前已有任务**: {listed}")
+        markdown_lines += [
+            f"**📝 计划内容**（未登记）: \n> {text or '（空）'}",
+            f"**👤 提交人**: {created_by or '飞书工程师'}",
+            f"**🕒 提交时间**: `{time_str}`",
+            "",
+            "> 📌 计划必须绑定到**已存在**的任务，写法为 `@机器人 #任务名 <计划内容>`。"
+            "若 `#xxx` 只是正文（如 issue 编号），去掉 `#` 后重新发送即可。",
+        ]
+        return _receipt_card(
+            template="red",
+            title="⚠️【下一步计划未登记】",
+            markdown_lines=markdown_lines,
+            note_text="TrainPilot 下一步计划 • 这条消息没有登记任何计划",
+        )
+
+    binding = f"`{task_id}`" if task_id else "（未绑定任务）"
 
     markdown_lines = [
         f"**🆔 计划编号**: `{plan_id}`",

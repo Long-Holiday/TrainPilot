@@ -146,7 +146,8 @@ The REST surface (`/api/tasks`) is for operators and dashboards, not for agents:
 | **Decision closed** | turquoise | button click, `#fix` message, or timeout | Replaces the alert card in place; shows operator, action, time; buttons removed |
 | **Awaiting arrangement** | orange | `[⏳ Wait for Arrangement]` click | Replaces the alert card in place; countdown paused, how to send a `#fix`, fallback window |
 | **Self-healing succeeded** | green | `ack_instruction(status="success")` | The solution the agent actually applied |
-| **Next-task plan registered** | blue | `@bot <plan>` in the group | Plan id, full text, binding (one task or global), submitter |
+| **Next-task plan registered** | blue | `@bot <plan> #<task>` in the group | Plan id, full text, bound task, submitter |
+| **Next-task plan not registered** | red | `@bot <plan>` naming no task, or a task that does not exist | Why nothing was stored, the body, the tasks that do exist |
 | **Fix dispatched** | turquoise | `@bot #fix(<task>) <solution>` in the group | Which task the solution reached, its text, submitter, instruction id |
 | **Fix not dispatched** | red | `@bot #fix(...)` that could not be delivered | Why nothing was dispatched (unknown task, no alert waiting, syntax) |
 | **Next-task plans cleared** | yellow | `@bot clear` | Scope, how many plans were dropped, operator |
@@ -162,25 +163,30 @@ becomes a **next-task plan**:
 
 | Group message | Effect |
 |:---|:---|
-| `@bot retrain with 5e-5 for 10 epochs` | Global plan — appears in every task's `report` |
-| `@bot retrain with 5e-5 #demo-llm-pretrain` | Bound to `demo-llm-pretrain`; the `#…` tag is stripped from the body |
+| `@bot retrain with 5e-5 for 10 epochs #demo-llm-pretrain` | Bound to `demo-llm-pretrain`; the `#…` tag is stripped from the body |
 | `@bot retrain with 5e-5 #feat(demo-llm-pretrain)` | Same as the bare `#…` tag — `#feat(...)` is the explicit spelling |
+| `@bot 重跑 #训练任务A` | Task names may be non-ASCII; the tag binds the same way |
+| `@bot retrain with 5e-5` | **Refused** — every plan must name a task (red receipt) |
+| `@bot retrain with 5e-5 #demo-llm-pretrain-typo` | **Refused** — no such task (red receipt lists the tasks that do exist) |
 | `@bot #fix(demo-llm-pretrain) roll back to step 4` | Dispatches a **fix** to that alert instead of queueing a plan — see below |
 | `@bot clear` (`取消` / `清除` also work) | Drops every unacknowledged plan |
 | `@bot clear #demo-llm-pretrain` | Drops only that task's unacknowledged plans |
 
-Each `report` carries the plans that apply to the reporting task — those bound to it plus the global
-ones — in `next_task_plans`, and the server's MCP instructions tell the agent to execute them at a safe
-point and then confirm with `ack_plan`. An unacknowledged plan reappears on every report; that is what
-lets it survive a crashed or restarted agent, and it is not a repeat instruction. A plan never creates a
-task row and need not name a task that exists yet, so you can queue work before the run starts.
+Every plan is bound to exactly one task, and that task must already exist. `report` for that task —
+and only that task — carries the plan in `next_task_plans`, and the server's MCP instructions tell the
+agent to execute it at a safe point and then confirm with `ack_plan`. An unacknowledged plan reappears
+on every report; that is what lets it survive a crashed or restarted agent, and it is not a repeat
+instruction. A plan never creates a task row, so a task cannot be conjured up by queueing work for it:
+start the run, then queue the follow-up.
 
-The bot answers with a confirmation card in the same group echoing the `plan_id` and the binding — that
-card is the only feedback channel, which is how you catch a `#tag` that was meant as ordinary prose
-("see issue #123") and silently bound the plan to a task that will never report. Feishu retries an event
-it cannot confirm within ~3s; the `message_id` is unique, so a retry registers neither a second plan nor
-a second card. Pending plans are never expired by cleanup — only acknowledged or cleared ones are
-reaped — and clearing has no permission check beyond being able to mention the bot.
+The bot answers with a confirmation card in the same group echoing the `plan_id` and the binding. A
+message that names nothing, or names a task with no row behind it, is refused with a red card instead:
+it repeats the body, lists the tasks that do exist, and stores nothing — a plan no report ever carries
+would be invisible and never expire. That is also how a `#tag` meant as ordinary prose ("see issue
+#123") is caught, so dropping the `#` and resending it is the fix. Feishu retries an event it cannot
+confirm within ~3s; the `message_id` is unique, so a retry registers neither a second plan nor a second
+card. Pending plans are never expired by cleanup — only acknowledged or cleared ones are reaped — and
+clearing has no permission check beyond being able to mention the bot.
 
 ### Answering an alert from the group
 
