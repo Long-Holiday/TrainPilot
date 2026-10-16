@@ -1,14 +1,16 @@
 """The one copy of every word the GPU-side plugin ships.
 
-Five agents get five file layouts, but they get identical prose. Keeping the prose here
-means a fix lands everywhere at once -- the alternative (a checked-in directory per agent)
-is five copies that drift the first time one is edited.
+Six agents get six file layouts, but they get identical prose. Keeping the prose here
+means a fix lands everywhere at once -- the alternative (a checked-in directory per
+agent) is six copies that drift the first time one is edited.
 
 What is deliberately *not* here is the behaviour protocol. Per AGENTS.md the agent-facing
-contract lives in exactly one place, ``mcp_server._INSTRUCTIONS`` plus the tool docstrings,
-and the text below points at it rather than restating it. The pointer is executable --
-``trainpilot-cli plugin protocol`` reads the ``instructions`` field out of a live MCP
-handshake -- so a plugin installed today cannot go stale against a server upgraded later.
+contract lives in exactly one place, ``mcp_server._INSTRUCTIONS`` plus the tool
+docstrings, and the text below points at it rather than restating it. The pointer is the
+agent's own MCP connection: a remote client receives those instructions in the
+initialize handshake, so a plugin installed today cannot go stale against a server
+upgraded later. The templates therefore assume the agent's native MCP tools, and name no
+TrainPilot command-line tool at all -- the GPU node installs no Python code.
 """
 
 from dataclasses import dataclass
@@ -17,7 +19,7 @@ from typing import Tuple
 SKILL_NAME = "trainpilot"
 PLUGIN_NAME = "trainpilot"
 
-# One line, single line, <= 500 chars: Codex enforces both limits on skill frontmatter.
+# One line, <= 500 chars: Codex enforces both limits on skill frontmatter.
 SKILL_DESCRIPTION = (
     "Supervise a GPU training run through the TrainPilot control plane: report progress "
     "and anomalies, wait for the engineer's Feishu decision, and acknowledge the recovery. "
@@ -28,54 +30,37 @@ SKILL_DESCRIPTION = (
 SKILL_BODY = """\
 # TrainPilot
 
-TrainPilot is the human-in-the-loop control plane for a training run. It does not watch the
-GPU and it cannot pause a job: you watch the run and control the process, and TrainPilot
-carries an anomaly to the engineer's Feishu card and brings their decision back to you.
+Use your built-in MCP client to connect to the remote TrainPilot control plane. The
+GPU node needs only this skill and the remote MCP configuration: do not install or
+start the TrainPilot Python service, an MCP proxy, or a local training watcher.
+You watch the training process; the control plane connects you to the engineer.
 
-## Load the protocol before you report anything
+## Read the live protocol
 
-The authoritative rules -- when to alert, what counts as a verified recovery, how to poll,
-how to acknowledge a queued next-task plan -- are served by the control plane itself in the
-MCP `instructions` field. Read them at the start of every supervised run:
+Before supervising a run, read the TrainPilot server's MCP initialization
+`instructions` and the tool descriptions supplied by the live connection. They are
+the authoritative supervision protocol, not this skill or a remembered procedure.
+If your client has not exposed those instructions, stop and ask to reconnect or fix
+the MCP integration; do not infer the protocol from this file.
 
-```bash
-trainpilot-cli plugin protocol
-```
+## Bind the run
 
-Work from that output, not from memory and not from this file. The server owns the text, and
-it changes when the server is upgraded; this skill only tells you how to reach it.
+Agree on a distinct `task_id` for each run and pass it explicitly to every TrainPilot
+MCP tool call. If omitted, native MCP calls use the default configured on the
+**server**, not `TRAINPILOT_TASK_ID` in the GPU node's environment. Do not let two
+runs accidentally share a mailbox.
 
-## Bind the run to a task id
+## Check the connection
 
-Every call takes a `task_id`. Omitted, it falls back to `TRAINPILOT_TASK_ID` on this node.
-Pass it explicitly whenever you supervise more than one run, or two jobs will share one
-mailbox and one engineer decision will wake the wrong process.
+Locate the TrainPilot tools in your client's MCP tool list (plugin clients may
+prefix their names). Use `get_task_status` with the agreed task id to check the
+connection without creating a task. An unknown task is normal before its first
+report. Available tools are `report`, `poll_instruction`, `ack_instruction`,
+`get_task_status`, and `ack_plan`; use them according to the live server protocol.
 
-## Check the wiring
-
-```bash
-trainpilot-cli plugin doctor
-```
-
-Confirms the gateway is reachable, the token is accepted, the protocol is readable, and the
-task id resolves -- before anything goes wrong at step 12,000.
-
-## If the MCP tools are absent
-
-A session can start without the TrainPilot MCP server (the agent was not restarted after
-install, the connection failed, the token rotated). The same protocol is reachable over the
-CLI, which calls the same endpoint:
-
-```bash
-trainpilot-cli report --message "loss spiked to 9.3 at step 1200" --type alert --step 1200
-trainpilot-cli poll --wait-timeout 20
-trainpilot-cli ack --instruction-id <id> --action self_resolve --status success --solution "..."
-trainpilot-cli status
-trainpilot-cli ack-plan --plan-id <plan_id> --status done --note "..."
-```
-
-The behaviour rules do not change with the transport. Load them with
-`trainpilot-cli plugin protocol` either way.
+If the tools are missing, check the remote `/mcp` URL and credentials, then restart
+or reconnect the agent. Do not silently substitute a different server or install
+Python packages to work around a missing connection.
 """
 
 
@@ -99,12 +84,13 @@ class Command:
 COMMANDS: Tuple[Command, ...] = (
     Command(
         name="protocol",
-        description="Print TrainPilot's authoritative supervision protocol from the server",
+        description="Read TrainPilot's authoritative protocol from the live MCP connection",
         argument_hint="",
         prompt=(
-            "Run `trainpilot-cli plugin protocol` and treat its output as the authoritative "
-            "TrainPilot supervision protocol for this session. Summarise the key obligations "
-            "in three bullets, then stop."
+            "Read the TrainPilot MCP initialization instructions and tool descriptions from "
+            "the live connection. Summarise the key obligations in three bullets, then stop. "
+            "If the instructions are not visible, ask to reconnect or fix the MCP integration; "
+            "do not invent the protocol. No local TrainPilot CLI is required."
         ),
     ),
     Command(
@@ -112,8 +98,10 @@ COMMANDS: Tuple[Command, ...] = (
         description="Show the current TrainPilot task state, metrics and pending instruction",
         argument_hint="[task_id]",
         prompt=(
-            "Run `trainpilot-cli status` (add `--task-id $ARGUMENTS` when a task id was given) "
-            "and report the task's state, last metrics, and whether an instruction is pending."
+            "Use the TrainPilot get_task_status MCP tool for $ARGUMENTS, or the task id "
+            "already agreed for this run. Ask for a task id if none is bound. Report the "
+            "state, last metrics, and whether an instruction is pending. Do not create a "
+            "task just to inspect it."
         ),
     ),
     Command(
@@ -121,20 +109,20 @@ COMMANDS: Tuple[Command, ...] = (
         description="Report a training event to the TrainPilot control plane",
         argument_hint="<message>",
         prompt=(
-            "Report a training event with `trainpilot-cli report --message \"$ARGUMENTS\"`. "
-            "Choose `--type` from milestone, alert, completed, or failed according to the "
-            "protocol returned by `trainpilot-cli plugin protocol` -- read it if you have not "
-            "already. Include `--step`, `--epoch` and `--metrics` when you know them."
+            "Read the live TrainPilot MCP initialization instructions and tool descriptions "
+            "if you have not already. Use the report MCP tool to report $ARGUMENTS, with "
+            "the task_id agreed for this run (ask if unbound). Choose event_type according "
+            "to the live protocol, and include step, epoch and metrics when known. "
+            "Do not run a local CLI or start a server."
         ),
     ),
 )
 
-# Appended to an agent's instruction file. Short on purpose: it exists to get the agent to
-# the skill, not to teach it the protocol a second time.
 RULES_BLOCK = """\
 ## TrainPilot
 
-This machine supervises training runs through a TrainPilot control plane. Before reporting
-anything about a run, load the live protocol with `trainpilot-cli plugin protocol` and read
-the `trainpilot` skill, which says how to reach it and how to bind a run to a task id.
+Read the `trainpilot` skill and the remote TrainPilot MCP initialization
+`instructions` before supervising a run. Use the agent's built-in MCP tools and an
+explicit task id. The live control plane owns the protocol; no local Python service
+or TrainPilot CLI is required.
 """

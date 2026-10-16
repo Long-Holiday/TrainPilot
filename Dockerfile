@@ -14,8 +14,8 @@ COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 COPY examples ./examples
 
-# The control plane lives in the `server` dependency group; the base deps are the
-# GPU-side client only (mcp + httpx + pydantic), so the image has to ask for it.
+# The control plane lives in the `server` dependency group: the base dependency list is
+# empty because the GPU side installs no Python at all, so the image has to ask for it.
 RUN uv sync --frozen --no-group dev --group server
 
 ENV PYTHONPATH=/app/src \

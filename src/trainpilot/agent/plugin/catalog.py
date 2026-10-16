@@ -83,7 +83,7 @@ TARGETS: Dict[str, AgentTarget] = {
                 "{scope}",
             ),
         ),
-        unregister=(("claude", "plugin", "uninstall", "trainpilot"),),
+        unregister=(("claude", "plugin", "uninstall", "trainpilot@trainpilot", "--scope", "{scope}"),),
         agent_cli="claude",
         manual_hint="claude plugin marketplace add {bundle}",
         note=(

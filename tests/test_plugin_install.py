@@ -281,56 +281,63 @@ def test_claude_code_registration_carries_the_scope(sandbox):
 # --------------------------------------------------------------------------- the command
 
 
-def run_cli(*argv):
-    from trainpilot.agent.cli import main
+def run_installer(*argv):
+    """Drive the plugin command group the way ``scripts/install_agent.py`` does."""
+    import argparse
 
-    return main(list(argv))
+    from trainpilot.agent.plugin import commands
+
+    parser = argparse.ArgumentParser(prog="install_agent.py")
+    sub = parser.add_subparsers(dest="group", required=True)
+    commands.add_parser(sub, prog="install_agent.py")
+    args = parser.parse_args(["plugin", *argv])
+    return args.func(args)
 
 
-def test_cli_refuses_an_unknown_agent_without_writing(sandbox, capsys):
+def test_installer_refuses_an_unknown_agent_without_writing(sandbox, capsys):
     """The installer must never guess at a config file for an agent it does not know."""
     before = sandbox_files(sandbox.root)
-    assert run_cli("plugin", "install", "cursor") == 1
+    assert run_installer("install", "cursor") == 1
     assert "cursor" in capsys.readouterr().err
     assert sandbox_files(sandbox.root) == before
 
 
-def test_cli_installs_generic_user_scope_under_the_sandbox_home(sandbox):
-    assert run_cli("plugin", "install", "generic", "--server-url", GATEWAY) == 0
+def test_installer_installs_generic_user_scope_under_the_sandbox_home(sandbox):
+    assert run_installer("install", "generic", "--server-url", GATEWAY) == 0
     skill = sandbox.home / ".agents" / "skills" / "trainpilot" / "SKILL.md"
     assert skill.exists()
     # User scope has no single AGENTS.md to edit, so the config is left alone.
     assert not (sandbox.home / "AGENTS.md").exists()
 
 
-def test_cli_project_scope_writes_into_the_working_directory(sandbox):
-    assert run_cli("plugin", "install", "generic", "--scope", "project") == 0
+def test_installer_project_scope_writes_into_the_working_directory(sandbox):
+    assert run_installer("install", "generic", "--scope", "project") == 0
     assert (sandbox.project / ".agents" / "skills" / "trainpilot" / "SKILL.md").exists()
     assert "trainpilot" in (sandbox.project / "AGENTS.md").read_text()
 
 
-def test_cli_dry_run_leaves_the_tree_alone(sandbox, capsys):
+def test_installer_dry_run_leaves_the_tree_alone(sandbox, capsys):
     before = sandbox_files(sandbox.root)
-    assert run_cli("plugin", "install", "codex", "--dry-run") == 0
+    assert run_installer("install", "codex", "--dry-run") == 0
     assert "dry run" in capsys.readouterr().out
     assert sandbox_files(sandbox.root) == before
 
 
-def test_cli_render_prints_in_place_targets_instead_of_writing(sandbox, capsys):
-    assert run_cli("plugin", "render", "opencode") == 0
+def test_installer_render_prints_in_place_targets_instead_of_writing(sandbox, capsys):
+    assert run_installer("render", "opencode") == 0
     printed = capsys.readouterr().out
     assert "mcp.servers" in printed or '"servers"' in printed
     assert sandbox_files(sandbox.root) == set(), "render must not install anything"
 
 
-def test_cli_uninstall_round_trips(sandbox):
-    assert run_cli("plugin", "install", "codex") == 0
-    assert run_cli("plugin", "uninstall", "codex") == 0
+def test_installer_uninstall_round_trips(sandbox):
+    assert run_installer("install", "codex") == 0
+    assert run_installer("uninstall", "codex") == 0
     assert sandbox_files(sandbox.root) == set()
 
 
-def test_cli_list_reports_this_machines_agents(sandbox, capsys):
-    assert run_cli("plugin", "list") == 0
+def test_installer_list_reports_this_machines_agents(sandbox, capsys):
+    assert run_installer("list") == 0
     printed = capsys.readouterr().out
     for key in catalog.target_keys():
         assert key in printed

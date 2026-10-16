@@ -81,12 +81,9 @@ uv sync
 cp .env.example .env     # 缺失时 start.sh 会自动创建
 ```
 
-控制面的依赖（FastAPI、uvicorn、lark-oapi）放在 `server` 依赖组而不是基础依赖里，所以克隆本仓库的
-GPU 节点可以直接跳过它们：
-
-```bash
-uv sync --no-group server --no-group dev    # GPU 侧：只装 mcp + httpx + pydantic
-```
+本包**就是**控制面，因此全部运行依赖（FastAPI、uvicorn、lark-oapi、`mcp`、pydantic）都放在
+`server` 依赖组，基础依赖列表为空。GPU 节点不安装其中任何一项，见
+[接入 GPU 侧 Agent](#接入-gpu-侧-agent)。
 
 ```bash
 ./start.sh               # 前台运行，实时日志
@@ -108,21 +105,64 @@ uv run python examples/mock_training.py
 
 ## 接入 GPU 侧 Agent
 
-GPU 节点上**不需要装 TrainPilot 的代码**也能用控制面：受支持的 Agent 都自带远程 MCP 客户端，
-直连 `/mcp`。它们猜不到的是各家对「这里有一个远程 MCP server」的写法，而**写错的后果通常是静默的**
-—— Agent 正常启动，就是永远看不到那几个工具。所以用一条命令把 TrainPilot 渲染成你面前这个 Agent
-认识的格式，写进去，再交给该 Agent 自己的 CLI 去注册：
+**服务端与 GPU 端分开安装。** Python 服务只运行在你的 MCP 服务器；GPU 端只安装 skill 与远程 MCP
+连接信息，不需要任何 Python 包、命令行工具或本地服务。运行时由 Agent 自带的 MCP 客户端直连服务器的 `/mcp`。
+
+### Claude Code：直接从 GitHub 安装原生插件
+
+先在启动 Claude Code 的环境中配置服务器地址（**不带 `/mcp`，不带末尾 `/`**）：
 
 ```bash
-# 尚未发布到 PyPI —— 直接从仓库装 GPU 侧客户端。
-# tool 安装只会带上基础依赖，那正好就是 GPU 侧。
-uv tool install "git+https://github.com/Long-Holiday/TrainPilot"
-export TRAINPILOT_GATEWAY_URL=http://<公网服务器IP>:28780
-export TRAINPILOT_API_TOKEN=<服务端配了就要填一致的值>
-
-trainpilot-cli plugin install all      # 装到本机检测到的每一个 Agent
-trainpilot-cli plugin install codex    # 或指定一个
+export TRAINPILOT_GATEWAY_URL="https://你的MCP服务器"
 ```
+
+服务端启用了 API token 时再设置同一个值；未启用时不设置即可：
+
+```bash
+export TRAINPILOT_API_TOKEN="与服务端一致的token"
+```
+
+安装插件，不需要下载/安装 Python 包：
+
+```bash
+claude plugin install trainpilot --marketplace Long-Holiday/TrainPilot
+```
+
+也可先 `claude plugin marketplace add Long-Holiday/TrainPilot`，再
+`claude plugin install trainpilot@trainpilot`。仓库根的 `.claude-plugin/marketplace.json`
+指向 `plugins/claude-code/`，插件缓存里只有 skill、命令与远程 MCP 配置，没有 Python 服务。
+更新环境变量后重启 Agent；原生插件使用 `X-API-Token`，与 Bearer token 的服务端认证等价。
+
+### 全部 Agent：一次性轻量安装器
+
+OpenCode、Codex 不使用 Claude marketplace；Gemini、Antigravity 也有各自的格式。
+下面的安装器复用同一套厂商适配，**只在安装时需要 Python ≥3.10 标准库**，不安装任何第三方包，
+不改训练环境。先下载脚本（建议查看后执行；可把 URL 中的 `main` 和 `--ref` 都改为同一提交或 tag）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Long-Holiday/TrainPilot/main/scripts/install_agent.py -o /tmp/trainpilot-install-agent.py
+```
+
+安装到本机检测到的所有 Agent（server-url 也可通过上面的环境变量传入）：
+
+```bash
+python3 -I -S /tmp/trainpilot-install-agent.py --ref main install all --server-url "https://你的MCP服务器"
+```
+
+只安装一个 Agent，例如：
+
+```bash
+python3 -I -S /tmp/trainpilot-install-agent.py install opencode --server-url "https://你的MCP服务器" --task-id "训练任务名"
+```
+
+支持 `claude-code`、`antigravity`、`gemini-cli`、`opencode`、`codex`、`generic`。
+已克隆仓库时可直接使用 `python3 -I -S scripts/install_agent.py install <agent>`，无需 `uv sync`。
+脚本独立运行时仅临时下载并加载白名单中的配置安装源码，结束后清理；落盘的插件不依赖这些 Python 文件。
+原生插件/扩展需要对应 Agent CLI 在 PATH 上才能注册；缺少时只暂存文件并返回失败提示。`generic`
+会打印需手动粘贴的 MCP 配置（有 token 时包含凭据，请勿公开输出）。
+选择一种安装方式即可，不要同时为同一个 Agent 配置两份 TrainPilot MCP。
+
+下表是轻量安装器为各家写入的内容（Claude Code 也可用上面的 marketplace 方式）：
 
 | Agent | 下发给它的远程 server key | 装了什么 |
 |:---|:---|:---|
@@ -137,33 +177,40 @@ Antigravity 明确不接受 `url` 与 `httpUrl`，Gemini CLI 则把 `url` 当作
 一个安装器而不是一段 README 片段。再加一家 Agent = 在
 `src/trainpilot/agent/plugin/catalog.py` 加一条 + 写一个渲染函数，两者的对应关系由测试钉住。
 
-常用命令：
+常用命令（以下以已经下载的轻量安装器为例）：
 
 ```bash
-trainpilot-cli plugin list                # 支持的 Agent，以及本机装了哪些
-trainpilot-cli plugin render codex        # 只打印将要写入的内容，不落盘
-trainpilot-cli plugin install codex --dry-run
-trainpilot-cli plugin uninstall codex     # 外科手术式卸载：你自己的键与段落原样保留
-trainpilot-cli plugin doctor              # 一次检查网关、token、协议、task id
-trainpilot-cli plugin protocol            # 打印当前生效的监督协议
+python3 -I -S /tmp/trainpilot-install-agent.py list
 ```
 
-出问题时先跑 `plugin doctor`：它能把「网关连不上」「token 不对」「任务还没有行」这三件在 Agent
-内部看起来一模一样的事区分开。
+```bash
+python3 -I -S /tmp/trainpilot-install-agent.py render codex
+```
+
+```bash
+python3 -I -S /tmp/trainpilot-install-agent.py install codex --dry-run
+```
+
+```bash
+python3 -I -S /tmp/trainpilot-install-agent.py uninstall codex
+```
+
+默认写入用户目录；`--scope project` 限定配置目的目录到当前项目（原生插件仍由各自 CLI 管理）。
+GPU 端到此为止：没有 Python 包、没有常驻进程、也没有需要与服务端同步版本的客户端库。
 
 ### 行为规则从哪来
 
-规则（何时告警、什么算「已验证的恢复」、如何轮询）由服务端通过 MCP 的 `instructions` 字段和每个工具
-的 docstring 直接下发，**无需**往 Agent 的 system prompt 里拷贝任何内容。装进去的 skill **刻意不复述**
-这些规则：它只交代怎么连接、怎么绑定任务、怎么回执，然后让 Agent 去跑 `trainpilot-cli plugin
-protocol` —— 那条命令在一次真实握手里读出契约。因此今天装的插件，不会对之后升级的服务端过时。
-装完重启 Agent。
+服务端通过 MCP 初始化的 `instructions` 和每个工具的 docstring 下发唯一协议。
+skill 和命令只指向实时连接，**不复述规则，也不要求任何本地 TrainPilot 工具**。若某客户端未暴露
+初始化说明，需要修复或重新连接集成，而不是凭记忆执行。安装后重启 Agent，先确认 TrainPilot
+工具可用。
 
 安装器改的是你自己的文件（`config.toml`、`opencode.json`、`AGENTS.md`），所以它只做**合并**而非覆盖：
 你自己的键和段落原样保留，改动前的字节留在同目录的 `.trainpilot.bak`，解析不了的 JSON 会被拒绝而
 不是被覆盖，`uninstall` 会把文档还给你。
 
-任何工具的 `task_id` 都可省略，此时回退到 `TRAINPILOT_TASK_ID`。
+原生 MCP 调用省略 `task_id` 时，回退到**服务端**的 `TRAINPILOT_TASK_ID`，而非 GPU 端环境变量。
+建议每个训练 run 显式传入独立 task id；轻量安装器的 `--task-id` 会在 skill 中记录绑定提示。
 
 ---
 
@@ -296,7 +343,7 @@ docker run -d -p 28780:28780 -v $(pwd)/trainpilot.db:/app/trainpilot.db \
 | `TRAINPILOT_LONG_POLL_TIMEOUT_SECONDS` | `20.0` | 服务端长轮询上限 |
 | `TRAINPILOT_SQLITE_PATH` | `trainpilot.db` | SQLite WAL 文件（`TRAINPILOT_ENABLE_SQLITE=false` 则仅内存） |
 | `TRAINPILOT_TASK_ID` | `train-task-default` | 工具调用省略 `task_id` 时的回退值 |
-| `TRAINPILOT_GATEWAY_URL` | – | 仅客户端：控制面完整 URL（优先级高于 `TRAINPILOT_HOST`+`TRAINPILOT_PORT`） |
+| `TRAINPILOT_GATEWAY_URL` | – | 仅 GPU 侧：安装器与 Agent 的 MCP 客户端使用的控制面地址（优先级高于 `TRAINPILOT_HOST`+`TRAINPILOT_PORT`） |
 
 > `TRAINPILOT_HOST` 有两种含义：客户端侧是网关地址；服务端侧是绑定地址，且只认本地值
 > （`0.0.0.0` / `127.0.0.1` / `localhost`）。服务端绑定请使用 `TRAINPILOT_BIND_HOST`。
@@ -308,9 +355,14 @@ docker run -d -p 28780:28780 -v $(pwd)/trainpilot.db:/app/trainpilot.db \
 ```text
 src/trainpilot/
 ├── server/     # 控制面：MCP 工具、信箱、SQLite WAL、飞书卡片、REST
-├── agent/      # GPU 侧 MCP 客户端 + trainpilot-cli
-│   └── plugin/ # 把 TrainPilot 渲染成各家 Agent 的原生插件格式
+├── agent/      # GPU 侧集成
+│   └── plugin/ # 为各家 Agent 渲染 skill + 远程 MCP 配置（仅标准库）
 └── common/     # Schemas、状态机、网关地址解析
+scripts/
+├── install_agent.py   # 一次性 GPU 安装：skill + 远程 MCP 配置，仅标准库
+└── build_plugins.py   # 重新生成仓库里已提交的原生插件文件
+.claude-plugin/        # Claude Code 直接从这个仓库读取的 marketplace
+plugins/claude-code/   # 生成的原生插件：skill、命令、远程 .mcp.json
 examples/       # mock_training.py —— 无需 GPU 即可跑通完整 HITL 闭环
 ```
 

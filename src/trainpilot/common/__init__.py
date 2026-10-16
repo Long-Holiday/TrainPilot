@@ -5,14 +5,26 @@ from trainpilot.common.gateway import (
     resolve_gateway_url,
     resolve_public_host,
 )
-from trainpilot.common.schemas import (
-    EventNotifyRequest,
-    FeishuCardActionPayload,
-    InstructionResponse,
-    TaskDecisionRequest,
-    TaskSummary,
-)
 from trainpilot.common.states import ActionType, EventType, TaskState
+
+_SCHEMA_EXPORTS = (
+    "EventNotifyRequest",
+    "InstructionResponse",
+    "TaskDecisionRequest",
+    "TaskSummary",
+    "FeishuCardActionPayload",
+)
+
+
+def __getattr__(name):
+    # Schemas need pydantic, and the GPU-side installer must import this package with a
+    # bare python3 (no site-packages), so they resolve on first use instead.
+    if name in _SCHEMA_EXPORTS:
+        from trainpilot.common import schemas
+
+        return getattr(schemas, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "TaskState",
@@ -21,9 +33,5 @@ __all__ = [
     "resolve_bind_host",
     "resolve_gateway_url",
     "resolve_public_host",
-    "EventNotifyRequest",
-    "InstructionResponse",
-    "TaskDecisionRequest",
-    "TaskSummary",
-    "FeishuCardActionPayload",
+    *_SCHEMA_EXPORTS,
 ]

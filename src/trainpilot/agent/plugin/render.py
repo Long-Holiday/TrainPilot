@@ -113,7 +113,7 @@ def _toml_string(value: str) -> str:
     return escaped.replace("\\b", "\\u0008").replace("\\f", "\\u000c")
 
 
-def _skill_md() -> str:
+def _skill_md(ctx: PluginContext) -> str:
     """The SKILL.md shared by every agent that reads skills.
 
     The description is emitted through ``json.dumps`` because it is a single YAML scalar
@@ -121,9 +121,15 @@ def _skill_md() -> str:
     characters, which ``templates.SKILL_DESCRIPTION`` is written to respect.
     """
     description = json.dumps(templates.SKILL_DESCRIPTION, ensure_ascii=False)
+    binding = (
+        "\n## Installed task binding\n\n"
+        f"The installer selected task id `{ctx.task_id}`. Pass this value explicitly "
+        "unless the user binds this session to a different run.\n"
+        if ctx.task_id else ""
+    )
     return (
         f"---\nname: {templates.SKILL_NAME}\ndescription: {description}\n---\n\n"
-        f"{templates.SKILL_BODY}"
+        f"{templates.SKILL_BODY}{binding}"
     )
 
 
@@ -197,7 +203,7 @@ def _claude_code(ctx: PluginContext) -> Tuple[List[File], List[Merge], List[str]
         File(".claude-plugin/plugin.json", _json(manifest)),
         File(".claude-plugin/marketplace.json", _json(marketplace)),
         File(".mcp.json", _json(mcp)),
-        File(f"skills/{templates.SKILL_NAME}/SKILL.md", _skill_md()),
+        File(f"skills/{templates.SKILL_NAME}/SKILL.md", _skill_md(ctx)),
     ]
     for command in templates.COMMANDS:
         files.append(
@@ -227,7 +233,7 @@ def _antigravity(ctx: PluginContext) -> Tuple[List[File], List[Merge], List[str]
     files = [
         File("plugin.json", _json(manifest)),
         File("mcp_config.json", _json(mcp)),
-        File(f"skills/{templates.SKILL_NAME}/SKILL.md", _skill_md()),
+        File(f"skills/{templates.SKILL_NAME}/SKILL.md", _skill_md(ctx)),
         File("rules/trainpilot.md", templates.RULES_BLOCK),
     ]
     return files, [], []
@@ -250,7 +256,7 @@ def _gemini_cli(ctx: PluginContext) -> Tuple[List[File], List[Merge], List[str]]
     files: List[File] = [
         File("gemini-extension.json", _json(manifest)),
         File("GEMINI.md", templates.RULES_BLOCK),
-        File(f"skills/{templates.SKILL_NAME}/SKILL.md", _skill_md()),
+        File(f"skills/{templates.SKILL_NAME}/SKILL.md", _skill_md(ctx)),
     ]
     for command in templates.COMMANDS:
         # Gemini CLI custom commands are TOML and take their argument as {{args}}.
@@ -279,7 +285,7 @@ def _opencode(ctx: PluginContext) -> Tuple[List[File], List[Merge], List[str]]:
     if ctx.headers:
         entry["headers"] = ctx.headers
 
-    files = [File(f"{skill_dir}/{templates.SKILL_NAME}/SKILL.md", _skill_md())]
+    files = [File(f"{skill_dir}/{templates.SKILL_NAME}/SKILL.md", _skill_md(ctx))]
     for command in templates.COMMANDS:
         files.append(
             File(
@@ -337,7 +343,7 @@ def _codex(ctx: PluginContext) -> Tuple[List[File], List[Merge], List[str]]:
         )
 
     return (
-        [File(f"{skill_root}/{templates.SKILL_NAME}/SKILL.md", _skill_md())],
+        [File(f"{skill_root}/{templates.SKILL_NAME}/SKILL.md", _skill_md(ctx))],
         [
             Merge(config_path, TOML, table),
             Merge(instructions_path, MARKDOWN, templates.RULES_BLOCK),
@@ -356,7 +362,7 @@ def _generic(ctx: PluginContext) -> Tuple[List[File], List[Merge], List[str]]:
     user = ctx.scope == catalog.USER
     skill_root = "~/.agents/skills" if user else ".agents/skills"
     merges: List[Merge] = [] if user else [Merge("AGENTS.md", MARKDOWN, templates.RULES_BLOCK)]
-    return [File(f"{skill_root}/{templates.SKILL_NAME}/SKILL.md", _skill_md())], merges, []
+    return [File(f"{skill_root}/{templates.SKILL_NAME}/SKILL.md", _skill_md(ctx))], merges, []
 
 
 _RENDERERS = {

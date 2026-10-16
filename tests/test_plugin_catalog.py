@@ -159,8 +159,41 @@ def test_every_agent_ships_the_same_skill_text():
 
 def test_skill_sends_the_agent_to_the_live_protocol():
     body = skill_body(bundle_for("claude-code"))
-    assert "trainpilot-cli plugin protocol" in body
+    assert "MCP initialization" in body
     assert "instructions" in body
+    assert "**server**, not `TRAINPILOT_TASK_ID`" in body
+
+
+def test_no_shipped_text_names_a_trainpilot_command():
+    """The GPU node installs no Python, so there is no TrainPilot command to run."""
+    for target in ALL_TARGETS:
+        bundle = bundle_for(target)
+        rendered = "\n".join(file_map(bundle).values())
+        for item in bundle.merges:
+            rendered += "\n" + (
+                json.dumps(item.payload) if isinstance(item.payload, dict) else str(item.payload)
+            )
+        assert "trainpilot-cli" not in rendered, f"{target} still points at a CLI"
+        assert "uv tool install" not in rendered
+
+
+def test_commands_use_native_mcp_without_a_cli():
+    for command in templates.COMMANDS:
+        assert "trainpilot-cli" not in command.prompt
+    assert "get_task_status MCP tool" in templates.COMMANDS[1].prompt
+    assert "report MCP tool" in templates.COMMANDS[2].prompt
+
+
+def test_an_installed_task_id_becomes_a_binding_hint():
+    """The binding is an install-time hint; the rules themselves stay on the server."""
+    bound = skill_body(bundle_for("claude-code"))
+    assert "Installed task binding" in bound
+    assert "train-task-default" in bound
+
+    unbound = render.render_bundle(
+        "claude-code", render.PluginContext(GATEWAY, TOKEN, task_id="")
+    )
+    assert "Installed task binding" not in skill_body(unbound)
 
 
 def test_skill_does_not_restate_the_server_protocol():
@@ -176,7 +209,8 @@ def test_skill_does_not_restate_the_server_protocol():
 
 
 def test_rules_block_stays_a_pointer():
-    assert "trainpilot-cli plugin protocol" in templates.RULES_BLOCK
+    assert "`instructions`" in templates.RULES_BLOCK
+    assert "trainpilot-cli" not in templates.RULES_BLOCK
     assert len(templates.RULES_BLOCK.splitlines()) < 10
 
 

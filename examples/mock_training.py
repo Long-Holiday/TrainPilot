@@ -1,11 +1,17 @@
-"""Simulated training run driven the way a GPU-side AI agent drives TrainPilot.
+"""Simulated training run driven the way a GPU-side agent drives TrainPilot.
 
-Demonstrates the full HITL closed loop over MCP:
+Demonstrates the full HITL loop over MCP using the reference Python client:
 
     report(milestone) -> report(alert) -> poll_instruction -> ack_instruction -> report(completed)
 
-The "GPU work" here is a fake loss curve; substitute your real training loop for
-the `_step()` call. The point is the supervision protocol, not the model.
+A GPU node never runs this file. A native agent (Claude Code, OpenCode, ...) carries its
+own MCP client, connects to the same ``/mcp`` endpoint, and follows the ``instructions``
+from the handshake. This script exists so the control plane can be exercised end to end
+in a demo or a test, and it deliberately uses nothing but the MCP SDK -- there is no
+TrainPilot client library to install.
+
+The "GPU work" here is a fake loss curve; substitute your real training loop for the
+step body. The point is the supervision protocol, not the model.
 
 Run against a live server:
 
@@ -13,23 +19,55 @@ Run against a live server:
     uv run python examples/mock_training.py [gateway_url] [task_id]
 """
 
+import asyncio
+import json
 import os
 import sys
 import threading
 import time
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import httpx
+from mcp.client.session import ClientSession
+from mcp.client.streamable_http import streamable_http_client
 
 # Ensure src is on python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
-from trainpilot.agent.mcp_client import TrainPilotMCPClient
 from trainpilot.common.gateway import resolve_gateway_url
 
 TOTAL_STEPS = 10
 CHECKPOINT_STEP = 4
 ANOMALY_STEP = 6
+
+
+def _payload(result: Any) -> Dict[str, Any]:
+    """A tool's return value, from its JSON text block (or its structured content)."""
+    text = next(
+        (getattr(block, "text", None) for block in result.content if getattr(block, "text", None)),
+        None,
+    )
+    if getattr(result, "is_error", False):
+        raise RuntimeError(f"TrainPilot tool failed: {text}")
+    if text:
+        return json.loads(text)
+    structured = getattr(result, "structuredContent", None)
+    if structured:
+        return structured
+    raise RuntimeError("TrainPilot tool returned no payload")
+
+
+def call_tool(gateway_url: str, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    """Call one MCP tool on a fresh session, the way a stateless agent client does."""
+    url = f"{gateway_url.rstrip('/')}/mcp"
+
+    async def _call():
+        async with streamable_http_client(url) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                return await session.call_tool(name, arguments)
+
+    return _payload(asyncio.run(_call()))
 
 
 def _simulate_operator_decision(gateway_url: str, task_id: str, delay: float = 3.0) -> None:
@@ -59,10 +97,12 @@ def _simulate_operator_decision(gateway_url: str, task_id: str, delay: float = 3
     threading.Thread(target=_click, daemon=True).start()
 
 
-def _wait_for_decision(client: TrainPilotMCPClient, task_id: str) -> dict:
+def _wait_for_decision(gateway_url: str, task_id: str) -> Dict[str, Any]:
     """Long-poll until a human decision arrives, then hand back the instruction."""
     while True:
-        res = client.poll_instruction(task_id=task_id, wait_timeout=5.0)
+        res = call_tool(
+            gateway_url, "poll_instruction", {"task_id": task_id, "wait_timeout": 5.0}
+        )
         if not res.get("success", True):
             raise RuntimeError(f"poll_instruction failed: {res.get('error')}")
         if res.get("has_instruction"):
@@ -78,20 +118,23 @@ def run_mock_training(gateway_url: Optional[str] = None, task_id: str = "demo-ll
     print(f"Gateway: {gateway_url}")
     print("==========================================\n")
 
-    client = TrainPilotMCPClient(server_url=gateway_url, task_id=task_id)
     lr = 1e-4
     loss = 2.5
 
     for step in range(1, TOTAL_STEPS + 1):
         # ---- 1. Supervision: watch the run, report what you see ----
         if step == CHECKPOINT_STEP:
-            res = client.report(
-                message=f"Checkpoint saved at step {step}",
-                event_type="milestone",
-                task_id=task_id,
-                step=step,
-                epoch=1,
-                metrics={"loss": 1.18, "lr": lr},
+            res = call_tool(
+                gateway_url,
+                "report",
+                {
+                    "message": f"Checkpoint saved at step {step}",
+                    "event_type": "milestone",
+                    "task_id": task_id,
+                    "step": step,
+                    "epoch": 1,
+                    "metrics": {"loss": 1.18, "lr": lr},
+                },
             )
             print(f"[agent] milestone reported -> state={res['state']}")
 
@@ -100,36 +143,48 @@ def run_mock_training(gateway_url: Optional[str] = None, task_id: str = "demo-ll
             print(f"\n[step {step}] training loss went NaN - pausing the GPU job")
             _simulate_operator_decision(gateway_url, task_id)
 
-            res = client.report(
-                message="Loss became NaN at step 6; paused the job pending a decision",
-                event_type="alert",
-                task_id=task_id,
-                step=step,
-                epoch=1,
-                metrics={"loss": "NaN", "lr": lr},
-                agent_note="Loss diverged after the LR warmup finished; a rollback to the "
-                           "step-4 checkpoint with a lower LR looks sufficient.",
+            res = call_tool(
+                gateway_url,
+                "report",
+                {
+                    "message": "Loss became NaN at step 6; paused the job pending a decision",
+                    "event_type": "alert",
+                    "task_id": task_id,
+                    "step": step,
+                    "epoch": 1,
+                    "metrics": {"loss": "NaN", "lr": lr},
+                    "agent_note": "Loss diverged after the LR warmup finished; a rollback to "
+                                  "the step-4 checkpoint with a lower LR looks sufficient.",
+                },
             )
             print(f"[agent] alert reported -> state={res['state']}")
 
             # ---- 3. Poll until the human decides, then execute and ACK ----
-            instruction = _wait_for_decision(client, task_id)
+            instruction = _wait_for_decision(gateway_url, task_id)
             print(f"[agent] decision received: action={instruction['action']} "
                   f"by {instruction['decision_by']}")
 
             if instruction["action"] == "stop_training":
-                client.ack_instruction(
-                    task_id=task_id,
-                    instruction_id=instruction["instruction_id"],
-                    action="stop_training",
-                    status="success",
-                    solution="Stopped the run as instructed.",
+                call_tool(
+                    gateway_url,
+                    "ack_instruction",
+                    {
+                        "task_id": task_id,
+                        "instruction_id": instruction["instruction_id"],
+                        "action": "stop_training",
+                        "status": "success",
+                        "solution": "Stopped the run as instructed.",
+                    },
                 )
-                client.report(
-                    message="Run stopped by operator decision at step 6",
-                    event_type="failed",
-                    task_id=task_id,
-                    step=step,
+                call_tool(
+                    gateway_url,
+                    "report",
+                    {
+                        "message": "Run stopped by operator decision at step 6",
+                        "event_type": "failed",
+                        "task_id": task_id,
+                        "step": step,
+                    },
                 )
                 print("\nRun halted by operator. Exiting.\n")
                 return
@@ -137,13 +192,17 @@ def run_mock_training(gateway_url: Optional[str] = None, task_id: str = "demo-ll
             # self_resolve: actually recover, verify, then ACK success
             lr = 5e-5
             loss = 1.4
-            client.ack_instruction(
-                task_id=task_id,
-                instruction_id=instruction["instruction_id"],
-                action=instruction["action"],
-                status="success",
-                solution="Rolled back to the step-4 checkpoint and halved the LR to 5e-5; "
-                         "loss is finite again after one probe step.",
+            call_tool(
+                gateway_url,
+                "ack_instruction",
+                {
+                    "task_id": task_id,
+                    "instruction_id": instruction["instruction_id"],
+                    "action": instruction["action"],
+                    "status": "success",
+                    "solution": "Rolled back to the step-4 checkpoint and halved the LR to "
+                                "5e-5; loss is finite again after one probe step.",
+                },
             )
             print("[agent] recovery acknowledged; resuming training\n")
             continue
@@ -154,13 +213,17 @@ def run_mock_training(gateway_url: Optional[str] = None, task_id: str = "demo-ll
         time.sleep(0.3)
 
     # ---- 4. Terminal state: only when the run is definitively over ----
-    client.report(
-        message="Simulated training completed successfully",
-        event_type="completed",
-        task_id=task_id,
-        step=TOTAL_STEPS,
-        epoch=1,
-        metrics={"final_loss": round(loss, 4)},
+    call_tool(
+        gateway_url,
+        "report",
+        {
+            "message": "Simulated training completed successfully",
+            "event_type": "completed",
+            "task_id": task_id,
+            "step": TOTAL_STEPS,
+            "epoch": 1,
+            "metrics": {"final_loss": round(loss, 4)},
+        },
     )
     print("\nTraining run completed.\n")
 

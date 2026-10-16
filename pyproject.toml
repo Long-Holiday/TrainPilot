@@ -1,17 +1,14 @@
 [project]
 name = "trainpilot"
-version = "0.1.1"
+version = "0.2.0"
 description = "Centralized HITL Control Gateway for GPU Distributed Training with Feishu Card Integration"
 readme = "README.md"
 requires-python = ">=3.10"
-# GPU-side only. A GPU node runs `trainpilot-cli` and the agent plugin; it never
-# imports `trainpilot.server`, so the control plane's stack (FastAPI, uvicorn,
-# lark-oapi, pydantic-settings) lives in the `server` extra instead of here.
-dependencies = [
-    "httpx>=0.27.0",
-    "mcp>=2.1.1",
-    "pydantic>=2.8.0",
-]
+# This package is the control plane. The GPU side installs no Python at all: a GPU node
+# gets a skill plus a remote MCP entry (scripts/install_agent.py, standard library only,
+# or Claude Code's marketplace), and its agent's own MCP client talks to /mcp. Every
+# runtime dependency therefore belongs to the server half below.
+dependencies = []
 
 [project.optional-dependencies]
 # Control plane only. There is no PyPI release yet, so this is for a consumer that
@@ -20,30 +17,36 @@ dependencies = [
 server = [
     "fastapi>=0.115.0",
     "lark-oapi>=1.2.0",
+    "mcp>=2.1.1",
+    "pydantic>=2.8.0",
     "pydantic-settings>=2.4.0",
     "uvicorn[standard]>=0.30.0",
 ]
 
 [project.scripts]
 trainpilot-server = "trainpilot.server.main:start"
-trainpilot-cli = "trainpilot.agent.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.11.26,<0.12.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
+# httpx is starlette's TestClient transport and mcp's HTTP client; mcp also serves the
+# control plane. Both are test-time here because the server group already carries mcp.
 dev = [
+    "httpx>=0.27.0",
+    "mcp>=2.1.1",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
 ]
 # Mirrors the `server` extra above. uv has no `default-extras`, so this is how the
-# repo's own `uv sync` / `uv run` keep the control plane installed; a GPU node opts
-# out with `uv sync --no-group server --no-group dev`. The two lists are pinned
-# equal by tests/test_plugin_packaging.py, so they cannot drift.
+# repo's own `uv sync` / `uv run` keep the control plane installed. The two lists are
+# pinned equal by tests/test_plugin_packaging.py, so they cannot drift.
 server = [
     "fastapi>=0.115.0",
     "lark-oapi>=1.2.0",
+    "mcp>=2.1.1",
+    "pydantic>=2.8.0",
     "pydantic-settings>=2.4.0",
     "uvicorn[standard]>=0.30.0",
 ]

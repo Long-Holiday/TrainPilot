@@ -1,10 +1,15 @@
-"""The dependency split: a GPU node must not inherit the control plane's stack.
+"""The dependency split: this package is the control plane, and nothing else.
 
-``trainpilot.server`` needs FastAPI, uvicorn, lark-oapi and pydantic-settings; the GPU side
-needs mcp, httpx and pydantic. The server half is declared twice on purpose -- once as the
-``server`` extra for ``pip install trainpilot[server]``, once as the ``server`` dependency
-group because uv has no ``default-extras`` -- so the first test here pins the two equal.
-Without it, a dependency added to one list silently stops being installed for the other.
+The GPU side installs no Python at all -- it gets a skill plus a remote MCP entry from a
+standard-library installer (``scripts/install_agent.py``) or Claude Code's marketplace, and
+its agent's own MCP client talks to ``/mcp``. So every runtime dependency belongs to the
+``server`` half, and the base list must stay empty: a GPU node that pip-installs this
+package should pull nothing.
+
+The server half is declared twice on purpose -- once as the ``server`` extra for
+``pip install trainpilot[server]``, once as the ``server`` dependency group because uv has
+no ``default-extras`` -- so the first test here pins the two equal. Without it, a dependency
+added to one list silently stops being installed for the other.
 """
 
 import sys
@@ -20,8 +25,8 @@ import tomllib  # noqa: E402
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
-SERVER_ONLY = ("fastapi", "lark-oapi", "pydantic-settings", "uvicorn")
-GPU_ONLY = ("mcp", "httpx", "pydantic")
+SERVER_STACK = ("fastapi", "lark-oapi", "mcp", "pydantic", "pydantic-settings", "uvicorn")
+TEST_ONLY = ("httpx", "pytest")
 
 
 def test_server_extra_and_group_are_identical():
@@ -33,19 +38,36 @@ def test_server_extra_and_group_are_identical():
     )
 
 
-@pytest.mark.parametrize("name", SERVER_ONLY)
-def test_server_stack_is_not_a_base_dependency(name):
-    """A GPU node installing the package must not pull any of these."""
-    base = [dep.lower() for dep in PYPROJECT["project"]["dependencies"]]
-    assert not any(dep.startswith(name) for dep in base), (
-        f"{name} is a control-plane dependency and belongs in the `server` extra"
+def test_a_gpu_node_pulls_no_dependencies_at_all():
+    """Nothing here is needed to install a skill and a remote MCP entry."""
+    assert PYPROJECT["project"]["dependencies"] == []
+
+
+@pytest.mark.parametrize("name", SERVER_STACK)
+def test_the_server_stack_lives_in_the_server_extra(name):
+    extra = [dep.lower() for dep in PYPROJECT["project"]["optional-dependencies"]["server"]]
+    assert any(dep.startswith(name) for dep in extra), (
+        f"{name} is part of the control plane and belongs in the `server` extra"
     )
 
 
-@pytest.mark.parametrize("name", GPU_ONLY)
-def test_gpu_stack_is_a_base_dependency(name):
-    base = [dep.lower() for dep in PYPROJECT["project"]["dependencies"]]
-    assert any(dep.startswith(name) for dep in base)
+@pytest.mark.parametrize("name", TEST_ONLY)
+def test_test_only_tools_are_not_installed_for_the_server(name):
+    """pytest and the test client's httpx must not ride along into a deployment image."""
+    extra = [dep.lower() for dep in PYPROJECT["project"]["optional-dependencies"]["server"]]
+    assert not any(dep.startswith(name) for dep in extra)
+
+
+def test_the_only_entry_point_is_the_server():
+    """A GPU-side CLI would drag the whole Python stack back onto training nodes."""
+    assert set(PYPROJECT["project"]["scripts"]) == {"trainpilot-server"}
+
+
+def test_the_gpu_side_ships_no_python_client():
+    """The GPU node runs its agent's MCP client, not ours; a client module here would be
+    dead code that the dependency split would have to carry."""
+    agent = PROJECT_ROOT / "src" / "trainpilot" / "agent"
+    assert sorted(path.name for path in agent.glob("*.py")) == ["__init__.py"]
 
 
 def test_repo_defaults_install_the_server_group():
