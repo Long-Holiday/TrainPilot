@@ -123,7 +123,7 @@ TARGETS: Dict[str, AgentTarget] = {
         display_name="OpenCode",
         docs_url="https://opencode.ai/docs/mcp-servers/",
         kind=IN_PLACE,
-        transport="mcp.servers.<name> type=remote + url",
+        transport="mcp.servers.<name> (remote)",
         register=(),
         unregister=(),
         agent_cli="",

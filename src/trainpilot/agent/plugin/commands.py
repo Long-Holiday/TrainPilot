@@ -192,7 +192,7 @@ def cmd_list(args) -> int:
     print(f"Task id   {ctx.task_id}")
     print(f"Token     {'set' if ctx.api_token else 'not set (open control plane)'}")
     print()
-    print(f"{'AGENT':<14}{'NAME':<32}{'REMOTE SERVER KEY':<34}STATUS")
+    print(f"{'AGENT':<14}{'NAME':<32}{'REMOTE SERVER KEY':<36}STATUS")
     for key, target in catalog.TARGETS.items():
         if key == "generic":
             status = "always available"
@@ -200,7 +200,7 @@ def cmd_list(args) -> int:
             status = "detected"
         else:
             status = "not found here"
-        print(f"{key:<14}{target.display_name:<32}{target.transport:<34}{status}")
+        print(f"{key:<14}{target.display_name:<32}{target.transport:<36}{status}")
     return EXIT_OK
 
 
