@@ -124,7 +124,8 @@ agy plugin install https://github.com/Long-Holiday/TrainPilot
 ```
 
 The repository's `plugins/trainpilot/` holds plugin assets only (manifest, remote MCP config,
-skill, rules), never the Python service. It ships the default control-plane address, so on a
+skill, rules, and three slash commands — `protocol`, `status`, `report` — which `agy` lists
+under the plugin's name), never the Python service. It ships the default control-plane address, so on a
 single-node setup it works as installed; point it at your own gateway by editing the installed
 config:
 
@@ -371,7 +372,7 @@ src/trainpilot/
 scripts/
 ├── install_agent.py   # One-shot GPU install: skill + remote MCP config, stdlib only
 └── build_plugins.py   # Regenerates the checked-in plugin assets
-plugins/trainpilot/    # Generated Antigravity plugin: manifest, mcp_config.json, skill, rules
+plugins/trainpilot/    # Generated Antigravity plugin: manifest, mcp_config.json, skill, rules, commands
 examples/       # mock_training.py — full HITL loop, no GPU required
 ```
 

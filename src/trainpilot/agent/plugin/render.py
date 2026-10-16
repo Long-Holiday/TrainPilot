@@ -96,11 +96,24 @@ def _description() -> str:
     )
 
 
+def _markdown_command(description: str, argument_hint: str, prompt: str) -> str:
+    """A plugin command: YAML frontmatter then the prompt body.
+
+    ``agy`` keeps both keys on the converted skill, so the hint survives to the command
+    list. The description goes through ``json.dumps`` for the same reason the skill's does:
+    it is a YAML scalar containing a colon.
+    """
+    front = f"description: {json.dumps(description, ensure_ascii=False)}\n"
+    if argument_hint:
+        front += f"argument-hint: {json.dumps(argument_hint, ensure_ascii=False)}\n"
+    return f"---\n{front}---\n\n{prompt}\n"
+
+
 # --------------------------------------------------------------------------- renderer
 
 
 def render_bundle(ctx: PluginContext) -> Bundle:
-    """Render the Antigravity plugin: manifest, remote MCP config, skill and rules.
+    """Render the Antigravity plugin: manifest, remote MCP config, skill, rules, commands.
 
     ``serverUrl`` is mandatory -- Antigravity rejects ``url`` and ``httpUrl`` outright --
     and the manifest carries only the two fields its schema declares.
@@ -124,6 +137,13 @@ def render_bundle(ctx: PluginContext) -> Bundle:
         File(f"skills/{templates.SKILL_NAME}/SKILL.md", _skill_md(ctx)),
         File("rules/trainpilot.md", templates.RULES_BLOCK),
     ]
+    for command in templates.COMMANDS:
+        files.append(
+            File(
+                f"commands/{command.name}.md",
+                _markdown_command(command.description, command.argument_hint, command.prompt),
+            )
+        )
     notes = [catalog.ANTIGRAVITY.note] if catalog.ANTIGRAVITY.note else []
     return Bundle(
         files=tuple(files),

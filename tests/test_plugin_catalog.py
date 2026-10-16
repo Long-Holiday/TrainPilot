@@ -84,7 +84,7 @@ def test_the_bundle_is_exactly_the_plugin_assets():
         MCP_CONFIG,
         f"skills/{templates.SKILL_NAME}/SKILL.md",
         "rules/trainpilot.md",
-    }
+    } | {f"commands/{command.name}.md" for command in templates.COMMANDS}
 
 
 # --------------------------------------------------------------------------- auth
@@ -166,6 +166,30 @@ def test_skill_name_matches_its_directory():
     for path in file_map(bundle()):
         if path.endswith("SKILL.md"):
             assert path.split("/")[-2] == templates.SKILL_NAME
+
+
+def test_commands_use_native_mcp_without_a_cli():
+    """`agy` reports "commands: N processed (converted to skills)" for this directory, so
+    the commands ship even though Antigravity's docs never mention one."""
+    files = file_map(bundle())
+    commands = {path: content for path, content in files.items() if path.startswith("commands/")}
+    assert len(commands) == len(templates.COMMANDS) == 3
+
+    for command in templates.COMMANDS:
+        content = commands[f"commands/{command.name}.md"]
+        header = content.split("---")[1]
+        lines = [line for line in header.strip().splitlines() if line.strip()]
+        assert lines[0].startswith("description: ")
+        assert json.loads(lines[0][len("description: "):]) == command.description
+        assert content.strip().endswith(command.prompt)
+        assert "trainpilot-cli" not in content
+
+
+def test_a_command_names_its_argument_in_words_as_well_as_with_a_placeholder():
+    """Argument substitution is undocumented in Antigravity, so a prompt that only said
+    `$ARGUMENTS` would read oddly if the token is never expanded."""
+    status = next(c for c in templates.COMMANDS if c.name == "status")
+    assert "already agreed for this run" in status.prompt
 
 
 # --------------------------------------------------------------------------- artifacts

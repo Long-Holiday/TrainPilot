@@ -116,7 +116,8 @@ uv run python examples/mock_training.py
 agy plugin install https://github.com/Long-Holiday/TrainPilot
 ```
 
-仓库里的 `plugins/trainpilot/` 就是一份原生 Antigravity 插件（manifest、远程 MCP 配置、skill、rules），
+仓库里的 `plugins/trainpilot/` 就是一份原生 Antigravity 插件（manifest、远程 MCP 配置、skill、rules，
+外加 `protocol`/`status`/`report` 三个斜杠命令，agy 会挂在插件名下列出），
 不含 Python 服务，也不需要任何格式转换。它自带控制面默认地址，单机部署装完即可用；要指向自己的网关就改
 装好的配置：
 
@@ -340,7 +341,7 @@ src/trainpilot/
 scripts/
 ├── install_agent.py   # 一次性 GPU 安装：skill + 远程 MCP 配置，仅标准库
 └── build_plugins.py   # 重新生成仓库里已提交的插件文件
-plugins/trainpilot/    # 生成的原生 Antigravity 插件：manifest、mcp_config.json、skill、rules
+plugins/trainpilot/    # 生成的原生 Antigravity 插件：manifest、mcp_config.json、skill、rules、commands
 examples/       # mock_training.py —— 无需 GPU 即可跑通完整 HITL 闭环
 ```
 

@@ -213,12 +213,11 @@ def test_installer_render_writes_only_where_it_is_told(throwaway_home):
     out = work / "bundle"
     result = run_installer(home, work, "render", "--out", str(out))
     assert result.returncode == 0, result.stderr
-    assert tree(out) == {
-        Path("plugin.json"),
-        Path("mcp_config.json"),
-        Path("rules/trainpilot.md"),
-        Path("skills/trainpilot/SKILL.md"),
+    expected = {
+        Path(relative).relative_to("plugins/trainpilot")
+        for relative in release.published_files()
     }
+    assert tree(out) == expected
     assert tree(home) == set(), "render must not stage or install anything"
 
 
