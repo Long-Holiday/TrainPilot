@@ -1,8 +1,8 @@
 """The one copy of every word the GPU-side plugin ships.
 
-Six agents get six file layouts, but they get identical prose. Keeping the prose here
-means a fix lands everywhere at once -- the alternative (a checked-in directory per
-agent) is six copies that drift the first time one is edited.
+One file layout, one set of prose. Keeping the prose here means the published assets and
+the one-shot installer cannot drift apart -- the alternative (a checked-in copy per shape)
+is two copies that disagree the first time one is edited.
 
 What is deliberately *not* here is the behaviour protocol. Per AGENTS.md the agent-facing
 contract lives in exactly one place, ``mcp_server._INSTRUCTIONS`` plus the tool
@@ -12,9 +12,6 @@ initialize handshake, so a plugin installed today cannot go stale against a serv
 upgraded later. The templates therefore assume the agent's native MCP tools, and name no
 TrainPilot command-line tool at all -- the GPU node installs no Python code.
 """
-
-from dataclasses import dataclass
-from typing import Tuple
 
 SKILL_NAME = "trainpilot"
 PLUGIN_NAME = "trainpilot"
@@ -63,60 +60,6 @@ or reconnect the agent. Do not silently substitute a different server or install
 Python packages to work around a missing connection.
 """
 
-
-@dataclass(frozen=True)
-class Command:
-    """A slash command, rendered into each agent's own command format.
-
-    Attributes:
-        name: Base name, before any per-agent namespacing.
-        description: One line shown in the agent's command list.
-        argument_hint: Hint shown after the name, where the agent supports one.
-        prompt: The instruction body.
-    """
-
-    name: str
-    description: str
-    argument_hint: str
-    prompt: str
-
-
-COMMANDS: Tuple[Command, ...] = (
-    Command(
-        name="protocol",
-        description="Read TrainPilot's authoritative protocol from the live MCP connection",
-        argument_hint="",
-        prompt=(
-            "Read the TrainPilot MCP initialization instructions and tool descriptions from "
-            "the live connection. Summarise the key obligations in three bullets, then stop. "
-            "If the instructions are not visible, ask to reconnect or fix the MCP integration; "
-            "do not invent the protocol. No local TrainPilot CLI is required."
-        ),
-    ),
-    Command(
-        name="status",
-        description="Show the current TrainPilot task state, metrics and pending instruction",
-        argument_hint="[task_id]",
-        prompt=(
-            "Use the TrainPilot get_task_status MCP tool for $ARGUMENTS, or the task id "
-            "already agreed for this run. Ask for a task id if none is bound. Report the "
-            "state, last metrics, and whether an instruction is pending. Do not create a "
-            "task just to inspect it."
-        ),
-    ),
-    Command(
-        name="report",
-        description="Report a training event to the TrainPilot control plane",
-        argument_hint="<message>",
-        prompt=(
-            "Read the live TrainPilot MCP initialization instructions and tool descriptions "
-            "if you have not already. Use the report MCP tool to report $ARGUMENTS, with "
-            "the task_id agreed for this run (ask if unbound). Choose event_type according "
-            "to the live protocol, and include step, epoch and metrics when known. "
-            "Do not run a local CLI or start a server."
-        ),
-    ),
-)
 
 RULES_BLOCK = """\
 ## TrainPilot

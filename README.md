@@ -11,10 +11,10 @@
 </p>
 
 A public control plane for training runs on intranet GPU nodes that have no public IP and no way to
-receive inbound webhooks. A GPU-side AI agent (Claude Code, Antigravity, Gemini CLI, Codex,
-OpenCode, ...) reports progress and anomalies over MCP; TrainPilot turns anomalies into Feishu/Lark
-approval cards and streams the human's one-click decision back to the agent. The GPU side installs
-with one command — see [Installing onto a GPU-side Agent](#installing-onto-a-gpu-side-agent).
+receive inbound webhooks. A GPU-side AI agent — Antigravity CLI, the supported one — reports
+progress and anomalies over MCP; TrainPilot turns anomalies into Feishu/Lark approval cards and
+streams the human's one-click decision back to the agent. The GPU side installs with one command —
+see [Installing onto a GPU-side Agent](#installing-onto-a-gpu-side-agent).
 
 **TrainPilot does not monitor or pause your training process.** The agent watches the logs and
 controls the job; the control plane owns the task state machine, the approval loop, and the audit
@@ -28,7 +28,7 @@ trail.
 flowchart TB
     subgraph GPU["Intranet GPU node (outbound only)"]
         Job["Training job"]
-        Agent["AI agent (Claude Code / Antigravity / Gemini CLI / Codex / OpenCode)"]
+        Agent["Antigravity CLI (agy)"]
         Job -->|logs, exit status| Agent
     end
 
@@ -112,80 +112,61 @@ uv run python examples/mock_training.py
 MCP server. GPU nodes install a skill and a remote MCP entry — no Python package, CLI, or local
 service at all. The agent's built-in MCP client connects directly to the server's `/mcp` endpoint.
 
-### Claude Code: native plugin from GitHub
+**Antigravity CLI (`agy`) is the supported GPU-side agent.**
 
-Set the server address in the environment used to start Claude Code (**no `/mcp` suffix or trailing slash**):
+### Antigravity CLI: native plugin from GitHub
 
-```bash
-export TRAINPILOT_GATEWAY_URL="https://your-mcp-server.example.com"
-```
-
-Only if the server requires an API token, set the same value:
+Install the plugin — it is published in Antigravity's own layout, so no Python package and no
+format conversion is involved:
 
 ```bash
-export TRAINPILOT_API_TOKEN="your-server-token"
+agy plugin install https://github.com/Long-Holiday/TrainPilot
 ```
 
-Install the plugin without installing any Python package:
+The repository's `plugins/trainpilot/` holds plugin assets only (manifest, remote MCP config,
+skill, rules), never the Python service. It ships the default control-plane address, so on a
+single-node setup it works as installed; point it at your own gateway by editing the installed
+config:
 
 ```bash
-claude plugin install trainpilot --marketplace Long-Holiday/TrainPilot
+$EDITOR ~/.gemini/config/plugins/trainpilot/mcp_config.json
 ```
 
-Alternatively, run `claude plugin marketplace add Long-Holiday/TrainPilot`, then
-`claude plugin install trainpilot@trainpilot`. The repository's `.claude-plugin/marketplace.json`
-points to `plugins/claude-code/`, containing only plugin assets, not the Python service.
-Restart the agent after changing environment variables. The native plugin uses `X-API-Token`,
-which the server accepts just like a Bearer token.
+```json
+{
+  "mcpServers": {
+    "trainpilot": {
+      "serverUrl": "https://your-mcp-server.example.com/mcp",
+      "headers": { "Authorization": "Bearer your-server-token" }
+    }
+  }
+}
+```
 
-### All agents: one-shot lightweight installer
+`serverUrl` is the key Antigravity reads — it rejects `url` and `httpUrl`. Add `headers` only if
+your server sets `TRAINPILOT_API_TOKEN`, and restart the agent after editing.
 
-OpenCode and Codex do not consume Claude marketplaces; Gemini and Antigravity have their own
-formats too. This installer adapts to each one using **Python ≥3.10 standard library only, at
-installation time**. It installs no packages and does not change your training environment.
-Download the script first (inspect it before running; to pin a version, use the same commit/tag
-in the download URL and `--ref`):
+### Or: one-shot lightweight installer
+
+Renders the same plugin with your real gateway address and token baked in, using **Python ≥3.10
+standard library only, at installation time**. It installs no packages and does not change your
+training environment. Download the script first (inspect it before running; to pin a version, use
+the same commit/tag in the download URL and `--ref`):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Long-Holiday/TrainPilot/main/scripts/install_agent.py -o /tmp/trainpilot-install-agent.py
 ```
 
-Install into every detected agent (the server URL can also come from the environment above):
-
 ```bash
-python3 -I -S /tmp/trainpilot-install-agent.py --ref main install all --server-url "https://your-mcp-server.example.com"
+python3 -I -S /tmp/trainpilot-install-agent.py --ref main install --server-url "https://your-mcp-server.example.com" --api-token "your-server-token" --task-id "my-training-run"
 ```
 
-Or select one agent:
-
-```bash
-python3 -I -S /tmp/trainpilot-install-agent.py install opencode --server-url "https://your-mcp-server.example.com" --task-id "my-training-run"
-```
-
-Supported targets: `claude-code`, `antigravity`, `gemini-cli`, `opencode`, `codex`, `generic`.
-From a checkout, run `python3 -I -S scripts/install_agent.py install <agent>` without `uv sync`.
-A standalone script temporarily downloads only allowlisted installer sources and cleans them up;
-the installed assets do not depend on that Python code. Native plugin/extension registration
-requires the corresponding agent CLI on PATH; otherwise files are staged and the installer
-reports failure rather than claiming registration succeeded. `generic` prints an MCP snippet
-for manual configuration (it contains credentials if configured; do not publish that output).
-Choose one installation route per agent to avoid duplicate TrainPilot MCP connections.
-
-What the lightweight installer writes for each agent (Claude Code can also use the marketplace
-route above):
-
-| Agent | Remote-server key it is given | What is installed |
-|:---|:---|:---|
-| `claude-code` | `"type": "http"` + `url` | Plugin + marketplace under `~/.trainpilot/plugins/claude-code`, then `claude plugin install` |
-| `antigravity` | `serverUrl` | Plugin (`plugin.json`, `mcp_config.json`, skill) registered with `agy plugin install` |
-| `gemini-cli` | `httpUrl` | Extension (`gemini-extension.json`, `GEMINI.md`, TOML commands, skill) linked with `gemini extensions link` |
-| `opencode` | `mcp.servers.<name>` with `type: remote` | `opencode.json` merged, plus skill and commands |
-| `codex` | `[mcp_servers.<name>]` TOML table | `config.toml` merged, plus a skill and an `AGENTS.md` pointer |
-| `generic` | `mcpServers` JSON | The cross-vendor skill in `.agents/skills/`, plus a printed snippet to paste |
-
-Antigravity rejects `url` and `httpUrl` outright, and Gemini CLI reads `url` as SSE — which is why
-this is an installer and not a README snippet. Adding another agent is one entry in
-`src/trainpilot/agent/plugin/catalog.py` plus a renderer; the pairs are pinned by tests.
+From a checkout, run `python3 -I -S scripts/install_agent.py install --server-url ...` without
+`uv sync`. A standalone script temporarily downloads only allowlisted installer sources and cleans
+them up; the installed assets do not depend on that Python code. The bundle is staged at
+`~/.trainpilot/plugins/trainpilot` and registered with `agy plugin install`. Registration requires
+`agy` on PATH; otherwise the files are staged and the installer reports failure rather than
+claiming registration succeeded.
 
 Useful commands with the downloaded lightweight installer:
 
@@ -194,33 +175,32 @@ python3 -I -S /tmp/trainpilot-install-agent.py list
 ```
 
 ```bash
-python3 -I -S /tmp/trainpilot-install-agent.py render codex
+python3 -I -S /tmp/trainpilot-install-agent.py render --out /tmp/trainpilot-plugin
 ```
 
 ```bash
-python3 -I -S /tmp/trainpilot-install-agent.py install codex --dry-run
+python3 -I -S /tmp/trainpilot-install-agent.py install --dry-run
 ```
 
 ```bash
-python3 -I -S /tmp/trainpilot-install-agent.py uninstall codex
+python3 -I -S /tmp/trainpilot-install-agent.py uninstall
 ```
 
-The default scope is `user`; `--scope project` selects project-local destinations (native
-plugins are still managed by their own CLI). That is the whole GPU-side story: no Python
-package, no daemon, no client library to keep in sync with the server.
+Choose **one** route: installing both the published plugin and the installer's copy leaves the
+agent with two TrainPilot MCP connections. That is the whole GPU-side story: no Python package, no
+daemon, no client library to keep in sync with the server.
 
 ### Where the behaviour rules come from
 
-The server's MCP initialization `instructions` and tool docstrings are the sole protocol.
-The skill and commands point to that live connection: **they neither copy the rules nor
-require any local TrainPilot tool**. If a client does not expose initialization
-instructions, fix or reconnect the integration instead of inventing a procedure. Restart
-the agent after installation and confirm its TrainPilot tools are available.
+The server's MCP initialization `instructions` and tool docstrings are the sole protocol. The
+skill and rules file point to that live connection: **they neither copy the rules nor require any
+local TrainPilot tool**. If a client does not expose initialization instructions, fix or reconnect
+the integration instead of inventing a procedure. Restart the agent after installation and confirm
+its TrainPilot tools are available.
 
-The installer edits files you own (`config.toml`, `opencode.json`, `AGENTS.md`), so it merges rather
-than replaces: your own keys and sections survive, the previous bytes are kept in a
-`.trainpilot.bak` beside the file, a JSON file that will not parse is refused instead of
-overwritten, and `uninstall` gives the document back.
+The plugin is TrainPilot's own, so nothing of yours is edited: the installer writes inside
+`~/.trainpilot/plugins/trainpilot`, `agy plugin install` owns the copy under
+`~/.gemini/config/plugins/trainpilot`, and `uninstall` removes both.
 
 When native MCP calls omit `task_id`, the default comes from `TRAINPILOT_TASK_ID` on the
 **server**, not the GPU node. Prefer an explicit distinct task id for each run; the lightweight
@@ -386,13 +366,12 @@ intranet GPU client — are documented inline there, variable by variable. The o
 src/trainpilot/
 ├── server/     # Control plane: MCP tools, mailbox, SQLite WAL, Feishu cards, REST
 ├── agent/      # GPU-side integration
-│   └── plugin/ # Renders a skill + remote MCP entry per agent (standard library only)
+│   └── plugin/ # Renders the Antigravity plugin (standard library only)
 └── common/     # Schemas, state machine, gateway address resolution
 scripts/
-├── install_agent.py   # One-shot GPU install: skills + remote MCP config, stdlib only
-└── build_plugins.py   # Regenerates the checked-in native plugin assets
-.claude-plugin/        # Marketplace Claude Code reads straight from this repository
-plugins/claude-code/   # Generated plugin assets: skill, commands, remote .mcp.json
+├── install_agent.py   # One-shot GPU install: skill + remote MCP config, stdlib only
+└── build_plugins.py   # Regenerates the checked-in plugin assets
+plugins/trainpilot/    # Generated Antigravity plugin: manifest, mcp_config.json, skill, rules
 examples/       # mock_training.py — full HITL loop, no GPU required
 ```
 

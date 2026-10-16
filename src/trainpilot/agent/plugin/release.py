@@ -1,31 +1,21 @@
-"""Publishable Claude marketplace assets, derived from the canonical renderer."""
+"""The checked-in Antigravity plugin, derived from the canonical renderer.
 
-import json
+``agy plugin install <repository-url>`` installs the plugin from this published copy, so it
+has to be installable as-is: a literal default gateway address and no credentials. Anyone
+pointing at a gateway somewhere else edits ``serverUrl`` in the installed
+``mcp_config.json``, or runs the one-shot installer, which renders the real address and
+token into the bundle it stages.
+"""
+
 from typing import Dict
 
 from trainpilot.agent.plugin.render import PluginContext, render_bundle
+from trainpilot.common.gateway import DEFAULT_GATEWAY_URL
 
 
-def marketplace_files() -> Dict[str, str]:
-    """No credentials or server address are baked into the GitHub-distributed plugin."""
+def published_files() -> Dict[str, str]:
+    """Repository-relative path to content, for every published plugin asset."""
     bundle = render_bundle(
-        "claude-code",
-        PluginContext(gateway_url="${TRAINPILOT_GATEWAY_URL}", api_token=None, task_id=""),
+        PluginContext(gateway_url=DEFAULT_GATEWAY_URL, api_token=None, task_id="")
     )
-    files = {}
-    for item in bundle.files:
-        if item.path == ".claude-plugin/marketplace.json":
-            marketplace = json.loads(item.content)
-            marketplace["plugins"][0]["source"] = "./plugins/claude-code"
-            files[item.path] = json.dumps(marketplace, indent=2, ensure_ascii=False) + "\n"
-        else:
-            content = item.content
-            if item.path == ".mcp.json":
-                mcp = json.loads(content)
-                # An unset token is an empty X-API-Token, not a malformed 'Bearer '.
-                mcp["mcpServers"]["trainpilot"]["headers"] = {
-                    "X-API-Token": "${TRAINPILOT_API_TOKEN:-}",
-                }
-                content = json.dumps(mcp, indent=2, ensure_ascii=False) + "\n"
-            files[f"plugins/claude-code/{item.path}"] = content
-    return files
+    return {f"plugins/trainpilot/{item.path}": item.content for item in bundle.files}

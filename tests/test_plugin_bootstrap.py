@@ -2,8 +2,8 @@
 
 Two things are pinned here:
 
-* the checked-in Claude marketplace assets are exactly what the canonical renderer
-  produces, and carry no real credentials;
+* the checked-in Antigravity plugin is exactly what the canonical renderer produces, is
+  free of credentials, and is the *only* thing the repository publishes under ``plugins/``;
 * ``scripts/install_agent.py`` works with the standard library only (``python -I -S``),
   extracts only its allowlisted sources from a downloaded archive, and still writes
   nothing outside the throwaway ``$HOME`` it is given.
@@ -85,12 +85,12 @@ def tree(root: Path):
     return {path.relative_to(root) for path in root.rglob("*") if path.is_file()}
 
 
-# --------------------------------------------------------------------------- release
+# --------------------------------------------------------------------------- published
 
 
 def test_checked_in_plugin_matches_the_generator():
     """A hand-edited copy of the prose is what drifts; the generator is the source."""
-    for relative, content in release.marketplace_files().items():
+    for relative, content in release.published_files().items():
         path = ROOT / relative
         assert path.is_file(), f"{relative} is missing; run scripts/build_plugins.py"
         assert path.read_text(encoding="utf-8") == content, (
@@ -98,26 +98,39 @@ def test_checked_in_plugin_matches_the_generator():
         )
 
 
-def test_marketplace_points_at_a_directory_of_plugin_assets_only():
-    """Pointing at the repository root would hand the whole Python project to the agent."""
-    marketplace = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text())
-    assert marketplace["plugins"][0]["source"] == "./plugins/claude-code"
-    assert not (ROOT / "plugins" / "claude-code" / "src").exists()
+def test_the_repository_publishes_plugin_assets_and_nothing_else():
+    """Antigravity copies *everything* it finds into its plugin directory, so the published
+    tree must hold the plugin and nothing else -- no stale directory from an older shape,
+    no Python project."""
+    published = tree(ROOT / "plugins")
+    assert published == {
+        Path(relative).relative_to("plugins") for relative in release.published_files()
+    }
+    assert not (ROOT / ".claude-plugin").exists(), "a Claude marketplace is no longer published"
+    assert not (ROOT / "plugins" / "claude-code").exists()
 
 
-def test_published_plugin_carries_no_credentials_and_no_default_address():
-    files = release.marketplace_files()
-    entry = json.loads(files["plugins/claude-code/.mcp.json"])["mcpServers"]["trainpilot"]
-    assert entry["type"] == "http"
-    assert entry["url"] == "${TRAINPILOT_GATEWAY_URL}/mcp"
-    # An unset token must not produce a malformed `Bearer ` header.
-    assert entry["headers"] == {"X-API-Token": "${TRAINPILOT_API_TOKEN:-}"}
+def test_published_plugin_carries_no_credentials_and_a_literal_default_address():
+    files = release.published_files()
+    entry = json.loads(files["plugins/trainpilot/mcp_config.json"])["mcpServers"]["trainpilot"]
+    # A literal address, not `${TRAINPILOT_GATEWAY_URL}`: Antigravity resolves variables in
+    # neither `serverUrl` nor its own stdio sniffing, so a placeholder would silently
+    # install a server that cannot connect.
+    assert entry["serverUrl"] == "http://127.0.0.1:28780/mcp"
+    assert "headers" not in entry
     for content in files.values():
         assert "Bearer" not in content
+        assert "${" not in content
+
+
+def test_published_manifest_is_the_vendor_shape():
+    manifest = json.loads(release.published_files()["plugins/trainpilot/plugin.json"])
+    assert manifest["name"] == "trainpilot"
+    assert set(manifest) == {"$schema", "name", "description"}
 
 
 def test_published_skill_uses_the_native_connection_not_a_cli():
-    skill = release.marketplace_files()["plugins/claude-code/skills/trainpilot/SKILL.md"]
+    skill = release.published_files()["plugins/trainpilot/skills/trainpilot/SKILL.md"]
     assert "MCP initialization" in skill
     assert "trainpilot-cli" not in skill
 
@@ -161,80 +174,63 @@ def test_plugin_imports_without_site_packages():
     assert result.stdout.strip() == "[]", f"installation pulled in {result.stdout.strip()}"
 
 
-def test_installer_lists_every_supported_agent(throwaway_home):
+def test_the_generator_writes_only_the_published_files(throwaway_home):
+    """`scripts/build_plugins.py` is what a contributor runs; it needs no venv."""
     home, work = throwaway_home
-    result = run_installer(home, work, "list")
-    assert result.returncode == 0, result.stderr
-    for key in catalog.target_keys():
-        assert key in result.stdout
-
-
-def test_installer_install_and_uninstall_stay_inside_the_throwaway_home(throwaway_home):
-    home, work = throwaway_home
-    install = run_installer(home, work, "install", "codex", "--server-url", "http://gw.example:1")
-    assert install.returncode == 0, install.stderr
-    assert (home / ".agents" / "skills" / "trainpilot" / "SKILL.md").is_file()
-    assert (home / ".codex" / "config.toml").is_file()
-
-    uninstall = run_installer(home, work, "uninstall", "codex")
-    assert uninstall.returncode == 0, uninstall.stderr
-    assert tree(home) == set(), "uninstall must give the documents back"
-    assert tree(work) == set(), "nothing may be written outside $HOME"
-
-
-def test_installer_reports_a_missing_agent_cli_instead_of_claiming_success(throwaway_home):
-    """No `agy` on PATH: the bundle is staged, and the failure is reported as a failure."""
-    home, work = throwaway_home
-    result = run_installer(home, work, "install", "antigravity", "--server-url", "http://gw.example:1")
-    assert result.returncode == 1
-    assert "not on PATH" in result.stdout + result.stderr
-    assert (home / ".trainpilot" / "plugins" / "antigravity" / "mcp_config.json").is_file()
-
-
-@pytest.mark.parametrize(
-    ("target", "agent_cli", "expected"),
-    [
-        ("claude-code", "claude", "plugin install trainpilot --marketplace"),
-        ("antigravity", "agy", "plugin install"),
-        ("gemini-cli", "gemini", "extensions link"),
-    ],
-)
-def test_installer_registers_a_bundle_through_the_agents_own_cli(
-    throwaway_home, target, agent_cli, expected
-):
-    """Registration stays with the vendor CLI; the installer only supplies the argv."""
-    home, work = throwaway_home
-    bin_dir = home / "bin"
-    bin_dir.mkdir()
-    stub = bin_dir / agent_cli
-    stub.write_text(f'#!/bin/sh\necho "{agent_cli} $@" >> "$HOME/calls.txt"\n')
-    stub.chmod(0o755)
-
-    env = {k: v for k, v in os.environ.items() if not k.startswith("TRAINPILOT_")}
-    env["HOME"] = str(home)
-    env["PATH"] = str(bin_dir)
     result = subprocess.run(
-        [sys.executable, "-I", "-S", str(SCRIPT), "install", target, "--server-url", "http://gw.example:1"],
+        [sys.executable, "-I", "-S", str(GENERATOR)],
         cwd=work,
-        env=env,
+        env={**os.environ, "HOME": str(home)},
         capture_output=True,
         text=True,
         timeout=120,
     )
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    calls = (home / "calls.txt").read_text()
-    assert calls.startswith(agent_cli)
-    assert expected in calls
-    assert str(home / ".trainpilot" / "plugins" / target) in calls
-
-
-def test_generic_install_prints_a_pasteable_entry_without_a_real_url_leak(throwaway_home):
-    home, work = throwaway_home
-    result = run_installer(home, work, "install", "generic", "--server-url", "http://gw.example:1")
     assert result.returncode == 0, result.stderr
-    assert '"mcpServers"' in result.stdout
-    assert "http://gw.example:1/mcp" in result.stdout
+    assert set(result.stdout.split()) == set(release.published_files())
+    assert tree(work) == set(), "the generator must write nothing outside the repository"
+
+
+def test_installer_lists_the_supported_target(throwaway_home):
+    home, work = throwaway_home
+    result = run_installer(home, work, "list")
+    assert result.returncode == 0, result.stderr
+    assert catalog.ANTIGRAVITY.display_name in result.stdout
+    assert catalog.ANTIGRAVITY.transport in result.stdout
+
+
+def test_installer_stages_the_bundle_and_reports_a_missing_agy(throwaway_home):
+    """No `agy` on PATH: the bundle is staged, and the failure is reported as a failure."""
+    home, work = throwaway_home
+    result = run_installer(home, work, "install", "--server-url", "http://gw.example:1")
+    assert result.returncode == 1
+    assert "not on PATH" in result.stdout + result.stderr
+    assert (home / ".trainpilot" / "plugins" / "trainpilot" / "mcp_config.json").is_file()
+    assert tree(work) == set(), "nothing may be written outside $HOME"
+
+
+def test_installer_render_writes_only_where_it_is_told(throwaway_home):
+    home, work = throwaway_home
+    out = work / "bundle"
+    result = run_installer(home, work, "render", "--out", str(out))
+    assert result.returncode == 0, result.stderr
+    assert tree(out) == {
+        Path("plugin.json"),
+        Path("mcp_config.json"),
+        Path("rules/trainpilot.md"),
+        Path("skills/trainpilot/SKILL.md"),
+    }
+    assert tree(home) == set(), "render must not stage or install anything"
+
+
+def test_installer_uninstall_gives_the_tree_back(throwaway_home):
+    home, work = throwaway_home
+    assert run_installer(home, work, "install", "--server-url", "http://gw.example:1").returncode == 1
+    assert home.joinpath(".trainpilot").exists()
+
+    uninstall = run_installer(home, work, "uninstall")
+    assert uninstall.returncode == 0, uninstall.stderr
+    assert tree(home) == set(), "uninstall must give the tree back"
+    assert tree(work) == set(), "nothing may be written outside $HOME"
 
 
 # --------------------------------------------------------------------------- bootstrap

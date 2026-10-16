@@ -76,10 +76,9 @@ def run(source: Path, argv) -> int:
     # source tree is added, and the caller's cwd remains the install destination.
     sys.path.insert(0, str(source))
     from trainpilot.agent.plugin import commands
-    from trainpilot.agent.plugin.install import ConfigError
 
     parser = argparse.ArgumentParser(
-        description="Install GPU-side skills and remote MCP config only; no Python packages.",
+        description="Install the Antigravity skill and remote MCP config only; no Python packages.",
     )
     parser.add_argument("--server-url", "-s")
     parser.add_argument("--api-token")
@@ -89,7 +88,7 @@ def run(source: Path, argv) -> int:
     args = parser.parse_args(["plugin", *argv])
     try:
         return args.func(args)
-    except (ConfigError, OSError, ValueError) as exc:
+    except (OSError, ValueError) as exc:
         print(f"Installation failed: {exc}", file=sys.stderr)
         return 1
 
