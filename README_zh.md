@@ -11,8 +11,9 @@
 </p>
 
 面向**无公网 IP、无法接收外部 Webhook** 的内网 GPU 节点：GPU 侧的 AI Agent（Claude Code /
-OpenCode / Cursor 等）通过 MCP 上报训练进度与异常，TrainPilot 把异常变成飞书审批卡片，并把人的
-一键决策实时回传给 Agent。
+Antigravity / Gemini CLI / Codex / OpenCode 等）通过 MCP 上报训练进度与异常，TrainPilot 把异常变成
+飞书审批卡片，并把人的一键决策实时回传给 Agent。GPU 侧一条命令即可安装，见
+[接入 GPU 侧 Agent](#接入-gpu-侧-agent)。
 
 **TrainPilot 不监控、也不暂停你的训练进程。** 盯日志和控制作业是 Agent 的职责；控制面只负责任务
 状态机、审批闭环与审计留痕。
@@ -25,7 +26,7 @@ OpenCode / Cursor 等）通过 MCP 上报训练进度与异常，TrainPilot 把�
 flowchart TB
     subgraph GPU["内网 GPU 节点（仅出网）"]
         Job["训练作业"]
-        Agent["AI Agent（Claude Code / OpenCode）"]
+        Agent["AI Agent（Claude Code / Antigravity / Gemini CLI / Codex / OpenCode）"]
         Job -->|日志、退出状态| Agent
     end
 
@@ -69,12 +70,22 @@ stateDiagram-v2
 
 ## 快速开始
 
+这里装的是**控制面**，跑在公网服务器上。GPU 侧是一套小得多的独立安装，见
+[接入 GPU 侧 Agent](#接入-gpu-侧-agent)。
+
 需要 Python >= 3.10，推荐使用 [uv](https://docs.astral.sh/uv/)。
 
 ```bash
 git clone https://github.com/Long-Holiday/TrainPilot.git && cd TrainPilot
 uv sync
 cp .env.example .env     # 缺失时 start.sh 会自动创建
+```
+
+控制面的依赖（FastAPI、uvicorn、lark-oapi）放在 `server` 依赖组而不是基础依赖里，所以克隆本仓库的
+GPU 节点可以直接跳过它们：
+
+```bash
+uv sync --no-group server --no-group dev    # GPU 侧：只装 mcp + httpx + pydantic
 ```
 
 ```bash
@@ -97,22 +108,62 @@ uv run python examples/mock_training.py
 
 ## 接入 GPU 侧 Agent
 
-把 Agent 指向控制面的 MCP 端点：
+GPU 节点上**不需要装 TrainPilot 的代码**也能用控制面：受支持的 Agent 都自带远程 MCP 客户端，
+直连 `/mcp`。它们猜不到的是各家对「这里有一个远程 MCP server」的写法，而**写错的后果通常是静默的**
+—— Agent 正常启动，就是永远看不到那几个工具。所以用一条命令把 TrainPilot 渲染成你面前这个 Agent
+认识的格式，写进去，再交给该 Agent 自己的 CLI 去注册：
 
-```json
-{
-  "mcpServers": {
-    "trainpilot": {
-      "url": "http://<公网服务器IP>:28780/mcp",
-      "headers": { "Authorization": "Bearer <TRAINPILOT_API_TOKEN>" }
-    }
-  }
-}
+```bash
+# 尚未发布到 PyPI —— 直接从仓库装 GPU 侧客户端。
+# tool 安装只会带上基础依赖，那正好就是 GPU 侧。
+uv tool install "git+https://github.com/Long-Holiday/TrainPilot"
+export TRAINPILOT_GATEWAY_URL=http://<公网服务器IP>:28780
+export TRAINPILOT_API_TOKEN=<服务端配了就要填一致的值>
+
+trainpilot-cli plugin install all      # 装到本机检测到的每一个 Agent
+trainpilot-cli plugin install codex    # 或指定一个
 ```
 
-行为规则——何时告警、什么算「已验证的恢复」、如何轮询——由服务端通过 MCP 的 `instructions`
-字段和每个工具的 docstring 直接下发，**无需**往 Agent 的 system prompt 里拷贝任何内容。升级
-TrainPilot 后重启 Agent 即可刷新。任何工具的 `task_id` 都可省略，此时回退到 `TRAINPILOT_TASK_ID`。
+| Agent | 下发给它的远程 server key | 装了什么 |
+|:---|:---|:---|
+| `claude-code` | `"type": "http"` + `url` | 插件 + marketplace 落在 `~/.trainpilot/plugins/claude-code`，随后 `claude plugin install` |
+| `antigravity` | `serverUrl` | 插件（`plugin.json`、`mcp_config.json`、skill），用 `agy plugin install` 注册 |
+| `gemini-cli` | `httpUrl` | 扩展（`gemini-extension.json`、`GEMINI.md`、TOML 命令、skill），用 `gemini extensions link` 链接 |
+| `opencode` | `mcp.servers.<name>`，`type: remote` | 合并进 `opencode.json`，外加 skill 与命令 |
+| `codex` | `[mcp_servers.<name>]` TOML 表 | 合并进 `config.toml`，外加 skill 与 `AGENTS.md` 指引 |
+| `generic` | `mcpServers` JSON | 跨厂商 skill 落到 `.agents/skills/`，并打印一份可粘贴的片段 |
+
+Antigravity 明确不接受 `url` 与 `httpUrl`，Gemini CLI 则把 `url` 当作 SSE —— 这就是为什么这里需要
+一个安装器而不是一段 README 片段。再加一家 Agent = 在
+`src/trainpilot/agent/plugin/catalog.py` 加一条 + 写一个渲染函数，两者的对应关系由测试钉住。
+
+常用命令：
+
+```bash
+trainpilot-cli plugin list                # 支持的 Agent，以及本机装了哪些
+trainpilot-cli plugin render codex        # 只打印将要写入的内容，不落盘
+trainpilot-cli plugin install codex --dry-run
+trainpilot-cli plugin uninstall codex     # 外科手术式卸载：你自己的键与段落原样保留
+trainpilot-cli plugin doctor              # 一次检查网关、token、协议、task id
+trainpilot-cli plugin protocol            # 打印当前生效的监督协议
+```
+
+出问题时先跑 `plugin doctor`：它能把「网关连不上」「token 不对」「任务还没有行」这三件在 Agent
+内部看起来一模一样的事区分开。
+
+### 行为规则从哪来
+
+规则（何时告警、什么算「已验证的恢复」、如何轮询）由服务端通过 MCP 的 `instructions` 字段和每个工具
+的 docstring 直接下发，**无需**往 Agent 的 system prompt 里拷贝任何内容。装进去的 skill **刻意不复述**
+这些规则：它只交代怎么连接、怎么绑定任务、怎么回执，然后让 Agent 去跑 `trainpilot-cli plugin
+protocol` —— 那条命令在一次真实握手里读出契约。因此今天装的插件，不会对之后升级的服务端过时。
+装完重启 Agent。
+
+安装器改的是你自己的文件（`config.toml`、`opencode.json`、`AGENTS.md`），所以它只做**合并**而非覆盖：
+你自己的键和段落原样保留，改动前的字节留在同目录的 `.trainpilot.bak`，解析不了的 JSON 会被拒绝而
+不是被覆盖，`uninstall` 会把文档还给你。
+
+任何工具的 `task_id` 都可省略，此时回退到 `TRAINPILOT_TASK_ID`。
 
 ---
 
@@ -258,6 +309,7 @@ docker run -d -p 28780:28780 -v $(pwd)/trainpilot.db:/app/trainpilot.db \
 src/trainpilot/
 ├── server/     # 控制面：MCP 工具、信箱、SQLite WAL、飞书卡片、REST
 ├── agent/      # GPU 侧 MCP 客户端 + trainpilot-cli
+│   └── plugin/ # 把 TrainPilot 渲染成各家 Agent 的原生插件格式
 └── common/     # Schemas、状态机、网关地址解析
 examples/       # mock_training.py —— 无需 GPU 即可跑通完整 HITL 闭环
 ```

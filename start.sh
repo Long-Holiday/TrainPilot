@@ -334,7 +334,10 @@ if [ -f "${PROJECT_ROOT}/.venv/bin/python" ]; then
     PYTHON_CMD="${PROJECT_ROOT}/.venv/bin/python"
 elif command -v uv >/dev/null 2>&1; then
     log_info "检测到 uv 包管理器，正在初始化虚拟环境..."
-    uv sync
+    # --group server: the control plane lives in the `server` dependency group, since the
+    # GPU side ships without FastAPI/uvicorn/lark-oapi. Explicit so an inherited
+    # UV_NO_DEFAULT_GROUPS cannot silently produce a control plane that cannot boot.
+    uv sync --group server
     PYTHON_CMD="${PROJECT_ROOT}/.venv/bin/python"
 elif command -v python3 >/dev/null 2>&1; then
     log_warn "未检测到 uv 或 .venv，回退使用系统 python3..."

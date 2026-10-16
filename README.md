@@ -11,9 +11,10 @@
 </p>
 
 A public control plane for training runs on intranet GPU nodes that have no public IP and no way to
-receive inbound webhooks. A GPU-side AI agent (Claude Code, OpenCode, Cursor, ...) reports progress
-and anomalies over MCP; TrainPilot turns anomalies into Feishu/Lark approval cards and streams the
-human's one-click decision back to the agent.
+receive inbound webhooks. A GPU-side AI agent (Claude Code, Antigravity, Gemini CLI, Codex,
+OpenCode, ...) reports progress and anomalies over MCP; TrainPilot turns anomalies into Feishu/Lark
+approval cards and streams the human's one-click decision back to the agent. The GPU side installs
+with one command — see [Installing onto a GPU-side Agent](#installing-onto-a-gpu-side-agent).
 
 **TrainPilot does not monitor or pause your training process.** The agent watches the logs and
 controls the job; the control plane owns the task state machine, the approval loop, and the audit
@@ -27,7 +28,7 @@ trail.
 flowchart TB
     subgraph GPU["Intranet GPU node (outbound only)"]
         Job["Training job"]
-        Agent["AI agent (Claude Code / OpenCode)"]
+        Agent["AI agent (Claude Code / Antigravity / Gemini CLI / Codex / OpenCode)"]
         Job -->|logs, exit status| Agent
     end
 
@@ -71,12 +72,22 @@ stateDiagram-v2
 
 ## Quick Start
 
+This is the **control plane**, which runs on the public server. The GPU side is a separate,
+much smaller install — see [Installing onto a GPU-side Agent](#installing-onto-a-gpu-side-agent).
+
 Requires Python >= 3.10; [uv](https://docs.astral.sh/uv/) is recommended.
 
 ```bash
 git clone https://github.com/Long-Holiday/TrainPilot.git && cd TrainPilot
 uv sync
 cp .env.example .env     # start.sh creates it for you if missing
+```
+
+The control plane's stack (FastAPI, uvicorn, lark-oapi) lives in the `server` dependency group
+rather than in the base dependencies, so a GPU node that clones this repo can skip it:
+
+```bash
+uv sync --no-group server --no-group dev    # GPU side only: mcp + httpx + pydantic
 ```
 
 ```bash
@@ -97,24 +108,66 @@ uv run python examples/mock_training.py
 
 ---
 
-## Connecting a GPU-side Agent
+## Installing onto a GPU-side Agent
 
-Point your agent at the control plane's MCP endpoint:
+The GPU node needs no TrainPilot code to *use* the control plane — every supported agent carries
+its own remote MCP client and talks straight to `/mcp`. What it cannot know is each vendor's
+spelling of "here is a remote MCP server", and getting that wrong usually fails quietly: the agent
+starts up fine and simply never sees the tools. So one command renders TrainPilot into whatever
+format the agent in front of you expects, writes it, and hands the result to that agent's own CLI.
 
-```json
-{
-  "mcpServers": {
-    "trainpilot": {
-      "url": "http://<PUBLIC_SERVER_IP>:28780/mcp",
-      "headers": { "Authorization": "Bearer <TRAINPILOT_API_TOKEN>" }
-    }
-  }
-}
+```bash
+# No PyPI release yet — install the GPU-side client straight from the repository.
+# Tools install the base dependencies only, which is exactly the GPU side.
+uv tool install "git+https://github.com/Long-Holiday/TrainPilot"
+export TRAINPILOT_GATEWAY_URL=http://<PUBLIC_SERVER_IP>:28780
+export TRAINPILOT_API_TOKEN=<the server's token, if it has one>
+
+trainpilot-cli plugin install all      # every agent found on this node
+trainpilot-cli plugin install codex    # or name one
 ```
 
-The behaviour rules — when to alert, what counts as a verified recovery, how to poll — are delivered
-by the server itself in the MCP `instructions` field and in each tool's docstring. There is nothing
-to copy into your agent's system prompt. Restart the agent after upgrading TrainPilot to refresh them.
+| Agent | Remote-server key it is given | What is installed |
+|:---|:---|:---|
+| `claude-code` | `"type": "http"` + `url` | Plugin + marketplace under `~/.trainpilot/plugins/claude-code`, then `claude plugin install` |
+| `antigravity` | `serverUrl` | Plugin (`plugin.json`, `mcp_config.json`, skill) registered with `agy plugin install` |
+| `gemini-cli` | `httpUrl` | Extension (`gemini-extension.json`, `GEMINI.md`, TOML commands, skill) linked with `gemini extensions link` |
+| `opencode` | `mcp.servers.<name>` with `type: remote` | `opencode.json` merged, plus skill and commands |
+| `codex` | `[mcp_servers.<name>]` TOML table | `config.toml` merged, plus a skill and an `AGENTS.md` pointer |
+| `generic` | `mcpServers` JSON | The cross-vendor skill in `.agents/skills/`, plus a printed snippet to paste |
+
+Antigravity rejects `url` and `httpUrl` outright, and Gemini CLI reads `url` as SSE — which is why
+this is an installer and not a README snippet. Adding another agent is one entry in
+`src/trainpilot/agent/plugin/catalog.py` plus a renderer; the pairs are pinned by tests.
+
+Useful commands:
+
+```bash
+trainpilot-cli plugin list                # supported agents, and which are present here
+trainpilot-cli plugin render codex        # print what would be written, install nothing
+trainpilot-cli plugin install codex --dry-run
+trainpilot-cli plugin uninstall codex     # surgical: your own keys and sections survive
+trainpilot-cli plugin doctor              # gateway, token, protocol and task id, in one shot
+trainpilot-cli plugin protocol            # the live supervision protocol
+```
+
+`plugin doctor` is the one to run first when something is wrong: it separates "the gateway is
+unreachable" from "the token is wrong" from "the task id has no row yet", which are otherwise
+indistinguishable from inside an agent.
+
+### Where the behaviour rules come from
+
+The rules — when to alert, what counts as a verified recovery, how to poll — are delivered by the
+server itself in the MCP `instructions` field and in each tool's docstring. There is nothing to copy
+into your agent's system prompt, and the installed skill deliberately does not repeat them: it tells
+the agent how to connect, bind a task and acknowledge, and then to run `trainpilot-cli plugin
+protocol`, which reads the contract out of a live handshake. A plugin installed today therefore
+cannot go stale against a server upgraded later. Restart the agent after installing.
+
+The installer edits files you own (`config.toml`, `opencode.json`, `AGENTS.md`), so it merges rather
+than replaces: your own keys and sections survive, the previous bytes are kept in a
+`.trainpilot.bak` beside the file, a JSON file that will not parse is refused instead of
+overwritten, and `uninstall` gives the document back.
 
 `task_id` may be omitted on any tool; the server then falls back to `TRAINPILOT_TASK_ID`.
 
@@ -278,6 +331,7 @@ intranet GPU client — are documented inline there, variable by variable. The o
 src/trainpilot/
 ├── server/     # Control plane: MCP tools, mailbox, SQLite WAL, Feishu cards, REST
 ├── agent/      # GPU-side MCP client + trainpilot-cli
+│   └── plugin/ # Renders TrainPilot into each agent's native plugin format
 └── common/     # Schemas, state machine, gateway address resolution
 examples/       # mock_training.py — full HITL loop, no GPU required
 ```

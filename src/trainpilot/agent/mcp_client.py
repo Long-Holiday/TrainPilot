@@ -184,6 +184,23 @@ class TrainPilotMCPClient:
                                 return first.text
                     return response
 
+    async def get_instructions_async(self) -> str:
+        """Return the server's own behaviour contract from the MCP handshake.
+
+        The control plane is the single owner of that text (see ``mcp_server._INSTRUCTIONS``),
+        so reading it live is what keeps a GPU-side plugin from going stale: an agent that
+        loads this gets the protocol that matches the server it is actually talking to.
+        """
+        async with self._create_http_client() as http_client:
+            async with streamable_http_client(self.mcp_url, http_client=http_client) as (read, write):
+                async with ClientSession(read, write) as session:
+                    result = await session.initialize()
+                    return getattr(result, "instructions", None) or ""
+
+    def get_instructions(self) -> str:
+        """Synchronously read the server's MCP instructions."""
+        return _run_coroutine_sync(self.get_instructions_async())
+
     def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
         """Synchronously call a tool on the remote TrainPilot MCP Server."""
         return _run_coroutine_sync(self.call_tool_async(tool_name, arguments))

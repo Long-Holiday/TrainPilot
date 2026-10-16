@@ -14,7 +14,9 @@ COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 COPY examples ./examples
 
-RUN uv sync --frozen --no-dev
+# The control plane lives in the `server` dependency group; the base deps are the
+# GPU-side client only (mcp + httpx + pydantic), so the image has to ask for it.
+RUN uv sync --frozen --no-group dev --group server
 
 ENV PYTHONPATH=/app/src \
     TRAINPILOT_BIND_HOST=0.0.0.0 \

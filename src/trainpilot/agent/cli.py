@@ -3,6 +3,9 @@
 Connects from GPU worker nodes to the central TrainPilot MCP Server so engineers
 and scripts can report events, poll human decisions, and acknowledge recovery
 actions without writing code.
+
+The ``plugin`` subcommand group installs TrainPilot into a coding agent running on
+this node -- see ``trainpilot.agent.plugin``.
 """
 
 import argparse
@@ -11,6 +14,7 @@ import sys
 from typing import Any, Dict, Optional
 
 from trainpilot.agent.mcp_client import TrainPilotMCPClient
+from trainpilot.agent.plugin import commands as plugin_commands
 
 
 def _parse_key_value_or_json(raw: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -112,7 +116,13 @@ def main(argv=None) -> int:
     # 5. status
     subparsers.add_parser("status", help="Get current task status")
 
+    # 6. plugin (installs TrainPilot into a GPU-side coding agent)
+    plugin_commands.add_parser(subparsers)
+
     args = parser.parse_args(argv)
+
+    if getattr(args, "subcommand", None) == "plugin":
+        return args.func(args)
 
     client = TrainPilotMCPClient(
         server_url=args.server_url,
