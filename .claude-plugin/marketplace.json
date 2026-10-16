@@ -1,0 +1,20 @@
+{
+  "name": "trainpilot",
+  "owner": {
+    "name": "TrainPilot"
+  },
+  "description": "TrainPilot: human-in-the-loop supervision for GPU training runs.",
+  "plugins": [
+    {
+      "name": "trainpilot",
+      "source": "./plugins/claude-code",
+      "description": "Supervise a GPU training run through a TrainPilot control plane: report progress and anomalies, wait for the engineer's decision, and acknowledge the recovery.",
+      "category": "monitoring",
+      "tags": [
+        "training",
+        "gpu",
+        "hitl"
+      ]
+    }
+  ]
+}

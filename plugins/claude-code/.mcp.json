@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "trainpilot": {
+      "type": "http",
+      "url": "${TRAINPILOT_GATEWAY_URL}/mcp",
+      "headers": {
+        "X-API-Token": "${TRAINPILOT_API_TOKEN:-}"
+      }
+    }
+  }
+}
