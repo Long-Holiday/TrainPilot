@@ -3,7 +3,7 @@
 import asyncio
 from unittest.mock import Mock
 import pytest
-from trainpilot.common.states import TaskState
+from trainpilot.common.states import EventType, TaskState
 from trainpilot.server.mailbox import default_mailbox
 from trainpilot.server.config import settings
 import trainpilot.server.mcp_server as server
@@ -16,11 +16,6 @@ from trainpilot.server.mcp_server import (
 )
 
 
-def _seed_task(task_id):
-    """Create a task row the supported way -- a report. Plans only bind to live tasks."""
-    return report(task_id=task_id, message="epoch 1 done", event_type="milestone")
-
-
 @pytest.fixture(autouse=True)
 def mock_notifications(monkeypatch):
     """Exercise delivery synchronously without external requests or live timers."""
@@ -29,7 +24,13 @@ def mock_notifications(monkeypatch):
         return True
 
     monkeypatch.setattr(server.feishu_dispatcher, "submit", submit)
-    for name in ("send_alert", "send_milestone", "send_recovery", "update_card_to_resolved"):
+    for name in (
+        "send_alert",
+        "send_milestone",
+        "send_recovery",
+        "send_outcome",
+        "update_card_to_resolved",
+    ):
         monkeypatch.setattr(server.default_feishu_client, name, Mock())
     monkeypatch.setattr(server, "_schedule_auto_self_resolve", Mock())
 
@@ -175,18 +176,25 @@ def test_mcp_surface_metadata_and_guidance(mcp_tools):
     assert "has_instruction=true" in instructions
     assert "instruction_id" in instructions
     assert "Connecting MCP does not monitor or pause GPU processes" in instructions
-    assert "next_task_plans" in instructions
-    assert "ack_plan" in instructions
+    # The wait choice returns a control action and must be able to end polling.
+    assert "wait_for_user" in instructions
+    assert "stop polling" in instructions
+    assert "no automatic fallback" in instructions
+    # Cancel is terminal and is the agent's verified shutdown, not the server's.
+    assert "cancel only this run" in instructions
+    assert "terminal FAILED" in instructions
+    assert "never a recovery card" in instructions
+    assert "next_task_plans" not in instructions
+    assert "ack_plan" not in instructions
 
     assert set(mcp_tools) == {
-        "report", "poll_instruction", "ack_instruction", "ack_plan", "get_task_status",
+        "report", "poll_instruction", "ack_instruction", "get_task_status",
     }
     # Behaviour rules belong to `instructions`; docstrings must point there, not restate them.
     assert "specified in the server instructions" in mcp_tools["report"].description
     assert "has_instruction" in mcp_tools["poll_instruction"].description
-    assert "after you have executed it" in mcp_tools["ack_instruction"].description
+    assert "ACK is the one recovery report" in mcp_tools["ack_instruction"].description
     assert "instruction_id" in mcp_tools["ack_instruction"].description
-    assert "specified in the server instructions" in mcp_tools["ack_plan"].description
     assert "instruction-mailbox summary" in mcp_tools["get_task_status"].description
     assert mcp_tools["report"].input_schema["properties"]["event_type"]["default"] == "milestone"
 
@@ -200,14 +208,17 @@ def test_tool_input_schemas_are_exactly_the_agent_contract(mcp_tools):
     expected = {
         "report": {"message", "event_type", "task_id", "step", "epoch", "metrics", "agent_note"},
         "poll_instruction": {"task_id", "wait_timeout"},
-        "ack_instruction": {"task_id", "instruction_id", "action", "status", "solution"},
-        "ack_plan": {"plan_id", "status", "note"},
+        "ack_instruction": {
+            "task_id", "instruction_id", "action", "status", "solution",
+            "step", "epoch", "metrics",
+        },
         "get_task_status": {"task_id"},
     }
     for name, props in expected.items():
         assert set(mcp_tools[name].input_schema["properties"]) == props, name
     assert mcp_tools["report"].input_schema["required"] == ["message"]
-    assert mcp_tools["ack_plan"].input_schema["required"] == ["plan_id"]
+    # An ACK may omit instruction_id for the direct-conversation path.
+    assert mcp_tools["ack_instruction"].input_schema.get("required", []) == []
 
     # The agent surface is tools-only; the resource listings were removed.
     assert asyncio.run(mcp_server.list_resources()) == []
@@ -265,43 +276,19 @@ def test_auto_self_resolve_callback_only_fires_past_the_timeout_window():
     assert server.default_feishu_client.update_card_to_resolved.call_args.kwargs["task_id"] == task_id
 
 
-def test_auto_self_resolve_callback_alert_stage_skips_a_deferred_task():
-    """A human asked for time: the 30s timer must no longer resolve the alert."""
-    task_id = "test-deferred-auto-resolve"
+def test_auto_self_resolve_callback_skips_a_direct_conversation_wait():
+    """The engineer chose ⏳ 等待用户: the 30s timer must no longer resolve the alert."""
+    task_id = "test-direct-wait-auto-resolve"
     report(task_id=task_id, message="Loss NaN", event_type="alert", step=10)
-    default_mailbox.defer_alert(task_id, "ou_engineer")
+    default_mailbox.wait_for_direct_conversation(task_id, "ou_engineer")
 
     server._auto_self_resolve_callback(task_id, 0)
     assert default_mailbox.get_task(task_id).state == TaskState.WAITING
     server.default_feishu_client.update_card_to_resolved.assert_not_called()
 
 
-def test_auto_self_resolve_callback_arrangement_stage_resolves_the_fallback():
-    task_id = "test-arrangement-auto-resolve"
-    report(task_id=task_id, message="Loss NaN", event_type="alert", step=10)
-
-    # Not deferred yet: the arrangement stage has no window to close.
-    server._auto_self_resolve_callback(task_id, 0, stage="arrangement")
-    assert default_mailbox.get_task(task_id).state == TaskState.WAITING
-
-    default_mailbox.defer_alert(task_id, "ou_engineer")
-    # 0 = the window has elapsed, without waiting 30 minutes for it
-    server._auto_self_resolve_callback(task_id, 0, stage="arrangement")
-
-    task = default_mailbox.get_task(task_id)
-    assert task.state == TaskState.RESOLVED
-    assert task.pending_instruction.payload["arrangement"] is True
-    assert "等待安排" in task.pending_instruction.decision_by
-    # The card must not claim a 30-second timeout when the window is the long one
-    patch_kwargs = server.default_feishu_client.update_card_to_resolved.call_args.kwargs
-    assert "超过等待安排窗口" in patch_kwargs["trigger_note"]
-    assert "30 秒" not in patch_kwargs["trigger_note"]
-    # …and the alert-stage path keeps the default wording (no trigger_note)
-    assert server.default_feishu_client.update_card_to_resolved.call_count == 1
-
-
-def test_schedule_auto_resolve_picks_the_stage_window(monkeypatch):
-    """Neither stage may arm a real timer here; capture what would have been armed."""
+def test_schedule_auto_resolve_arms_the_default_window_and_can_be_disabled(monkeypatch):
+    """The ordinary alert timeout is unchanged; a non-positive value disables it."""
     armed = []
 
     class FakeTimer:
@@ -314,18 +301,13 @@ def test_schedule_auto_resolve_picks_the_stage_window(monkeypatch):
 
     monkeypatch.setattr(server.threading, "Timer", FakeTimer)
 
-    server.schedule_auto_resolve("task-alert", stage="alert")
-    server.schedule_auto_resolve("task-arranged", stage="arrangement")
-    assert [a[0] for a in armed] == [
-        settings.alert_decision_timeout_seconds,
-        settings.arrangement_timeout_seconds,
-    ]
-    assert [a[3]["stage"] for a in armed] == ["alert", "arrangement"]
+    server.schedule_auto_resolve("task-alert")
+    assert [a[0] for a in armed] == [settings.alert_decision_timeout_seconds]
+    assert armed[0][2] == ("task-alert", settings.alert_decision_timeout_seconds)
 
-    # A non-positive window disables that stage instead of arming an instant timer
-    monkeypatch.setattr(settings, "arrangement_timeout_seconds", 0)
-    server.schedule_auto_resolve("task-disabled", stage="arrangement")
-    assert len(armed) == 2
+    monkeypatch.setattr(settings, "alert_decision_timeout_seconds", 0)
+    server.schedule_auto_resolve("task-disabled")
+    assert len(armed) == 1
 
 
 def test_auto_self_resolve_callback_ignores_unknown_and_non_waiting_tasks():
@@ -352,74 +334,154 @@ def test_non_alert_reports_do_not_request_decision(event_type, state):
     server._schedule_auto_self_resolve.assert_not_called()
 
 
-def test_report_carries_only_matching_pending_plans():
-    """A plan is carried by its own task's reports and by no other task's."""
-    _seed_task("task-a")
-    _seed_task("task-b")
-    bound_plan, _ = server.default_plans.register("评测 checkpoint", task_id="task-a")
-    other_plan, _ = server.default_plans.register("别的任务", task_id="task-b")
+@pytest.mark.asyncio
+async def test_direct_wait_returns_a_control_action_and_ack_closes_it():
+    """Choosing ⏳ 等待用户 must end polling immediately, not keep it empty."""
+    task_id = "test-direct-wait-mcp"
+    report(task_id=task_id, message="Loss NaN", event_type="alert", step=10)
+    default_mailbox.wait_for_direct_conversation(task_id, "ou_engineer")
 
-    result = report(task_id="task-a", message="step 10 done", step=10)
-    assert [p["plan_id"] for p in result["next_task_plans"]] == [bound_plan.plan_id]
-    assert other_plan.plan_id not in [p["plan_id"] for p in result["next_task_plans"]]
+    polled = await poll_instruction(task_id=task_id, wait_timeout=2.0)
+    assert polled["has_instruction"] is True
+    assert polled["action"] == "wait_for_user"
+    assert polled["awaiting_direct_conversation"] is True
+    assert polled["instruction_id"] is None
 
-    entry = result["next_task_plans"][0]
-    assert set(entry) == {"plan_id", "text", "task_id", "created_by", "created_at"}
-    assert entry["text"] == "评测 checkpoint"
-    assert entry["task_id"] == "task-a"
-    assert "next_task_plans_guidance" in result
+    # The engineer gives the solution in the conversation; the ACK is the receipt.
+    acked = ack_instruction(
+        task_id=task_id,
+        instruction_id=None,
+        action="self_resolve",
+        status="success",
+        solution="按对话中的方案回滚到 step 4 并继续",
+        step=120,
+        metrics={"loss": 0.31},
+    )
+    assert acked["success"] is True
+    assert acked["state"] == TaskState.RUNNING.value
 
-
-@pytest.mark.parametrize("event_type", ["milestone", "completed", "failed"])
-def test_reports_without_plans_carry_an_empty_list(event_type):
-    """`[]` is the explicit 'I checked, nothing queued' signal; no guidance key."""
-    result = report(task_id="test-no-plans", message="Training update", event_type=event_type)
-    assert result["next_task_plans"] == []
-    assert "next_task_plans_guidance" not in result
-
-
-def test_alert_carries_plans_alongside_the_alert_contract():
-    """Plan keys must not displace the alert-specific next_action/guidance pair."""
-    _seed_task("test-alert-with-plan")
-    server.default_plans.register("重跑评测", task_id="test-alert-with-plan")
-    result = report(task_id="test-alert-with-plan", message="Loss NaN", event_type="alert", step=3)
-    assert result["state"] == TaskState.WAITING.value
-    assert result["next_action"] == {
-        "tool": "poll_instruction",
-        "arguments": {"task_id": "test-alert-with-plan"},
-    }
-    assert len(result["next_task_plans"]) == 1
-    assert "Alert recorded" in result["guidance"]
-
-
-def test_ack_plan_removes_the_plan_from_later_reports():
-    _seed_task("test-ack-plan")
-    plan, _ = server.default_plans.register("跑评测", task_id="test-ack-plan")
-
-    assert len(report(task_id="test-ack-plan", message="m1")["next_task_plans"]) == 1
-
-    ack = server.ack_plan(plan_id=plan.plan_id, status="done", note="已跑完评测")
-    assert ack["success"] is True
-    assert ack["status"] == "done"
-    assert ack["acked_at"]
-
-    after = report(task_id="test-ack-plan", message="m2")
-    assert after["next_task_plans"] == []
-    assert "next_task_plans_guidance" not in after
+    task = default_mailbox.get_task(task_id)
+    assert task.awaiting_direct_conversation is False
+    # ACK values are persisted in the same snapshot, so the card and later reads agree.
+    assert task.latest_step == 120
+    assert task.latest_metrics == {"loss": 0.31}
+    server.default_feishu_client.send_recovery.assert_called_once_with(
+        task_id=task_id,
+        solution="按对话中的方案回滚到 step 4 并继续",
+        step=120,
+        epoch=None,
+        metrics={"loss": 0.31},
+    )
+    server.default_feishu_client.send_outcome.assert_not_called()
 
 
-def test_ack_plan_rejects_unknown_duplicate_and_bad_status():
-    bad_status = server.ack_plan(plan_id="plan_missing", status="whatever")
+@pytest.mark.asyncio
+async def test_ack_status_is_normalized_before_notifying():
+    """The mailbox trims status; the notifier must use the same normalization."""
+    task_id = "test-ack-status-normalized"
+    report(task_id=task_id, message="Loss NaN", event_type="alert", step=10)
+    default_mailbox.wait_for_direct_conversation(task_id, "ou_engineer")
+
+    acked = ack_instruction(
+        task_id=task_id,
+        instruction_id=None,
+        action="self_resolve",
+        status=" Success ",
+        solution="按对话方案恢复",
+    )
+    assert acked["success"] is True
+    assert acked["state"] == TaskState.RUNNING.value
+    server.default_feishu_client.send_recovery.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cancel_ack_is_terminal_and_notifies_once_without_a_recovery_card():
+    task_id = "test-cancel-terminal-mcp"
+    report(task_id=task_id, message="Loss NaN", event_type="alert", step=10)
+    default_mailbox.submit_decision(task_id, action="cancel", operator="ou_engineer")
+    polled = await poll_instruction(task_id=task_id, wait_timeout=0)
+    assert polled["action"] == "cancel"
+
+    acked = ack_instruction(
+        task_id=task_id,
+        instruction_id=polled["instruction_id"],
+        action="cancel",
+        status="success",
+        solution="已取消本次运行并验证机器关机",
+    )
+    assert acked["success"] is True
+    assert acked["state"] == TaskState.FAILED.value
+    server.default_feishu_client.send_outcome.assert_called_once_with(
+        task_id=task_id,
+        event_type=EventType.FAILED,
+        message="已取消本次运行并验证机器关机",
+        step=None,
+        epoch=None,
+        metrics=None,
+    )
+    server.default_feishu_client.send_recovery.assert_not_called()
+
+    # Replaying an ACK after cancellation must not reopen the terminal task or
+    # send a second card.
+    replay = ack_instruction(
+        task_id=task_id,
+        instruction_id=polled["instruction_id"],
+        action="self_resolve",
+        status="success",
+    )
+    assert replay["success"] is False
+    assert "already terminal" in replay["error"]
+    assert default_mailbox.get_task(task_id).state == TaskState.FAILED
+    server.default_feishu_client.send_outcome.assert_called_once()
+    server.default_feishu_client.send_recovery.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_ack_rejects_bad_status_mismatched_action_and_replay():
+    task_id = "test-ack-validation"
+    report(task_id=task_id, message="Loss NaN", event_type="alert", step=10)
+    default_mailbox.submit_decision(task_id, action="self_resolve", operator="ou_engineer")
+    polled = await poll_instruction(task_id=task_id, wait_timeout=0)
+
+    bad_status = ack_instruction(
+        task_id=task_id,
+        instruction_id=polled["instruction_id"],
+        action="self_resolve",
+        status="maybe",
+    )
     assert bad_status["success"] is False
-    assert "Invalid status 'whatever'" in bad_status["error"]
+    assert "Invalid status" in bad_status["error"]
 
-    unknown = server.ack_plan(plan_id="plan_missing")
-    assert unknown["success"] is False
-    assert "not found" in unknown["error"]
+    mismatch = ack_instruction(
+        task_id=task_id,
+        instruction_id=polled["instruction_id"],
+        action="cancel",
+        status="success",
+    )
+    assert mismatch["success"] is False
+    assert "Action mismatch" in mismatch["error"]
 
-    _seed_task("test-ack-plan-twice")
-    plan, _ = server.default_plans.register("一次性任务", task_id="test-ack-plan-twice")
-    assert server.ack_plan(plan_id=plan.plan_id)["success"] is True
-    duplicate = server.ack_plan(plan_id=plan.plan_id)
-    assert duplicate["success"] is False
-    assert "already acknowledged" in duplicate["error"]
+    bad_action = ack_instruction(
+        task_id=task_id,
+        instruction_id=polled["instruction_id"],
+        action="wait_for_user",
+        status="success",
+    )
+    assert bad_action["success"] is False
+    assert "control action" in bad_action["error"]
+
+    acked = ack_instruction(
+        task_id=task_id,
+        instruction_id=polled["instruction_id"],
+        action="self_resolve",
+        status="success",
+    )
+    assert acked["success"] is True
+    replay = ack_instruction(
+        task_id=task_id,
+        instruction_id=polled["instruction_id"],
+        action="self_resolve",
+        status="success",
+    )
+    assert replay["success"] is False
+    assert "already acknowledged" in replay["error"]

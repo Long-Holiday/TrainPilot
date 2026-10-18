@@ -69,23 +69,6 @@ class ServerSettings(BaseSettings):
         description="Seconds an alert card waits for human decision before auto self-resolve",
     )
 
-    # Fallback window after someone clicks "wait for arrangement" on the alert card:
-    # the 30s auto-decision is paused, and the task self-resolves only if no
-    # `#fix(task) <solution>` group message arrives within this many seconds.
-    # 0 (or negative) disables the fallback entirely, leaving the task waiting indefinitely.
-    arrangement_timeout_seconds: int = Field(
-        default=1800,
-        description="Seconds to wait for a human-arranged fix before falling back to self-resolve",
-    )
-
-    # Next-task plans: any group message that @-mentions the bot registers one.
-    # Kill switch for apps holding the broader `im:message` scope, where messages
-    # @-mentioning other people would otherwise be registered too.
-    enable_next_task_plans: bool = Field(
-        default=True,
-        description="Accept @-bot Feishu group messages as next-task plans",
-    )
-
     # API Authentication (optional, but strongly recommended for public gateways)
     # When set, GPU Agents must send `Authorization: Bearer <token>` or `X-API-Token: <token>`.
     # Webhook uses Feishu verification token separately and is not affected.
@@ -135,11 +118,6 @@ class ServerSettings(BaseSettings):
         default=3600.0,
         gt=0,
         description="Interval between expired-task cleanup sweeps",
-    )
-    plan_retention_hours: float = Field(
-        default=168.0,
-        gt=0,
-        description="Hours to retain acknowledged next-task plans (pending plans never expire)",
     )
 
     # Long Polling

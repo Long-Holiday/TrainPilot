@@ -98,7 +98,12 @@ def _simulate_operator_decision(gateway_url: str, task_id: str, delay: float = 3
 
 
 def _wait_for_decision(gateway_url: str, task_id: str) -> Dict[str, Any]:
-    """Long-poll until a human decision arrives, then hand back the instruction."""
+    """Long-poll until a decision or the wait-for-user control action arrives.
+
+    `has_instruction=true` with action `wait_for_user` means the engineer chose a
+    direct conversation: polling must stop and the agent returns control instead of
+    looping for an instruction that will never be queued.
+    """
     while True:
         res = call_tool(
             gateway_url, "poll_instruction", {"task_id": task_id, "wait_timeout": 5.0}
@@ -164,29 +169,45 @@ def run_mock_training(gateway_url: Optional[str] = None, task_id: str = "demo-ll
             print(f"[agent] decision received: action={instruction['action']} "
                   f"by {instruction['decision_by']}")
 
-            if instruction["action"] == "stop_training":
+            if instruction["action"] == "wait_for_user":
+                # No instruction will follow. In this non-interactive example we
+                # simulate the engineer giving the solution in the conversation, then
+                # close the wait with an ACK (no instruction_id).
+                print("[agent] engineer chose a direct conversation; stopping polling")
+                lr = 5e-5
+                loss = 1.4
+                call_tool(
+                    gateway_url,
+                    "ack_instruction",
+                    {
+                        "task_id": task_id,
+                        "action": "self_resolve",
+                        "status": "success",
+                        "solution": "Simulated direct conversation: rolled back to step 4 "
+                                    "and halved the LR; training resumed.",
+                        "step": step,
+                        "epoch": 1,
+                        "metrics": {"loss": loss, "lr": lr},
+                    },
+                )
+                print("[agent] direct-conversation receipt acknowledged\n")
+                continue
+
+            if instruction["action"] in ("cancel", "stop_training"):
+                # The agent cancels only this run, then verifies the machine shutdown;
+                # success is terminal and the ACK itself is the one notification.
                 call_tool(
                     gateway_url,
                     "ack_instruction",
                     {
                         "task_id": task_id,
                         "instruction_id": instruction["instruction_id"],
-                        "action": "stop_training",
+                        "action": "cancel",
                         "status": "success",
-                        "solution": "Stopped the run as instructed.",
+                        "solution": "Cancelled this run and verified the machine shut down.",
                     },
                 )
-                call_tool(
-                    gateway_url,
-                    "report",
-                    {
-                        "message": "Run stopped by operator decision at step 6",
-                        "event_type": "failed",
-                        "task_id": task_id,
-                        "step": step,
-                    },
-                )
-                print("\nRun halted by operator. Exiting.\n")
+                print("\nRun cancelled by operator; machine shutdown verified. Exiting.\n")
                 return
 
             # self_resolve: actually recover, verify, then ACK success

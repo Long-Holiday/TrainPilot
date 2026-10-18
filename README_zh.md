@@ -55,13 +55,14 @@ stateDiagram-v2
     [*] --> RUNNING: 首次 report
     RUNNING --> RUNNING: milestone
     RUNNING --> WAITING: alert
-    WAITING --> RESOLVED: 人工决策（点卡片或超时）
+    WAITING --> RESOLVED: 卡片决策或告警超时
+    WAITING --> RUNNING: 直接对话 self_resolve ACK
     RESOLVED --> RECOVERING: poll_instruction
-    RECOVERING --> RUNNING: ack 成功
-    RECOVERING --> WAITING: ack 失败
+    RECOVERING --> RUNNING: self_resolve/custom ACK 成功
+    RECOVERING --> WAITING: ACK 失败
+    WAITING --> FAILED: 已核实的 cancel ACK
     RUNNING --> COMPLETED: completed
     RUNNING --> FAILED: failed
-    WAITING --> FAILED: stop_training
     COMPLETED --> [*]
     FAILED --> [*]
 ```
@@ -196,15 +197,15 @@ skill 与 rules 只指向实时连接，**不复述规则，也不要求任何�
 
 ## MCP 接口
 
-共 5 个工具：前四个覆盖任务闭环，`ack_plan` 用于确认人类在飞书群里排的下一步计划。
+共 4 个工具覆盖任务闭环。没有下一步计划队列，也不接收群消息：新任务与后续决策都由用户在直接
+对话中交给 Agent。
 
 | 工具 | 入参 | 效果 |
 |:---|:---|:---|
-| **`report`** | `message`、`event_type`（`milestone`/`alert`/`completed`/`failed`，默认 `milestone`）、`task_id`、`step`、`epoch`、`metrics`、`agent_note` | `milestone` → 绿色卡片并展示 Agent 自撰的 `agent_note`；`alert` → 状态置 `WAITING`、推送红色审批卡片并启动 30s 自动决策定时器；`completed`/`failed` → 终态。每次响应都携带 `next_task_plans`（没有计划时为空列表） |
-| **`poll_instruction`** | `task_id`、`wait_timeout`（默认 20s） | 长轮询挂起直至决策到达；消费该指令并把任务推进到 `RECOVERING` |
-| **`ack_instruction`** | `task_id`、`instruction_id`、`action`、`status`、`solution` | 记录已核实的执行结果，任务回到 `RUNNING`，并推送由任务最近一次上报的 step/metrics 构建的自愈卡片 |
-| **`get_task_status`** | `task_id` | 当前状态、最近指标、待处理指令、事件计数 |
-| **`ack_plan`** | `plan_id`、`status`（`done`/`failed`/`skipped`，默认 `done`）、`note` | 确认某条下一步计划已处理，之后它不再出现在 `report` 响应里 |
+| **`report`** | `message`、`event_type`（`milestone`/`alert`/`completed`/`failed`，默认 `milestone`）、`task_id`、`step`、`epoch`、`metrics`、`agent_note` | `milestone` → 绿色卡片并展示 Agent 自撰的 `agent_note`；`alert` → 状态置 `WAITING`、推送红色审批卡片并启动 30s 自动 `self_resolve` 定时器；`completed`/`failed` → 终态，并直接发送一次通知，不需要再补报。 |
+| **`poll_instruction`** | `task_id`、`wait_timeout`（默认 20s） | 长轮询挂起直至决策到达；消费该指令并把任务推进到 `RECOVERING`。若工程师选择 **⏳ 等待用户**，立即返回 `awaiting_direct_conversation=true`：停止轮询，任务保持 `WAITING`，改由当前对话直接处理。 |
+| **`ack_instruction`** | `task_id`、`instruction_id`、`action`（`self_resolve`/`cancel`/`custom`；兼容旧名 `stop_training`）、`status`、`solution`、`step`、`epoch`、`metrics` | 记录已核实的执行结果。`self_resolve`/`custom` 成功 ACK 使任务回到 `RUNNING` 并发送一次恢复卡片；`cancel` 成功 ACK 进入终态 `FAILED` 并发送一次取消通知。等待用户后省略 `instruction_id`、以 `self_resolve` ACK；这一次 ACK 就是唯一的恢复报告。 |
+| **`get_task_status`** | `task_id` | 当前状态、最近指标、待处理指令、事件计数。等待用户期间仍返回 `WAITING`，直到直接对话后的 ACK，这是预期行为。 |
 
 REST 面（`/api/tasks`）面向运维与看板，不面向 Agent：
 `GET ""`、`GET /{task_id}/status`、`GET /{task_id}/events`、`POST /{task_id}/decision`。
@@ -215,71 +216,24 @@ REST 面（`/api/tasks`）面向运维与看板，不面向 Agent：
 
 | 卡片 | 头部 | 触发 | 内容 |
 |:---|:---:|:---|:---|
-| **异常告警** | 红色 | `report(event_type="alert")` | 指标、异常详情、**Agent 自撰的异常判断**、30s 倒计时、`[终止训练]` / `[自行解决]` / `[⏳ 等待安排]` 按钮 |
+| **异常告警** | 红色 | `report(event_type="alert")` | 指标、异常详情、**Agent 自撰的异常判断**、30s 倒计时、`[🛑 取消任务并关机]` / `[✅ 自行解决]` / `[⏳ 等待用户]` 按钮 |
 | **训练里程碑** | 绿色 | `report(event_type="milestone")` | 阶段进度、关键指标、**Agent 点评** |
-| **决策闭环** | 青色 | 点击按钮、`#fix` 消息或超时 | 就地替换原告警卡片；展示操作人、所选动作、解决时间；移除按钮 |
-| **等待人工安排** | 橙色 | 点击 `[⏳ 等待安排]` | 就地替换原告警卡片；自动决策已暂停、`#fix` 用法、兜底窗口 |
-| **自愈成功** | 绿色 | `ack_instruction(status="success")` | Agent 实际执行的处理方案 |
-| **下一步计划已登记** | 蓝色 | 群里 `@机器人 <计划>` | 计划编号、完整正文、绑定对象（某个任务或全局）、提交人 |
-| **修复方案已下发** | 青色 | 群里 `@机器人 #fix(<任务>) <方案>` | 方案下发到了哪个任务、方案正文、提交人、指令编号 |
-| **修复方案未下发** | 红色 | 下发失败的 `#fix` 消息 | 未下发的原因（任务不存在、没有等待中的告警、写法有误） |
-| **待办计划已清除** | 黄色 | `@机器人 清除` | 清除范围、清掉几条、操作人 |
+| **决策闭环** | 青色 | 点击按钮或 30s 超时 | 就地替换原告警卡片；展示操作人、所选动作、解决时间；移除按钮 |
+| **等待用户** | 橙色 | 点击 `[⏳ 等待用户]` | 就地替换原告警卡片；自动决策暂停且**没有兜底**；工程师回到与 Agent 的直接对话提供方案，Agent 下次轮询收到等待状态后交还控制权 |
+| **恢复汇总** | 绿色 | `self_resolve`/`custom` 成功 ACK | 唯一的修复后报告：Agent 实际做了什么，以及（提供时）真实的 step/epoch/metrics |
+| **终态通知** | 绿色 / 红色 | `report(completed)` / `report(failed)`，或已核实的 `cancel` ACK | 终态任务只发一次通知；`cancel` ACK 渲染为失败/取消，绝不渲染成恢复 |
 
 点击按钮时服务端返回 `type: "raw"`，飞书会在数秒内就地替换原卡片，避免并发重复点击；任务一旦
 离开 `WAITING`，后续决策一律拒绝——但拒绝也是 **HTTP 200 + 错误 toast**，绝不返回 4xx：飞书会把
-卡片回调的任何非 200 应答变成客户端那句没有信息量的 `200671`。ack 必须携带匹配的 `instruction_id`。
-
-### 在群里排下一步任务
-
-群里 @机器人 就是全部触发条件，**没有关键字、没有前缀**，消息正文即一条「下一步计划」：
-
-| 群消息 | 效果 |
-|:---|:---|
-| `@机器人 用 5e-5 重跑 10 个 epoch` | 全局计划 —— 每个任务的 `report` 都看得到 |
-| `@机器人 用 5e-5 重跑 #demo-llm-pretrain` | 绑定到 `demo-llm-pretrain`；`#…` 标签会从正文里剥掉 |
-| `@机器人 用 5e-5 重跑 #feat(demo-llm-pretrain)` | 与裸 `#…` 等价，`#feat(...)` 是显式写法 |
-| `@机器人 #fix(demo-llm-pretrain) 回滚到 step4` | 下发**修复方案**而不是排计划 —— 见下节 |
-| `@机器人 清除`（`取消` / `clear` 同样有效） | 清空所有未确认计划 |
-| `@机器人 清除 #demo-llm-pretrain` | 只清空该任务名下的未确认计划 |
-
-每次 `report` 都会在 `next_task_plans` 里带回适用于该任务的计划（绑定本任务的 + 全局的），
-服务端的 MCP instructions 会指示 Agent 在安全点执行、然后用 `ack_plan` 确认。未确认的计划会
-**每次 report 都重新出现**——这正是它能扛住 Agent 崩溃/重启的原因，不是重复指令。计划**永远不创建
-task 行**，也不要求被绑定的任务已经存在，所以可以先把活排上、再等开跑。
-
-机器人会在原群回一张确认卡片，回显 `plan_id` 与绑定对象；这是唯一的反馈通道，也是你发现
-「正文里的 `#123` 本来只是引用 issue，却把计划悄悄绑到了一个永远不会汇报的任务上」的方式。
-飞书对 ~3s 内没确认的事件会重投；`message_id` 是唯一键，所以重投既不会登记出第二条计划，也不会
-重发卡片。待确认的计划不会被清理服务回收（只有已确认的才会），清除除了「能在群里 @机器人」之外
-没有任何权限校验。
-
-### 在群里回应告警
-
-计划是给**下一轮**用的，救不了眼前卡住的告警。要自己写处理方案交给 Agent，先点告警卡片上的
-**⏳ 等待安排**，再在群里发 `@机器人 #fix(<任务名>) <你的处理方案>`：
-
-- 点击只暂停 30s 自动决策：不下发任何指令，任务仍是 `WAITING`，Agent 的长轮询继续挂着。告警卡片
-  会被就地换成橙色卡片，重复原告警信息，并写明该发什么 `#fix` 命令。
-- `#fix` 正文即成为该任务的决策（`action: "custom"`，方案在指令 payload 里），并唤醒 Agent 的
-  长轮询——与点按钮完全同一条路径。告警卡片随即被换成「决策闭环」，群里另回一张回执确认下发到了
-  哪个任务。
-- `#fix` 只对**已存在且正在等待告警**的任务生效。其余情况（任务名不存在、任务在跑、已经在恢复、
-  写法有误）一律拒绝：回一张红色回执，且不产生任何决策；`#fix` **永远不会创建 task 行**。
-- 不必先点按钮：在最初的 30s 窗口内直接发 `#fix` 同样有效。
-- 兜底：点击后 `TRAINPILOT_ARRANGEMENT_TIMEOUT_SECONDS`（默认 30 分钟）内仍没有 `#fix`，就照旧
-  自动 `self_resolve`，任务不会永久卡死。
-- 飞书对 ~3s 内未确认的事件会重投；重投的 `#fix` 既不会下发第二条指令，也不会重发第二张回执。
-
-`#fix` 与下一步计划共用同一个开关（`TRAINPILOT_ENABLE_NEXT_TASK_PLANS`），关掉计划也就同时关掉了
-`#fix`。标签大小写不敏感；若一条消息同时带 `#fix` 与 `#feat`/裸标签，按 `#fix` 处理，另一个标签
-照常从正文里剥掉。
+卡片回调的任何非 200 应答变成客户端那句没有信息量的 `200671`。ACK 携带匹配的 `instruction_id`；
+直接对话是例外：等待用户后 Agent 省略 `instruction_id`、以 `self_resolve` ACK，这一次 ACK 就是
+唯一恢复报告，不再额外发送 `report`。
 
 **应用开通：** 在[飞书开放平台](https://open.feishu.cn/)创建企业自建应用 → 从「凭证与基础信息」
-复制 `App ID` / `App Secret` / `Verification Token` → 把事件订阅 URL 与卡片回调 URL 都设为
-`http://<公网服务器IP>:28780/webhook/feishu` → 申请 `im:message` 权限，另外为「接收群里 @机器人
-的消息」申请 `im:message.group_at_msg` → 把机器人拉进群并复制 `chat_id`（或使用个人 `open_id`）。
-「加密策略」的 Encrypt Key 请留空：webhook 不解密事件。若不希望群里所有人都能排/清计划，请自行
-限制谁能 @机器人。
+复制 `App ID` / `App Secret` / `Verification Token` → 把卡片回调 URL 设为
+`http://<公网服务器IP>:28780/webhook/feishu` → 申请 `im:message` 权限用于发送卡片 → 把机器人拉进群
+并复制 `chat_id`（或使用个人 `open_id`）。「加密策略」的 Encrypt Key 请留空：webhook 不解密事件。
+群消息事件会被直接忽略，因此不需要群消息权限，也不需要消息接收/解析能力。
 
 未配置凭据时服务端进入 Mock 模式，卡片直接打印到控制台。
 
@@ -317,9 +271,7 @@ docker run -d -p 28780:28780 -v $(pwd)/trainpilot.db:/app/trainpilot.db \
 | `TRAINPILOT_BIND_HOST` | `0.0.0.0` | 绑定网卡（**服务端请用它，而不是 `TRAINPILOT_HOST`**） |
 | `TRAINPILOT_API_TOKEN` | – | MCP/REST 的 Bearer Token；留空为开放模式 |
 | `TRAINPILOT_FEISHU_APP_ID` / `_APP_SECRET` / `_RECEIVER_ID` | – | 卡片推送；未配置则进入 Mock 模式 |
-| `TRAINPILOT_ALERT_DECISION_TIMEOUT_SECONDS` | `30` | 超过该时长无人决策则自动 `self_resolve` |
-| `TRAINPILOT_ARRANGEMENT_TIMEOUT_SECONDS` | `1800` | 点「等待安排」后的兜底窗口；`0` 表示关闭该兜底 |
-| `TRAINPILOT_ENABLE_NEXT_TASK_PLANS` | `true` | 飞书群消息（`@机器人` 计划与 `#fix` 方案）；`false` 则忽略所有消息事件 |
+| `TRAINPILOT_ALERT_DECISION_TIMEOUT_SECONDS` | `30` | 超过该时长无人决策则自动 `self_resolve`；**等待用户没有超时兜底** |
 | `TRAINPILOT_LONG_POLL_TIMEOUT_SECONDS` | `20.0` | 服务端长轮询上限 |
 | `TRAINPILOT_SQLITE_PATH` | `trainpilot.db` | SQLite WAL 文件（`TRAINPILOT_ENABLE_SQLITE=false` 则仅内存） |
 | `TRAINPILOT_TASK_ID` | `train-task-default` | 工具调用省略 `task_id` 时的回退值 |

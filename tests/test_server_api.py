@@ -17,7 +17,6 @@ from trainpilot.server.feishu.client import default_feishu_client
 from trainpilot.server.main import app
 from trainpilot.server.mailbox import default_mailbox
 from trainpilot.server.mcp_server import ack_instruction
-from trainpilot.server.plans import default_plans
 
 
 @pytest.fixture
@@ -66,11 +65,6 @@ def _record(task_id, event_type=EventType.ALERT, message="Loss NaN at step 100",
     )
 
 
-def _seed_task(task_id):
-    """Create a task row the supported way -- a report. Plans only bind to live tasks."""
-    return _record(task_id, event_type=EventType.MILESTONE, message="epoch 1 done")
-
-
 def test_health_endpoint(client: TestClient):
     resp = client.get("/health")
     assert resp.status_code == 200
@@ -104,18 +98,26 @@ async def test_decision_and_recovery_card_flow(client: TestClient):
     assert poll.instruction_id is not None
     assert client.get(f"/api/tasks/{task_id}/status").json()["state"] == "RECOVERING"
 
-    # 5. Agent acks over MCP -> back to RUNNING; step/epoch are backfilled from the TaskRecord
+    # 5. Agent acks over MCP -> back to RUNNING. The ACK carries the real
+    # post-recovery step/epoch/metrics, and those persist on the task snapshot.
     ack = ack_instruction(
         task_id=task_id,
         instruction_id=poll.instruction_id,
         action="self_resolve",
         status="success",
         solution="已跳过异常 Batch 并恢复正常训练。",
+        step=80,
+        epoch=2,
+        metrics={"loss": 0.21},
     )
     assert ack["success"] is True
     assert ack["state"] == "RUNNING"
+    status = client.get(f"/api/tasks/{task_id}/status").json()
+    assert status["latest_step"] == 80
+    assert status["latest_epoch"] == 2
+    assert status["latest_metrics"] == {"loss": 0.21}
 
-    # 6. The recovery card carries the step from the last report, not from the ack
+    # 6. Exactly one recovery card, built from the ACK's step/epoch/metrics.
     assert feishu_dispatcher.wait_idle(timeout=2.0)
     rec_cards = [
         c for c in default_feishu_client.sent_cards_history
@@ -124,8 +126,54 @@ async def test_decision_and_recovery_card_flow(client: TestClient):
     assert len(rec_cards) == 1
     card_dict = rec_cards[0]["card"]
     assert "【异常已自行解决】" in card_dict["header"]["title"]["content"]
-    assert "Step `60`" in str(card_dict)
-    assert "已跳过异常 Batch" in str(card_dict)
+    rendered = str(card_dict)
+    assert "Step `80`" in rendered
+    assert "Epoch `2`" in rendered
+    assert "0.21" in rendered
+    assert "已跳过异常 Batch" in rendered
+    assert not [
+        c for c in default_feishu_client.sent_cards_history
+        if c.get("type") == "failed" and c.get("task_id") == task_id
+    ]
+
+
+def test_cancel_ack_is_terminal_failed_and_notifies_once(client: TestClient):
+    """A successful cancel ACK is FAILED and sends one outcome, never a recovery card."""
+    task_id = "test-api-cancel"
+    _record(task_id, message="Loss NaN", step=6)
+    instruction = default_mailbox.submit_decision(
+        task_id=task_id, action="cancel", operator="ou_engineer"
+    )
+
+    ack = ack_instruction(
+        task_id=task_id,
+        instruction_id=instruction.instruction_id,
+        action="stop_training",  # legacy wire alias for cancel
+        status="success",
+        solution="已取消本次运行并验证机器关机。",
+    )
+    assert ack["success"] is True
+    assert ack["state"] == "FAILED"
+    status = client.get(f"/api/tasks/{task_id}/status").json()
+    assert status["state"] == "FAILED"
+    assert status["pending_instruction"] is None
+
+    assert feishu_dispatcher.wait_idle(timeout=2.0)
+    history = default_feishu_client.sent_cards_history
+    outcomes = [
+        c for c in history
+        if c.get("type") == "failed" and c.get("task_id") == task_id
+    ]
+    assert len(outcomes) == 1
+    card_dict = outcomes[0]["card"]
+    assert "【训练任务已失败/取消】" in card_dict["header"]["title"]["content"]
+    rendered = str(card_dict)
+    assert "已取消本次运行并验证机器关机" in rendered
+    assert "已恢复正常运行" not in rendered
+    assert not [
+        c for c in history
+        if c.get("type") == "recovery" and c.get("task_id") == task_id
+    ]
 
 
 def test_decision_rejected_for_unknown_task(client: TestClient):
@@ -217,112 +265,26 @@ def test_feishu_webhook_flow(client: TestClient):
     assert inst["decision_by"] == "ou_feishu_engineer"
 
 
-def _plan_cards(card_type):
-    return [c for c in default_feishu_client.sent_cards_history if c["type"] == card_type]
+@pytest.mark.parametrize("text,mentions", [
+    ("@_user_1 用 5e-5 重跑 10 个 epoch #demo-llm-pretrain", True),
+    ("@_user_1 #fix(demo-llm-pretrain) 回滚到 step4", True),
+    ("@_user_1 #feat(demo-llm-pretrain) 重跑评测", True),
+    ("大家中午吃什么", False),
+])
+def test_feishu_message_events_are_ignored(client: TestClient, text, mentions):
+    """There is no plan/#fix/#feat ingestion: chat text never queues a decision."""
+    task_id = "demo-llm-pretrain"
+    _record(task_id, event_type=EventType.MILESTONE, message="epoch 1 done")
+    before = [task.task_id for task in default_mailbox.list_tasks()]
 
-
-def test_feishu_group_at_message_registers_a_plan(client: TestClient):
-    """@-mentioning the bot is the whole trigger; the tag binds it to one live task."""
-    _seed_task("demo-llm-pretrain")
-    resp = client.post("/webhook/feishu", json=_message_event(
-        "@_user_1 用 5e-5 重跑 10 个 epoch #demo-llm-pretrain"
-    ))
+    resp = client.post("/webhook/feishu", json=_message_event(text, mentions=mentions))
     assert resp.status_code == 200
-    assert resp.json() == {"code": 0, "msg": "Plan registered"}
-
-    plans = default_plans.list_pending("demo-llm-pretrain")
-    assert len(plans) == 1
-    assert plans[0].text == "用 5e-5 重跑 10 个 epoch"
-    assert plans[0].task_id == "demo-llm-pretrain"
-    assert plans[0].created_by == "ou_engineer"
-
+    assert resp.json() == {"code": 0, "msg": "Ignored non-card-action event"}
+    # Nothing was stored or created, and no mailbox instruction was dispatched.
+    assert [task.task_id for task in default_mailbox.list_tasks()] == before
+    assert client.get(f"/api/tasks/{task_id}/status").json()["pending_instruction"] is None
     assert feishu_dispatcher.wait_idle(2.0)
-    cards = _plan_cards("plan_registered")
-    assert len(cards) == 1
-    assert cards[0]["chat_id"] == "oc_test_group"
-    card_text = cards[0]["card"]["elements"][0]["text"]["content"]
-    assert plans[0].plan_id in card_text
-    assert "用 5e-5 重跑 10 个 epoch" in card_text
-    assert "`demo-llm-pretrain`" in card_text
-
-
-def test_feishu_plan_for_an_unknown_task_is_refused(client: TestClient):
-    """A plan nobody's report ever carries would be invisible for good, so it is refused."""
-    _seed_task("demo-llm-pretrain")
-    resp = client.post("/webhook/feishu", json=_message_event(
-        "@_user_1 用 5e-5 重跑 #demo-llm-pretrain-typo"
-    ))
-    assert resp.status_code == 200
-    assert resp.json() == {"code": 0, "msg": "Plan not registered"}
-
-    # Nothing was stored, and no task row was fabricated for the typo either.
-    assert default_plans.list_pending("demo-llm-pretrain-typo") == []
-    assert default_plans.list_pending("demo-llm-pretrain") == []
-    assert default_mailbox.get_task("demo-llm-pretrain-typo") is None
-
-    assert feishu_dispatcher.wait_idle(2.0)
-    assert _plan_cards("plan_registered") == []
-    rejects = _plan_cards("plan_rejected")
-    assert len(rejects) == 1
-    card_text = rejects[0]["card"]["elements"][0]["text"]["content"]
-    assert "不存在" in card_text
-    assert "`demo-llm-pretrain-typo`" in card_text
-    # The tasks that do exist are listed, so the corrected name is one copy-paste away.
-    assert "`demo-llm-pretrain`" in card_text
-
-
-def test_feishu_plan_without_a_task_name_is_refused(client: TestClient):
-    """There are no global plans: every plan names the task whose reports carry it."""
-    _seed_task("demo-llm-pretrain")
-    resp = client.post("/webhook/feishu", json=_message_event("@_user_1 跑评测"))
-    assert resp.json() == {"code": 0, "msg": "Plan not registered"}
-    assert default_plans.list_pending("demo-llm-pretrain") == []
-
-    assert feishu_dispatcher.wait_idle(2.0)
-    rejects = _plan_cards("plan_rejected")
-    assert len(rejects) == 1
-    assert "缺少任务名" in rejects[0]["card"]["elements"][0]["text"]["content"]
-
-
-def test_feishu_group_message_without_mention_is_ignored(client: TestClient):
-    """Group chatter that does not @ the bot must never become a task."""
-    _seed_task("demo-llm-pretrain")
-    resp = client.post("/webhook/feishu", json=_message_event("大家中午吃什么", mentions=False))
-    assert resp.status_code == 200
-    assert default_plans.list_pending("demo-llm-pretrain") == []
-
-
-def test_feishu_retried_message_event_registers_only_one_plan(client: TestClient):
-    """Feishu redelivers events it cannot confirm; the second delivery must be a no-op."""
-    _seed_task("demo-llm-pretrain")
-    payload = _message_event("@_user_1 跑评测 #demo-llm-pretrain")
-    first = client.post("/webhook/feishu", json=payload)
-    second = client.post("/webhook/feishu", json=payload)
-
-    assert first.json()["msg"] == "Plan registered"
-    assert second.json()["msg"] == "Duplicate plan message ignored"
-    assert len(default_plans.list_pending("demo-llm-pretrain")) == 1
-
-    assert feishu_dispatcher.wait_idle(2.0)
-    assert len(_plan_cards("plan_registered")) == 1
-
-
-def test_feishu_clear_command_drops_pending_plans(client: TestClient):
-    _seed_task("demo-llm-pretrain")
-    client.post("/webhook/feishu", json=_message_event("@_user_1 跑评测 #demo-llm-pretrain"))
-    client.post("/webhook/feishu", json=_message_event(
-        "@_user_1 再跑一次 #demo-llm-pretrain", message_id="om_plan_2"
-    ))
-    assert len(default_plans.list_pending("demo-llm-pretrain")) == 2
-
-    resp = client.post("/webhook/feishu", json=_message_event("@_user_1 清除", message_id="om_plan_3"))
-    assert resp.json() == {"code": 0, "msg": "Cleared pending next-task plans"}
-    assert default_plans.list_pending("demo-llm-pretrain") == []
-
-    assert feishu_dispatcher.wait_idle(2.0)
-    cards = _plan_cards("plan_cleared")
-    assert len(cards) == 1
-    assert "`2`" in cards[0]["card"]["elements"][0]["text"]["content"]
+    assert default_feishu_client.sent_cards_history == []
 
 
 def test_feishu_message_event_rejects_a_bad_token(client: TestClient, monkeypatch):
@@ -332,7 +294,7 @@ def test_feishu_message_event_rejects_a_bad_token(client: TestClient, monkeypatc
 
     resp = client.post("/webhook/feishu", json=payload)
     assert resp.status_code == 403
-    assert default_plans.list_pending("demo-llm-pretrain") == []
+    assert default_mailbox.list_tasks() == []
 
 
 def _card_values_webhook(client, task_id, action):
@@ -342,47 +304,57 @@ def _card_values_webhook(client, task_id, action):
     })
 
 
-def _defer_timers(monkeypatch):
-    """Capture the arrangement fallback timer instead of arming a real 30-minute one."""
+def _capture_auto_resolve(monkeypatch):
+    """Record any ordinary alert timer the webhook might arm; the wait path arms none."""
     from trainpilot.server import mcp_server
 
     armed = []
     monkeypatch.setattr(
-        mcp_server, "schedule_auto_resolve", lambda task_id, stage="alert": armed.append((task_id, stage))
+        mcp_server, "schedule_auto_resolve", lambda task_id: armed.append(task_id)
     )
     return armed
 
 
-def test_feishu_wait_for_arrangement_pauses_the_countdown(client: TestClient, monkeypatch):
-    armed = _defer_timers(monkeypatch)
-    task_id = "feishu-defer-task"
+def test_feishu_wait_for_user_hands_off_to_direct_conversation(client: TestClient, monkeypatch):
+    armed = _capture_auto_resolve(monkeypatch)
+    task_id = "feishu-direct-wait"
     _record(task_id, message="Loss NaN at step 6", step=6)
 
     resp = _card_values_webhook(client, task_id, "wait_for_arrangement")
     assert resp.status_code == 200
     body = resp.json()
     assert body["card"]["type"] == "raw"
-    deferred = body["card"]["data"]
-    assert deferred["header"]["template"] == "orange"
-    assert "【等待人工安排】" in deferred["header"]["title"]["content"]
-    assert f"#fix({task_id})" in str(deferred)
+    card = body["card"]["data"]
+    assert card["header"]["template"] == "orange"
+    assert "【等待与 Agent 直接沟通】" in card["header"]["title"]["content"]
+    rendered = str(card)
+    assert "没有自动兜底" in rendered
+    assert "直接对话" in rendered
+    assert "ACK" in rendered
+    assert "#fix" not in rendered
 
-    # Still waiting, nothing dispatched, and the long window is now the only timer
+    # Still WAITING, nothing dispatched, and no fallback timer was armed.
     status = client.get(f"/api/tasks/{task_id}/status").json()
     assert status["state"] == "WAITING"
-    assert status["awaiting_arrangement"] is True
+    assert status["awaiting_direct_conversation"] is True
+    assert status["direct_conversation_requested_by"] == "ou_engineer"
     assert status["pending_instruction"] is None
-    assert armed == [(task_id, "arrangement")]
+    assert armed == []
+    # The ordinary auto-resolve refuses while the conversation owns the decision.
+    assert default_mailbox.try_auto_resolve(task_id, timeout_seconds=0) is None
 
     assert feishu_dispatcher.wait_idle(2.0)
-    updates = [c for c in default_feishu_client.sent_cards_history if c["type"] == "arrangement_update"]
+    updates = [
+        c for c in default_feishu_client.sent_cards_history
+        if c["type"] == "awaiting_user_update"
+    ]
     assert len(updates) == 1
     assert updates[0]["data"]["action"] == "wait_for_arrangement"
 
 
-def test_feishu_wait_for_arrangement_is_rejected_outside_an_alert(client: TestClient, monkeypatch):
-    armed = _defer_timers(monkeypatch)
-    task_id = "feishu-defer-no-alert"
+def test_feishu_wait_for_user_is_rejected_outside_an_alert(client: TestClient, monkeypatch):
+    armed = _capture_auto_resolve(monkeypatch)
+    task_id = "feishu-direct-wait-no-alert"
     _record(task_id, event_type=EventType.MILESTONE, message="epoch 1 done")
 
     resp = _card_values_webhook(client, task_id, "wait_for_arrangement")
@@ -392,7 +364,8 @@ def test_feishu_wait_for_arrangement_is_rejected_outside_an_alert(client: TestCl
     assert resp.json()["toast"]["type"] == "error"
     assert task_id in resp.json()["toast"]["content"]
     assert "card" not in resp.json()
-    assert client.get(f"/api/tasks/{task_id}/status").json()["awaiting_arrangement"] is False
+    status = client.get(f"/api/tasks/{task_id}/status").json()
+    assert status["awaiting_direct_conversation"] is False
     assert armed == []
 
 
@@ -400,7 +373,7 @@ def test_feishu_card_action_for_a_finished_task_is_a_toast_not_an_http_error(cli
     task_id = "feishu-click-after-completion"
     _record(task_id, event_type=EventType.COMPLETED, message="training finished")
 
-    resp = _card_values_webhook(client, task_id, "stop_training")
+    resp = _card_values_webhook(client, task_id, "cancel")
 
     assert resp.status_code == 200
     assert resp.json()["toast"]["type"] == "error"
@@ -408,7 +381,7 @@ def test_feishu_card_action_for_a_finished_task_is_a_toast_not_an_http_error(cli
     assert client.get(f"/api/tasks/{task_id}/status").json()["state"] == "COMPLETED"
 
 
-@pytest.mark.parametrize("action", ["stop_training", "wait_for_arrangement"])
+@pytest.mark.parametrize("action", ["cancel", "stop_training", "wait_for_arrangement"])
 def test_feishu_card_action_for_an_unknown_task_never_creates_one(client: TestClient, action):
     resp = _card_values_webhook(client, "feishu-ghost", action)
 
@@ -465,140 +438,3 @@ def test_feishu_card_callback_url_with_a_trailing_slash_is_served(client: TestCl
 
     assert resp.status_code == 200
     assert resp.json()["toast"]["type"] == "success"
-
-
-def test_feishu_fix_message_dispatches_a_custom_decision(client: TestClient):
-    task_id = "feishu-fix-task"
-    _record(task_id, message="Loss NaN at step 6", step=6, epoch=1)
-    _card_values_webhook(client, task_id, "wait_for_arrangement")
-
-    resp = client.post("/webhook/feishu", json=_message_event(
-        f"@_user_1 #fix({task_id}) 回滚到 step4 检查点并把 lr 减半"
-    ))
-    assert resp.json() == {"code": 0, "msg": "Fix dispatched"}
-
-    inst = client.get(f"/api/tasks/{task_id}/status").json()["pending_instruction"]
-    assert inst["has_instruction"] is True
-    assert inst["action"] == "custom"
-    assert inst["payload"]["solution"] == "回滚到 step4 检查点并把 lr 减半"
-    assert inst["decision_by"] == "ou_engineer"
-    # Dispatching a decision closes the arrangement window
-    assert client.get(f"/api/tasks/{task_id}/status").json()["awaiting_arrangement"] is False
-
-    assert feishu_dispatcher.wait_idle(2.0)
-    receipts = _plan_cards("fix_dispatched")
-    assert len(receipts) == 1
-    assert receipts[0]["chat_id"] == "oc_test_group"
-    receipt_text = str(receipts[0]["card"])
-    assert f"`{task_id}`" in receipt_text
-    assert "回滚到 step4 检查点并把 lr 减半" in receipt_text
-
-    # The alert / waiting card is replaced in place
-    updates = [c for c in default_feishu_client.sent_cards_history if c["type"] == "resolved_update"]
-    assert len(updates) == 1
-    assert updates[0]["data"]["action"] == "custom"
-    assert "【决策已闭环】" in updates[0]["data"]["card"]["header"]["title"]["content"]
-
-
-def test_feishu_fix_works_inside_the_thirty_second_window(client: TestClient):
-    """A human who types fast need not click 等待安排 first."""
-    task_id = "feishu-fix-fast"
-    _record(task_id, message="Loss exploded", step=7)
-
-    resp = client.post("/webhook/feishu", json=_message_event(
-        f"@_user_1 #fix({task_id}) 降低 lr 后继续"
-    ))
-    assert resp.json()["msg"] == "Fix dispatched"
-    assert client.get(f"/api/tasks/{task_id}/status").json()["state"] == "RESOLVED"
-
-
-def test_feishu_fix_for_an_unknown_task_creates_no_row(client: TestClient):
-    """`#fix` may never fabricate a task: an unknown id is refused with a receipt."""
-    before = default_mailbox.list_tasks()
-
-    resp = client.post("/webhook/feishu", json=_message_event(
-        "@_user_1 #fix(never-reported) 重启训练"
-    ))
-    assert resp.json() == {"code": 0, "msg": "Fix not dispatched"}
-    assert default_mailbox.get_task("never-reported") is None
-    assert default_mailbox.list_tasks() == before
-
-    assert feishu_dispatcher.wait_idle(2.0)
-    rejects = _plan_cards("fix_rejected")
-    assert len(rejects) == 1
-    assert "不会为它创建任务行" in str(rejects[0]["card"])
-
-
-def test_feishu_fix_is_rejected_when_the_task_is_not_waiting(client: TestClient):
-    task_id = "feishu-fix-not-waiting"
-    _record(task_id, event_type=EventType.MILESTONE, message="epoch 1 done")
-
-    resp = client.post("/webhook/feishu", json=_message_event(
-        f"@_user_1 #fix({task_id}) 重启"
-    ))
-    assert resp.json() == {"code": 0, "msg": "Fix not dispatched"}
-
-    assert feishu_dispatcher.wait_idle(2.0)
-    rejects = _plan_cards("fix_rejected")
-    assert len(rejects) == 1
-    assert "RUNNING" in str(rejects[0]["card"])
-
-
-def test_feishu_fix_redelivery_dispatches_once_and_sends_one_receipt(client: TestClient):
-    """Feishu retries unconfirmed events; the second delivery must be a silent no-op."""
-    task_id = "feishu-fix-retry"
-    _record(task_id, message="Loss NaN", step=6)
-    payload = _message_event(f"@_user_1 #fix({task_id}) 回滚到 step4")
-
-    first = client.post("/webhook/feishu", json=payload)
-    second = client.post("/webhook/feishu", json=payload)
-    assert first.json()["msg"] == "Fix dispatched"
-    assert second.json()["msg"] == "Duplicate fix message ignored"
-
-    assert feishu_dispatcher.wait_idle(2.0)
-    assert len(_plan_cards("fix_dispatched")) == 1
-    assert _plan_cards("fix_rejected") == []
-    # The instruction is the first one, not a second decision
-    assert client.get(f"/api/tasks/{task_id}/status").json()["pending_instruction"]["action"] == "custom"
-
-
-def test_feishu_fix_without_a_task_name_is_refused_with_a_hint(client: TestClient):
-    resp = client.post("/webhook/feishu", json=_message_event("@_user_1 #fix 回滚到 step4"))
-    assert resp.json()["msg"] == "Fix not dispatched"
-    assert default_plans.list_pending("fix") == []
-
-    assert feishu_dispatcher.wait_idle(2.0)
-    rejects = _plan_cards("fix_rejected")
-    assert len(rejects) == 1
-    assert "缺少任务名" in str(rejects[0]["card"])
-
-
-def test_feishu_feat_message_registers_a_plan_bound_to_the_task(client: TestClient):
-    _seed_task("demo-llm-pretrain")
-    resp = client.post("/webhook/feishu", json=_message_event(
-        "@_user_1 #feat(demo-llm-pretrain) 用 5e-5 重跑 10 个 epoch"
-    ))
-    assert resp.json() == {"code": 0, "msg": "Plan registered"}
-
-    plans = default_plans.list_pending("demo-llm-pretrain")
-    assert len(plans) == 1
-    assert plans[0].task_id == "demo-llm-pretrain"
-    assert plans[0].text == "用 5e-5 重跑 10 个 epoch"
-
-
-def test_feishu_fix_is_disabled_with_next_task_plans(client: TestClient, monkeypatch):
-    """One kill switch governs all @-bot messages, fixes included."""
-    monkeypatch.setattr(settings, "enable_next_task_plans", False)
-    task_id = "feishu-fix-disabled"
-    _record(task_id, message="Loss NaN", step=6)
-
-    resp = client.post("/webhook/feishu", json=_message_event(f"@_user_1 #fix({task_id}) 重启"))
-    assert resp.json() == {"code": 0, "msg": "Next-task plans are disabled"}
-    assert client.get(f"/api/tasks/{task_id}/status").json()["pending_instruction"] is None
-
-
-def test_feishu_plans_can_be_disabled(client: TestClient, monkeypatch):
-    monkeypatch.setattr(settings, "enable_next_task_plans", False)
-    resp = client.post("/webhook/feishu", json=_message_event("@_user_1 跑评测"))
-    assert resp.json() == {"code": 0, "msg": "Next-task plans are disabled"}
-    assert default_plans.list_pending("demo-llm-pretrain") == []

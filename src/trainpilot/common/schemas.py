@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from pydantic import AliasChoices, BaseModel, Field
 
-from trainpilot.common.states import EventType, PlanStatus, TaskState
+from trainpilot.common.states import EventType, TaskState
 
 
 def utc_now_iso() -> str:
@@ -44,6 +44,14 @@ class InstructionResponse(BaseModel):
     payload: Optional[Dict[str, Any]] = Field(default=None, description="Optional action parameters")
     decision_by: Optional[str] = Field(None, description="Operator identity who clicked the decision")
     decided_at: Optional[str] = Field(None, description="Timestamp of when decision was made")
+    # True while the engineer has taken the decision into a direct conversation with the
+    # agent. `poll_instruction` returns immediately with this set instead of long-polling,
+    # so the agent can yield control instead of waiting for an instruction that will not
+    # arrive through the mailbox.
+    awaiting_direct_conversation: bool = Field(
+        default=False,
+        description="The engineer chose ⏳ 等待用户; stop polling and resolve directly with them",
+    )
 
 
 class TaskDecisionRequest(BaseModel):
@@ -63,40 +71,6 @@ class FeishuCardActionPayload(BaseModel):
     payload: Optional[Dict[str, Any]] = Field(default=None, description="Additional params")
 
 
-class NextTaskPlan(BaseModel):
-    """A 'next task' queued by a human through the Feishu group.
-
-    Plans are read by the GPU Agent from every `report` response and stay pending --
-    and therefore keep reappearing -- until acknowledged with `ack_plan` or cleared.
-    Every plan is bound to one task and only that task's reports carry it: the binding
-    is validated against the task table at registration and never creates a task row.
-    `task_id` is optional only because rows written before strict binding may still sit
-    in an existing database.
-    """
-
-    plan_id: str = Field(..., description="Unique ID used to acknowledge the plan")
-    text: str = Field(..., description="Plan body as typed in Feishu, task tag stripped")
-    task_id: Optional[str] = Field(None, description="Bound task id; the only task whose reports carry it")
-    status: PlanStatus = Field(default=PlanStatus.PENDING, description="Pending until acknowledged")
-    created_at: str = Field(default_factory=utc_now_iso, description="ISO timestamp of registration")
-    created_by: Optional[str] = Field(None, description="Feishu open_id of the sender")
-    source: str = Field(default="feishu", description="Where the plan was registered from")
-    chat_id: Optional[str] = Field(None, description="Originating Feishu chat, used for the receipt card")
-    source_message_id: Optional[str] = Field(None, description="Feishu message id, the idempotency key")
-    acked_at: Optional[str] = Field(None, description="Timestamp of the acknowledgement")
-    ack_note: Optional[str] = Field(None, description="What the agent reported after carrying it out")
-
-    def brief(self) -> Dict[str, Any]:
-        """The projection the GPU Agent sees inside a `report` response."""
-        return {
-            "plan_id": self.plan_id,
-            "text": self.text,
-            "task_id": self.task_id,
-            "created_by": self.created_by,
-            "created_at": self.created_at,
-        }
-
-
 class TaskSummary(BaseModel):
     """Complete summary of a training task tracked in the mailbox."""
 
@@ -110,7 +84,8 @@ class TaskSummary(BaseModel):
     latest_message: Optional[str] = None
     pending_instruction: Optional[InstructionResponse] = None
     events_count: int = 0
-    # Set while an engineer asked for time to arrange a fix (alert auto-decision paused).
-    arrangement_requested_at: Optional[str] = None
-    arrangement_requested_by: Optional[str] = None
-    awaiting_arrangement: bool = False
+    # Set while the engineer resolved the alert in a direct conversation with the agent
+    # (the alert auto-decision timer is suppressed; no fallback will fire).
+    direct_conversation_requested_at: Optional[str] = None
+    direct_conversation_requested_by: Optional[str] = None
+    awaiting_direct_conversation: bool = False

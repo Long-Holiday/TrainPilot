@@ -62,11 +62,11 @@ async def test_async_long_polling_instant_wake_up():
     await asyncio.sleep(0.1)
 
     # Submit decision
-    default_mailbox.submit_decision(task_id, action="stop_training", operator="safety_agent")
+    default_mailbox.submit_decision(task_id, action="cancel", operator="safety_agent")
 
     inst, elapsed = await poll_task
     assert inst.has_instruction is True
-    assert inst.action == "stop_training"
+    assert inst.action == "cancel"
     assert inst.decision_by == "safety_agent"
     assert elapsed < 1.0
 

@@ -3,7 +3,7 @@
 from trainpilot.common.schemas import (
     InstructionResponse,
 )
-from trainpilot.common.states import ActionType, EventType, PlanStatus, TaskState
+from trainpilot.common.states import ActionType, EventType, TaskState
 
 
 def test_state_and_action_values_are_the_wire_contract():
@@ -23,15 +23,9 @@ def test_state_and_action_values_are_the_wire_contract():
         "FAILED": "failed",
     }
     assert {a.name: a.value for a in ActionType} == {
-        "STOP_TRAINING": "stop_training",
+        "CANCEL": "cancel",
         "SELF_RESOLVE": "self_resolve",
         "CUSTOM": "custom",
-    }
-    assert {p.name: p.value for p in PlanStatus} == {
-        "PENDING": "pending",
-        "DONE": "done",
-        "FAILED": "failed",
-        "SKIPPED": "skipped",
     }
 
 
@@ -47,6 +41,7 @@ def test_instruction_response_serialization():
     assert resp.has_instruction is True
     assert resp.action == "self_resolve"
     assert resp.payload["timeout_seconds"] == 30
+    assert resp.awaiting_direct_conversation is False
 
 
 def test_instruction_response_reads_legacy_ready_json():

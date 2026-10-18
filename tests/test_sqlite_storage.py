@@ -82,8 +82,12 @@ def test_sqlite_storage_crud_and_reload(temp_db):
     reloaded_storage.close()
 
 
-def test_arrangement_columns_migrate_an_old_database(temp_db):
-    """A production DB created before this feature must gain the columns in place."""
+def test_legacy_columns_migrate_and_direct_conversation_round_trips(temp_db):
+    """A production DB created before wait-for-user must gain the columns in place.
+
+    The historical arrangement_* columns are kept (no destructive migration); only
+    their meaning changed, so an old row must still load and new writes must round-trip.
+    """
     import sqlite3
 
     # A `tasks` table shaped like the previous release (no arrangement columns).
@@ -126,12 +130,13 @@ def test_arrangement_columns_migrate_an_old_database(temp_db):
             state=TaskState.WAITING,
             created_at="2026-01-01T00:00:00+00:00",
             updated_at="2026-01-01T00:01:00+00:00",
-            arrangement_requested_at="2026-01-01T00:01:00+00:00",
-            arrangement_requested_by="ou_engineer",
+            direct_conversation_requested_at="2026-01-01T00:01:00+00:00",
+            direct_conversation_requested_by="ou_engineer",
         )
     )
     reloaded = SQLiteStorage(temp_db).get_task("legacy-task")
-    assert reloaded.arrangement_requested_by == "ou_engineer"
+    assert reloaded.direct_conversation_requested_by == "ou_engineer"
+    assert reloaded.direct_conversation_requested_at == "2026-01-01T00:01:00+00:00"
 
     # Clearing must persist as NULL, not be silently kept (the COALESCE trap).
     storage.save_task(
@@ -142,7 +147,7 @@ def test_arrangement_columns_migrate_an_old_database(temp_db):
             updated_at="2026-01-01T00:02:00+00:00",
         )
     )
-    assert storage.get_task("legacy-task").arrangement_requested_at is None
+    assert storage.get_task("legacy-task").direct_conversation_requested_at is None
     storage.close()
 
 
@@ -203,7 +208,15 @@ async def test_mailbox_integrated_with_sqlite_storage(temp_db):
     assert summary.state == TaskState.RUNNING
     assert summary.events_count == 1
 
-    # 2. Submit decision & poll
+    # 2. Only an open alert accepts a decision: open one, then submit & poll.
+    mailbox.record_event(
+        EventNotifyRequest(
+            task_id="task-mb-sql",
+            event_type=EventType.ALERT,
+            message="Loss NaN",
+        )
+    )
+    assert mailbox.get_task("task-mb-sql").state == TaskState.WAITING
     mailbox.submit_decision("task-mb-sql", action="self_resolve", operator="tester")
     instruction = await mailbox.get_instruction_async("task-mb-sql", pop=True)
     assert instruction.has_instruction is True
@@ -216,7 +229,7 @@ async def test_mailbox_integrated_with_sqlite_storage(temp_db):
     assert summary2 is not None
     assert summary2.state == TaskState.RECOVERING
     assert summary2.latest_step == 50
-    assert summary2.events_count == 1
+    assert summary2.events_count == 2
 
 
 def test_storage_checkpoint_and_vacuum(temp_db):

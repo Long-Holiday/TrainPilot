@@ -5,24 +5,15 @@ import logging
 from typing import Any, Dict, Optional
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, status
 
-from trainpilot.common.states import TaskState, WAIT_FOR_ARRANGEMENT
+from trainpilot.common.states import WAIT_FOR_ARRANGEMENT
 from trainpilot.server.background import feishu_dispatcher
 from trainpilot.server.config import settings
 from trainpilot.server.feishu.cards import (
-    build_deferred_card,
-    build_fix_card,
-    build_plan_card,
-    build_plan_cleared_card,
+    build_awaiting_user_card,
     build_resolved_card,
 )
 from trainpilot.server.feishu.client import default_feishu_client
-from trainpilot.server.feishu.inbound import (
-    InboundPlanMessage,
-    is_message_event,
-    parse_plan_message,
-)
 from trainpilot.server.mailbox import TaskNotFoundError, default_mailbox
-from trainpilot.server.plans import MAX_PLAN_TEXT_CHARS, PlanBindingError, default_plans
 
 logger = logging.getLogger("trainpilot.webhook.feishu")
 
@@ -55,179 +46,6 @@ def _card_action_shape(data: Dict[str, Any]) -> Optional[str]:
 def _toast(toast_type: str, content: str) -> Dict[str, Any]:
     """Answer a card callback with HTTP 200 and a toast, leaving the card untouched."""
     return {"toast": {"type": toast_type, "content": content}}
-
-
-def _handle_message_event(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Register (or clear) a next-task plan from an @-bot group message.
-
-    Feishu retries a callback it does not see answered quickly, so this path does one
-    INSERT and one dispatcher submit; the receipt card is sent out of band.
-    """
-    if not settings.enable_next_task_plans:
-        return {"code": 0, "msg": "Next-task plans are disabled"}
-
-    msg = parse_plan_message(data)
-    if msg is None:
-        return {"code": 0, "msg": "Ignored Feishu message event"}
-
-    # `#fix(task) <solution>` comes first: it addresses a task explicitly, so a bare
-    # `清除` in its body is part of the solution, not a clear command.
-    if msg.fix_task_id or msg.fix_error:
-        return _handle_fix_message(msg)
-
-    if msg.is_clear:
-        if msg.task_id:
-            cleared = default_plans.clear_pending_for_task(msg.task_id)
-        else:
-            cleared = default_plans.clear_all_pending()
-        logger.info(
-            "Feishu clear command from %s cleared %d pending plan(s) (scope=%s)",
-            msg.sender_open_id, cleared, msg.task_id or "global",
-        )
-        feishu_dispatcher.submit(
-            default_feishu_client.send_card_to_chat,
-            chat_id=msg.chat_id,
-            card_dict=build_plan_cleared_card(
-                cleared_count=cleared,
-                scope_task_id=msg.task_id,
-                operator=msg.sender_open_id,
-            ),
-            card_type="plan_cleared",
-        )
-        return {"code": 0, "msg": "Cleared pending next-task plans"}
-
-    try:
-        plan, created = default_plans.register(
-            text=msg.text,
-            task_id=msg.task_id,
-            created_by=msg.sender_open_id,
-            chat_id=msg.chat_id,
-            source_message_id=msg.message_id,
-        )
-    except PlanBindingError as exc:
-        # Every plan is bound to an existing task: a plan no report ever carries is
-        # invisible for good, so a wrong task name is refused instead of stored.
-        return _reject_plan(msg, exc.task_id)
-
-    if not created:
-        logger.info("Duplicate Feishu message %s; plan %s already registered",
-                    msg.message_id, plan.plan_id)
-        return {"code": 0, "msg": "Duplicate plan message ignored"}
-
-    feishu_dispatcher.submit(
-        default_feishu_client.send_card_to_chat,
-        chat_id=msg.chat_id,
-        card_dict=build_plan_card(
-            plan_id=plan.plan_id,
-            text=plan.text,
-            task_id=plan.task_id,
-            created_by=plan.created_by,
-            created_at=plan.created_at,
-        ),
-        card_type="plan_registered",
-        plan_id=plan.plan_id,
-    )
-    return {"code": 0, "msg": "Plan registered"}
-
-
-def _reject_plan(msg: InboundPlanMessage, task_id: Optional[str]) -> Dict[str, Any]:
-    """Refuse a plan whose binding is unusable and say why in the group.
-
-    `task_id` is the one the sender named, or None when the message named no task. The
-    receipt lists the tasks that do exist so the sender can correct the name in place.
-    """
-    reason = (
-        f"任务 `{task_id}` 不存在" if task_id else "缺少任务名：请写成 `#任务名 <计划>`"
-    )
-    logger.warning("Refusing next-task plan from %s (task=%s)",
-                   msg.sender_open_id, task_id or "none")
-    feishu_dispatcher.submit(
-        default_feishu_client.send_card_to_chat,
-        chat_id=msg.chat_id,
-        card_dict=build_plan_card(
-            text=msg.text,
-            task_id=task_id,
-            created_by=msg.sender_open_id,
-            reason=reason,
-            known_task_ids=[t.task_id for t in default_mailbox.list_tasks(limit=5)],
-        ),
-        card_type="plan_rejected",
-    )
-    return {"code": 0, "msg": "Plan not registered"}
-
-
-def _handle_fix_message(msg: InboundPlanMessage) -> Dict[str, Any]:
-    """Dispatch a human-written fix to the task that is waiting for one.
-
-    Reuses the plan path's conventions: the receipt card is the only feedback channel,
-    it is sent only when something was actually dispatched, and a redelivered message
-    is a silent no-op. A fix NEVER creates a task row -- an unknown task is refused.
-    """
-    def _reject(reason: str, task_id: str) -> Dict[str, Any]:
-        feishu_dispatcher.submit(
-            default_feishu_client.send_card_to_chat,
-            chat_id=msg.chat_id,
-            card_dict=build_fix_card(
-                task_id=task_id,
-                solution=msg.text,
-                operator=msg.sender_open_id,
-                reason=reason,
-            ),
-            card_type="fix_rejected",
-        )
-        return {"code": 0, "msg": "Fix not dispatched"}
-
-    if msg.fix_error or not msg.fix_task_id:
-        return _reject(msg.fix_error or "缺少任务名：请写成 `#fix(任务名) <方案>`", "-")
-
-    task_id = msg.fix_task_id
-    solution = msg.text
-    if len(solution) > MAX_PLAN_TEXT_CHARS:
-        logger.warning("Truncating fix solution for %s from %d to %d chars",
-                       task_id, len(solution), MAX_PLAN_TEXT_CHARS)
-        solution = solution[:MAX_PLAN_TEXT_CHARS]
-
-    try:
-        instruction, created = default_mailbox.submit_fix_decision(
-            task_id=task_id,
-            solution=solution,
-            operator=msg.sender_open_id,
-            source_message_id=msg.message_id,
-        )
-    except TaskNotFoundError:
-        logger.warning("Refusing fix for unknown task %s (no task row is created)", task_id)
-        return _reject(f"任务 `{task_id}` 不存在（#fix 不会为它创建任务行）", task_id)
-    except ValueError as exc:
-        logger.warning("Refusing fix for %s: %s", task_id, exc)
-        return _reject(str(exc), task_id)
-
-    if not created:
-        logger.info("Duplicate fix message %s for task %s; no card sent", msg.message_id, task_id)
-        return {"code": 0, "msg": "Duplicate fix message ignored"}
-
-    logger.warning("Fix dispatched to task %s by %s via group message",
-                   task_id, msg.sender_open_id)
-    feishu_dispatcher.submit(
-        default_feishu_client.send_card_to_chat,
-        chat_id=msg.chat_id,
-        card_dict=build_fix_card(
-            task_id=task_id,
-            solution=solution,
-            operator=msg.sender_open_id,
-            instruction_id=instruction.instruction_id if instruction else None,
-            dispatched_at=instruction.decided_at if instruction else None,
-        ),
-        card_type="fix_dispatched",
-    )
-    # Replace the alert / waiting card in place, so the group sees one closed decision.
-    feishu_dispatcher.submit(
-        default_feishu_client.update_card_to_resolved,
-        task_id=task_id,
-        action="custom",
-        operator=msg.sender_open_id,
-        resolved_at=instruction.decided_at if instruction else None,
-    )
-    return {"code": 0, "msg": "Fix dispatched"}
 
 
 @router.post("/feishu")
@@ -279,12 +97,10 @@ async def feishu_webhook(request: Request, background_tasks: BackgroundTasks) ->
         logger.warning("Received invalid or missing token on Feishu webhook")
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unauthorized token")
 
-    # 3. Handle group messages (@-mentioning the bot) carrying a next-task plan.
-    # Must run before the card-action extraction below, whose empty value short-circuits.
-    if is_message_event(data):
-        return _handle_message_event(data)
-
-    # 4. Handle interactive card action trigger (card.action.trigger)
+    # 3. Only interactive card actions are consumed. Group message events are
+    # deliberately ignored: there is no plan/#fix/#feat ingestion and the control
+    # plane never pulls a decision out of chat text.
+    # Handle interactive card action trigger (card.action.trigger)
     if shape is None:
         logger.warning("Received webhook event without task_id or action in value: %s", data)
         return {"code": 0, "msg": "Ignored non-card-action event"}
@@ -314,39 +130,33 @@ async def feishu_webhook(request: Request, background_tasks: BackgroundTasks) ->
     logger.info("Received Feishu card action (%s): task_id=%s, action=%s, operator=%s",
                 shape, task_id, action, operator_name)
 
-    # 4b. 「等待安排」 is not a decision: it only pauses the auto-decision countdown and
-    # asks the human to send `#fix(task) <solution>` in the group. The task stays WAITING
-    # with nothing queued, so the agent keeps long-polling.
+    # 4b. 「等待用户」 is not a decision and queues nothing. It keeps the task WAITING,
+    # suppresses the alert timer with no fallback, wakes the agent's long poll, and
+    # hands the incident to a direct conversation between the engineer and the agent.
     if action == WAIT_FOR_ARRANGEMENT:
         try:
-            summary = default_mailbox.defer_alert(task_id, operator_name)
+            summary = default_mailbox.wait_for_direct_conversation(task_id, operator_name)
         except TaskNotFoundError:
-            logger.warning("Arrangement request for unknown task %s ignored", task_id)
+            logger.warning("Direct-conversation request for unknown task %s ignored", task_id)
             return _toast("error", f"任务 `{task_id}` 不存在或已被清理，无法暂停自动决策")
         except ValueError as exc:
-            # Only a still-WAITING alert has a countdown to pause.
-            logger.warning("Arrangement request rejected for task %s: %s", task_id, exc)
-            return _toast("error", f"当前状态无需暂停自动决策（{exc}）")
+            # Only a still-WAITING alert can be handed to a direct conversation.
+            logger.warning("Direct-conversation request rejected for task %s: %s", task_id, exc)
+            return _toast("error", f"当前状态无法进入等待沟通（{exc}）")
 
-        # Imported lazily so tests can patch `mcp_server.schedule_auto_resolve` by name.
-        from trainpilot.server.mcp_server import schedule_auto_resolve
-
-        schedule_auto_resolve(task_id, stage="arrangement")
-        deferred_card = build_deferred_card(
+        awaiting_card = build_awaiting_user_card(
             task_id=task_id,
             operator=operator_name,
-            timeout_seconds=settings.arrangement_timeout_seconds,
-            requested_at=summary.arrangement_requested_at,
+            requested_at=summary.direct_conversation_requested_at,
             original_message=summary.latest_message,
             step=summary.latest_step,
             epoch=summary.latest_epoch,
         )
         background_tasks.add_task(
-            default_feishu_client.update_card_to_deferred,
+            default_feishu_client.update_card_to_awaiting_user,
             task_id=task_id,
             operator=operator_name,
-            timeout_seconds=settings.arrangement_timeout_seconds,
-            requested_at=summary.arrangement_requested_at,
+            requested_at=summary.direct_conversation_requested_at,
             original_message=summary.latest_message,
             step=summary.latest_step,
             epoch=summary.latest_epoch,
@@ -354,11 +164,11 @@ async def feishu_webhook(request: Request, background_tasks: BackgroundTasks) ->
         return {
             "toast": {
                 "type": "success",
-                "content": f"已暂停自动决策，请在群里 @机器人 发送 #fix({task_id}) <方案>",
+                "content": "已暂停自动决策，请直接在对话中告诉 Agent 你的处理方案",
             },
             "card": {
                 "type": "raw",
-                "data": deferred_card,
+                "data": awaiting_card,
             },
         }
 
@@ -422,14 +232,22 @@ async def feishu_webhook(request: Request, background_tasks: BackgroundTasks) ->
     # `card` must be an object with `type: "raw"` and `data: <card_json>`
     # Returning plain card dict without `type` causes Feishu error 200672 (invalid response body format).
     _toast_labels = {
-        "stop_training": "停止训练",
+        "cancel": "取消任务并关机",
+        "stop_training": "取消任务并关机",
         "self_resolve": "自行解决",
     }
     toast_label = _toast_labels.get(action, action)
+    if action in ("cancel", "stop_training"):
+        toast_content = (
+            f"策略 [{toast_label}] 已下发；关机必须由 Agent 执行并验证，"
+            "共享机器上无法安全关机时 Agent 会回报 failed"
+        )
+    else:
+        toast_content = f"策略 [{toast_label}] 已下发，训练将自动恢复"
     return {
         "toast": {
             "type": "success",
-            "content": f"策略 [{toast_label}] 已下发，训练将自动恢复",
+            "content": toast_content,
         },
         "card": {
             "type": "raw",

@@ -30,8 +30,8 @@ runs accidentally share a mailbox.
 Locate the TrainPilot tools in your client's MCP tool list (plugin clients may
 prefix their names). Use `get_task_status` with the agreed task id to check the
 connection without creating a task. An unknown task is normal before its first
-report. Available tools are `report`, `poll_instruction`, `ack_instruction`,
-`get_task_status`, and `ack_plan`; use them according to the live server protocol.
+report. Available tools are `report`, `poll_instruction`, `ack_instruction`, and
+`get_task_status`; use them according to the live server protocol.
 
 If the tools are missing, check the remote `/mcp` URL and credentials, then restart
 or reconnect the agent. Do not silently substitute a different server or install

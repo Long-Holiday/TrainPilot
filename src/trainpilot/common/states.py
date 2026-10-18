@@ -26,21 +26,16 @@ class EventType(str, Enum):
 class ActionType(str, Enum):
     """Preset actions available for human-in-the-loop decisions."""
 
-    STOP_TRAINING = "stop_training"  # Terminate training safely and retain artifacts
+    CANCEL = "cancel"  # Agent cancels the run and verifies the machine shutdown
     SELF_RESOLVE = "self_resolve"  # Agent resolves by itself, continue training without intervention
     CUSTOM = "custom"  # Custom user-defined action with payload
 
 
-# Card-only control action: the engineer asked for more time to arrange a fix.
-# Deliberately NOT an ActionType member: those are the actions an agent can receive
-# from poll_instruction, and this one is never delivered to anyone.
+# Card-only control action: the engineer asked to take the decision into a direct
+# conversation with the agent. The task stays WAITING and the alert timer is suppressed.
 WAIT_FOR_ARRANGEMENT = "wait_for_arrangement"
 
-
-class PlanStatus(str, Enum):
-    """Lifecycle of a next-task plan queued from a Feishu group message."""
-
-    PENDING = "pending"  # Queued, still returned by every matching report
-    DONE = "done"  # Agent carried it out and acknowledged it
-    FAILED = "failed"  # Agent tried and could not
-    SKIPPED = "skipped"  # Agent judged it not applicable
+# Delivered by poll_instruction while that direct conversation is open. It is a control
+# action, not a decision: it queues nothing and does not change the task state. The agent
+# must stop polling and return control to the conversation.
+WAIT_FOR_USER = "wait_for_user"

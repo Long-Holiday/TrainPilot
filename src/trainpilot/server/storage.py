@@ -7,8 +7,8 @@ import sqlite3
 import threading
 from typing import Any, Dict, List, Optional
 
-from trainpilot.common.schemas import InstructionResponse, NextTaskPlan
-from trainpilot.common.states import PlanStatus, TaskState
+from trainpilot.common.schemas import InstructionResponse
+from trainpilot.common.states import TaskState
 
 logger = logging.getLogger("trainpilot.storage")
 
@@ -62,6 +62,8 @@ class SQLiteStorage:
                     last_alert_fingerprint TEXT,
                     last_alert_at TEXT,
                     feishu_message_id TEXT,
+                    -- Historical names kept for on-disk compatibility. They now store the
+                    -- direct-conversation request opened by the ⏳ 等待用户 button.
                     arrangement_requested_at TEXT,
                     arrangement_requested_by TEXT
                 );
@@ -109,33 +111,9 @@ class SQLiteStorage:
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tasks_state_updated_at ON tasks(state, updated_at);"
             )
-            # Next-task plans queued from Feishu. Deliberately a standalone table with no
-            # foreign key to `tasks`: a plan is not a task row and may be bound to a task
-            # id that does not exist yet.
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS next_task_plans (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    plan_id TEXT NOT NULL UNIQUE,
-                    text TEXT NOT NULL,
-                    task_id TEXT,
-                    status TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    created_by TEXT,
-                    source TEXT NOT NULL DEFAULT 'feishu',
-                    chat_id TEXT,
-                    source_message_id TEXT UNIQUE,
-                    acked_at TEXT,
-                    ack_note TEXT
-                );
-                """
-            )
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS idx_plans_status_task ON next_task_plans(status, task_id);"
-            )
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS idx_plans_created_at ON next_task_plans(created_at);"
-            )
+            # The `next_task_plans` table is intentionally not created or touched any
+            # more. A database written by an older release keeps it (and its rows) in
+            # place; deleting user data on upgrade would be destructive.
             self._conn.commit()
             logger.info("SQLite storage initialized at: %s", self.db_path)
 
@@ -197,8 +175,10 @@ class SQLiteStorage:
                     feishu_message_id = COALESCE(excluded.feishu_message_id, tasks.feishu_message_id),
                     -- Plain columns, deliberately NOT COALESCE-protected like feishu_message_id:
                     -- the in-memory TaskRecord is authoritative for these two, so NULL must
-                    -- clear them (a fresh alert ends the previous arrangement window), and a
-                    -- COALESCE would silently keep the stale timestamp and hang the task.
+                    -- clear them (a fresh alert ends the previous direct-conversation
+                    -- window), and a COALESCE would silently keep the stale timestamp.
+                    -- The DB column names predate the direct-conversation wording; they are
+                    -- kept so existing databases keep working without a destructive rename.
                     arrangement_requested_at = excluded.arrangement_requested_at,
                     arrangement_requested_by = excluded.arrangement_requested_by;
                 """,
@@ -216,8 +196,8 @@ class SQLiteStorage:
                     task.last_alert_fingerprint,
                     task.last_alert_at,
                     feishu_msg_id,
-                    getattr(task, "arrangement_requested_at", None),
-                    getattr(task, "arrangement_requested_by", None),
+                    getattr(task, "direct_conversation_requested_at", None),
+                    getattr(task, "direct_conversation_requested_by", None),
                 ),
             )
             if _commit:
@@ -444,8 +424,8 @@ class SQLiteStorage:
 
         keys = r.keys()
         feishu_msg_id = r["feishu_message_id"] if "feishu_message_id" in keys else None
-        arrangement_at = r["arrangement_requested_at"] if "arrangement_requested_at" in keys else None
-        arrangement_by = r["arrangement_requested_by"] if "arrangement_requested_by" in keys else None
+        direct_at = r["arrangement_requested_at"] if "arrangement_requested_at" in keys else None
+        direct_by = r["arrangement_requested_by"] if "arrangement_requested_by" in keys else None
 
         return TaskRecord(
             task_id=t_id,
@@ -461,8 +441,8 @@ class SQLiteStorage:
             last_alert_fingerprint=r["last_alert_fingerprint"],
             last_alert_at=r["last_alert_at"],
             feishu_message_id=feishu_msg_id,
-            arrangement_requested_at=arrangement_at,
-            arrangement_requested_by=arrangement_by,
+            direct_conversation_requested_at=direct_at,
+            direct_conversation_requested_by=direct_by,
         )
 
     def get_task(self, task_id: str) -> Optional[Any]:
@@ -597,191 +577,16 @@ class SQLiteStorage:
                 tasks[record.task_id] = record
             return tasks
 
-    # ------------------------------------------------------------------
-    # Next-task plans
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _row_to_plan(r: Any) -> NextTaskPlan:
-        """Convert a sqlite3.Row to a NextTaskPlan."""
-        return NextTaskPlan(
-            plan_id=r["plan_id"],
-            text=r["text"],
-            task_id=r["task_id"],
-            status=PlanStatus(r["status"]),
-            created_at=r["created_at"],
-            created_by=r["created_by"],
-            source=r["source"],
-            chat_id=r["chat_id"],
-            source_message_id=r["source_message_id"],
-            acked_at=r["acked_at"],
-            ack_note=r["ack_note"],
-        )
-
-    def add_plan(self, plan: NextTaskPlan) -> Any:
-        """Insert a plan, returning (stored_plan, created).
-
-        INSERT OR IGNORE makes Feishu's at-least-once event delivery idempotent:
-        a retried message event hits the UNIQUE(source_message_id) constraint and
-        returns the already-stored plan with created=False.
-        """
-        with self._lock:
-            cur = self._conn.cursor()
-            cur.execute(
-                """
-                INSERT OR IGNORE INTO next_task_plans (
-                    plan_id, text, task_id, status, created_at, created_by,
-                    source, chat_id, source_message_id, acked_at, ack_note
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    plan.plan_id,
-                    plan.text,
-                    plan.task_id,
-                    plan.status.value if hasattr(plan.status, "value") else str(plan.status),
-                    plan.created_at,
-                    plan.created_by,
-                    plan.source,
-                    plan.chat_id,
-                    plan.source_message_id,
-                    plan.acked_at,
-                    plan.ack_note,
-                ),
-            )
-            created = cur.rowcount == 1
-            if created:
-                stored = plan
-            else:
-                cur.execute(
-                    "SELECT * FROM next_task_plans WHERE source_message_id = ?",
-                    (plan.source_message_id,),
-                )
-                row = cur.fetchone()
-                if row is None:
-                    # Collision on plan_id rather than on the message id.
-                    cur.execute(
-                        "SELECT * FROM next_task_plans WHERE plan_id = ?", (plan.plan_id,)
-                    )
-                    row = cur.fetchone()
-                stored = self._row_to_plan(row) if row is not None else plan
-            self._conn.commit()
-            return stored, created
-
-    def list_pending_plans(
-        self, task_id: Optional[str] = None, limit: int = 20
-    ) -> List[NextTaskPlan]:
-        """Pending plans bound to one task; a caller with no task id matches nothing.
-
-        Ordering is FIFO (insertion order) so plans are executed in the order the
-        humans queued them. Rows predating the strict binding rule carry a NULL task_id;
-        no query returns them -- `clear_all_pending_plans` is how they are dropped.
-        """
-        if not task_id:
-            return []
-        with self._lock:
-            cur = self._conn.cursor()
-            cur.execute(
-                """
-                SELECT * FROM next_task_plans
-                WHERE status = ? AND task_id = ?
-                ORDER BY id ASC LIMIT ?
-                """,
-                (PlanStatus.PENDING.value, task_id, limit),
-            )
-            return [self._row_to_plan(r) for r in cur.fetchall()]
-
-    def get_plan(self, plan_id: str) -> Optional[NextTaskPlan]:
-        """Fetch a single plan by id."""
-        with self._lock:
-            cur = self._conn.cursor()
-            cur.execute("SELECT * FROM next_task_plans WHERE plan_id = ?", (plan_id,))
-            row = cur.fetchone()
-            return self._row_to_plan(row) if row is not None else None
-
-    def ack_plan(self, plan_id: str, status: str, note: Optional[str], acked_at: str) -> NextTaskPlan:
-        """Mark a pending plan acknowledged. Raises ValueError for unknown/already-acked."""
-        with self._lock:
-            cur = self._conn.cursor()
-            cur.execute(
-                """
-                UPDATE next_task_plans
-                SET status = ?, acked_at = ?, ack_note = ?
-                WHERE plan_id = ? AND status = ?
-                """,
-                (status, acked_at, note, plan_id, PlanStatus.PENDING.value),
-            )
-            if cur.rowcount == 0:
-                self._conn.rollback()
-                cur.execute(
-                    "SELECT * FROM next_task_plans WHERE plan_id = ?", (plan_id,)
-                )
-                row = cur.fetchone()
-                if row is None:
-                    raise ValueError(f"Plan '{plan_id}' not found")
-                raise ValueError(
-                    f"Plan '{plan_id}' already acknowledged as '{row['status']}' at {row['acked_at']}"
-                )
-            self._conn.commit()
-            cur.execute("SELECT * FROM next_task_plans WHERE plan_id = ?", (plan_id,))
-            return self._row_to_plan(cur.fetchone())
-
-    def clear_pending_plans_for_task(self, task_id: str) -> int:
-        """Delete unacknowledged plans bound to one task; returns the count."""
-        with self._lock:
-            cur = self._conn.cursor()
-            cur.execute(
-                "DELETE FROM next_task_plans WHERE status = ? AND task_id = ?",
-                (PlanStatus.PENDING.value, task_id),
-            )
-            self._conn.commit()
-            return cur.rowcount
-
-    def clear_all_pending_plans(self) -> int:
-        """Delete every unacknowledged plan (global ones included); returns the count."""
-        with self._lock:
-            cur = self._conn.cursor()
-            cur.execute(
-                "DELETE FROM next_task_plans WHERE status = ?",
-                (PlanStatus.PENDING.value,),
-            )
-            self._conn.commit()
-            return cur.rowcount
-
-    def delete_expired_plans(self, max_age_seconds: float) -> int:
-        """Delete acknowledged plans older than the cutoff.
-
-        Pending plans never expire: a plan is removed only by an acknowledgement or
-        by an explicit clear, so it cannot silently disappear before the agent ran it.
-        """
-        from datetime import datetime, timezone, timedelta
-
-        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)).isoformat()
-        with self._lock:
-            cur = self._conn.cursor()
-            cur.execute(
-                """
-                DELETE FROM next_task_plans
-                WHERE status != ? AND COALESCE(acked_at, created_at) < ?
-                """,
-                (PlanStatus.PENDING.value, cutoff),
-            )
-            self._conn.commit()
-            return cur.rowcount
-
-    def clear_plans(self) -> None:
-        """Delete every plan row regardless of status (test reset)."""
-        with self._lock:
-            cur = self._conn.cursor()
-            cur.execute("DELETE FROM next_task_plans;")
-            self._conn.commit()
-
     def reset(self) -> None:
-        """Clear all tasks, events and plans (mainly for tests)."""
+        """Clear all tasks and events (mainly for tests).
+
+        The legacy `next_task_plans` table, if an old database has one, is left
+        untouched: this code no longer reads or writes it.
+        """
         with self._lock:
             cur = self._conn.cursor()
             cur.execute("DELETE FROM events;")
             cur.execute("DELETE FROM tasks;")
-            cur.execute("DELETE FROM next_task_plans;")
             self._conn.commit()
 
     def close(self) -> None:

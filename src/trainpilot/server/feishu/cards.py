@@ -3,7 +3,7 @@
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone
 
-from trainpilot.common.states import WAIT_FOR_ARRANGEMENT
+from trainpilot.common.states import EventType, WAIT_FOR_ARRANGEMENT
 
 
 def _format_metrics(metrics: Optional[Dict[str, Any]]) -> str:
@@ -48,11 +48,11 @@ def build_alert_card(
     timeout_seconds: int = 30,
     agent_note: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Construct a high-priority interactive alert card for Feishu with HITL action buttons.
+    """Construct a high-priority interactive alert card with HITL action buttons.
 
-    共三个按钮：停止训练 (stop_training)、自行解决 (self_resolve)、等待安排
-    (wait_for_arrangement)。前两个是下发给 Agent 的决策；「等待安排」只暂停自动决策，
-    等工程师在群里用 `@机器人 #fix(任务名) <方案>` 给出处理方案。
+    共三个按钮：取消任务并关机 (cancel)、自行解决 (self_resolve)、等待用户
+    (wait_for_arrangement)。「等待用户」不产生指令，也不再有兜底定时器：任务保持
+    WAITING，Agent 停止轮询并把控制权交回对话，由工程师直接告知 Agent 如何处理。
     超过 timeout_seconds 未点击则视为“自行解决”。
     若提供 agent_note，将展示 🤖 Agent 异常研判 区块。
     """
@@ -73,8 +73,9 @@ def build_alert_card(
         "",
         "---",
         f"**请在下方选择（{timeout_seconds} 秒内未决策将自动视为“自行解决”，训练自行继续）：**",
-        f"**需要时间排查？**点「⏳ 等待安排」暂停倒计时，然后在群里发"
-        f"`@机器人 #fix({task_id}) 你的处理方案`。",
+        "**🛑 取消任务并关机**：由 Agent 取消本次运行并验证关机；共用机器上会回报失败，避免误关。",
+        "**需要直接与 Agent 讨论？**点「⏳ 等待用户」暂停倒计时并结束轮询，"
+        "随后在对话中直接告诉 Agent 你的处理方案；该选择没有自动兜底。",
     ])
 
     elements: List[Dict[str, Any]] = [
@@ -90,11 +91,11 @@ def build_alert_card(
             "actions": [
                 {
                     "tag": "button",
-                    "text": {"tag": "plain_text", "content": "🛑 停止训练"},
+                    "text": {"tag": "plain_text", "content": "🛑 取消任务并关机"},
                     "type": "danger",
                     "value": {
                         "task_id": task_id,
-                        "action": "stop_training",
+                        "action": "cancel",
                     },
                 },
                 {
@@ -107,9 +108,10 @@ def build_alert_card(
                     },
                 },
                 {
-                    # Not a decision: pauses the countdown so a human can write a fix.
+                    # Not a decision: hands the incident to a direct conversation and
+                    # stops the agent's poll loop. Never delivered to the mailbox.
                     "tag": "button",
-                    "text": {"tag": "plain_text", "content": "⏳ 等待安排"},
+                    "text": {"tag": "plain_text", "content": "⏳ 等待用户"},
                     "type": "default",
                     "value": {
                         "task_id": task_id,
@@ -215,15 +217,15 @@ def build_resolved_card(
 ) -> Dict[str, Any]:
     """Construct a 'Resolved' card replacing the alert card to prevent duplicate clicks.
 
-    trigger_note replaces the built-in "超过 30 秒无人工决策" line, which would be wrong
-    for the arrangement fallback (a much longer window).
+    Both `cancel` and the legacy `stop_training` wire name render the cancel wording.
     """
     time_str = resolved_at or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     action_label_map = {
-        "stop_training": "🛑 立即终止训练并安全存档",
+        "cancel": "🛑 取消任务并关机（由 Agent 执行并验证）",
+        "stop_training": "🛑 取消任务并关机（由 Agent 执行并验证）",
         "self_resolve": "✅ 自行解决（训练自行继续，无须干预）",
-        "custom": "🛠️ 按群里下发的方案处理（人工指定）",
+        "custom": "🛠️ 按人工指定的方案处理",
     }
     action_desc = action_label_map.get(action_name, f"⚙️ 自定义动作: `{action_name}`")
 
@@ -244,10 +246,17 @@ def build_resolved_card(
             "",
             f"**📋 原告警说明**: *{original_message}*",
         ])
-    if action_name == "self_resolve":
-        markdown_lines.append("\n> ✅ 指令已派发至任务信箱，GPU 边缘节点将自动拉取执行并回传解决方法卡片。按钮已停用，防呆机制生效。")
+    if action_name in ("cancel", "stop_training"):
+        markdown_lines.append(
+            "\n> ✅ 指令已派发至任务信箱。取消与关机只由 Agent 执行并验证；若机器被多个任务"
+            "共享而无法安全关机，Agent 将以 failed ACK 回报。按钮已停用。"
+        )
+    elif action_name == "self_resolve":
+        markdown_lines.append(
+            "\n> ✅ 指令已派发至任务信箱，GPU 边缘节点将自动拉取执行并以 ACK 回传唯一的修复汇总。"
+        )
     else:
-        markdown_lines.append("\n> ✅ 指令已派发至任务信箱，GPU 边缘节点将自动拉取执行。按钮已停用，防呆机制生效。")
+        markdown_lines.append("\n> ✅ 指令已派发至任务信箱，GPU 边缘节点将自动拉取执行。按钮已停用。")
 
     elements: List[Dict[str, Any]] = [
         {
@@ -289,10 +298,9 @@ def build_recovery_card(
     metrics: Optional[Dict[str, Any]] = None,
     extra: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Construct an informative recovery card sent by Agent when self_resolve is executed.
+    """The single post-repair report for a successful self_resolve/custom ACK.
 
-    告知问题解决方法与恢复状态，简单清晰，由 Agent 概括一句解决方法发送回来，
-    让用户知道问题已经解决、训练任务恢复正常。
+    告知问题解决方法与恢复状态；Agent 不需要再补发一条里程碑来做“恢复汇报”。
     """
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -340,186 +348,45 @@ def build_recovery_card(
     }
 
 
-def _receipt_card(
-    template: str,
-    title: str,
-    markdown_lines: List[str],
-    note_text: str,
-) -> Dict[str, Any]:
-    """Shared frame for the group-message receipts (next-task plan / dispatched fix).
-
-    Both are the only feedback channel for a group message, so they carry the same
-    anatomy: header + one markdown block echoing the payload + a footer note.
-    """
-    return {
-        "config": {"wide_screen_mode": True, "enable_forward": True},
-        "header": {
-            "template": template,
-            "title": {"tag": "plain_text", "content": title},
-        },
-        "elements": [
-            {
-                "tag": "div",
-                "text": {
-                    "tag": "lark_md",
-                    "content": "\n".join(markdown_lines),
-                },
-            },
-            {
-                "tag": "note",
-                "elements": [{"tag": "plain_text", "content": note_text}],
-            },
-        ],
-    }
-
-
-def build_plan_card(
-    plan_id: Optional[str] = None,
-    text: str = "",
-    task_id: Optional[str] = None,
-    created_by: Optional[str] = None,
-    created_at: Optional[str] = None,
-    reason: Optional[str] = None,
-    known_task_ids: Optional[List[str]] = None,
-) -> Dict[str, Any]:
-    """Construct the receipt card for a next-task plan registered from the group.
-
-    这是登记成功唯一的反馈通道（群里 @机器人 即登记），因此必须回显计划编号、
-    完整正文与绑定对象；同时告知撤销方式。带 `reason` 时切换为拒绝形态：说明为什么
-    没有登记，并回显绑定的任务名与现有任务名，便于改正后重发。
-    """
-    time_str = created_at or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-    if reason is not None:
-        markdown_lines = [f"**⚠️ 未登记原因**: {reason}"]
-        if task_id:
-            markdown_lines.append(f"**🎯 你绑定的任务**: `{task_id}`")
-        if known_task_ids:
-            listed = "、".join(f"`{tid}`" for tid in known_task_ids)
-            markdown_lines.append(f"**📋 当前已有任务**: {listed}")
-        markdown_lines += [
-            f"**📝 计划内容**（未登记）: \n> {text or '（空）'}",
-            f"**👤 提交人**: {created_by or '飞书工程师'}",
-            f"**🕒 提交时间**: `{time_str}`",
-            "",
-            "> 📌 计划必须绑定到**已存在**的任务，写法为 `@机器人 #任务名 <计划内容>`。"
-            "若 `#xxx` 只是正文（如 issue 编号），去掉 `#` 后重新发送即可。",
-        ]
-        return _receipt_card(
-            template="red",
-            title="⚠️【下一步计划未登记】",
-            markdown_lines=markdown_lines,
-            note_text="TrainPilot 下一步计划 • 这条消息没有登记任何计划",
-        )
-
-    binding = f"`{task_id}`" if task_id else "（未绑定任务）"
-
-    markdown_lines = [
-        f"**🆔 计划编号**: `{plan_id}`",
-        f"**🎯 绑定任务**: {binding}",
-        f"**📝 计划内容**: \n> {text}",
-        f"**👤 提交人**: {created_by or '飞书工程师'}",
-        f"**🕒 登记时间**: `{time_str}`",
-        "",
-        "> 📌 Agent 将在下次 report 汇报时读取并按顺序执行；执行完成后以 `ack_plan` 确认。"
-        "计划在被确认或清除之前会一直保留。",
-    ]
-
-    return _receipt_card(
-        template="blue",
-        title="📌【下一步计划已登记】",
-        markdown_lines=markdown_lines,
-        note_text="TrainPilot 下一步计划 • 撤销：@机器人 发送「清除」或「清除 #任务ID」",
-    )
-
-
-def build_fix_card(
+def build_outcome_card(
     task_id: str,
-    solution: str,
-    operator: Optional[str] = None,
-    instruction_id: Optional[str] = None,
-    dispatched_at: Optional[str] = None,
-    reason: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Receipt for a `#fix(任务名) <方案>` group message.
-
-    Confirms which task the solution was dispatched to; with `reason` set it becomes
-    the rejection form explaining why nothing was dispatched.
-    """
-    time_str = dispatched_at or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    rejected = reason is not None
-
-    if rejected:
-        title = "⚠️【修复方案未下发】"
-        template = "red"
-        head = f"**⚠️ 未下发原因**: {reason}"
-        body = f"**📝 方案内容**（未下发）: \n> {solution or '（空）'}"
-        note = "TrainPilot 修复方案 • 仅「等待中(WAITING)」的告警任务可接收方案；排下一步请用 #feat(任务名)"
-        tail = (
-            "> 🛠 该消息没有产生任何决策。若任务当时正在等待，请重新 @机器人 发送；"
-            "若只是要排下一步的工作，请改用 `#feat(任务名) <计划>`（或 `#任务名`）。"
-        )
-    else:
-        title = f"🛠️【修复方案已下发】任务: {task_id}"
-        template = "turquoise"
-        head = f"**🎯 下发任务**: `{task_id}`"
-        if instruction_id:
-            head += f"\n**🆔 指令编号**: `{instruction_id}`"
-        body = f"**📝 方案内容**: \n> {solution}"
-        note = "TrainPilot 群内修复方案 • 已作为该任务的人工决策下发"
-        tail = "> ⚡️ 已写入任务信箱并唤醒 Agent 长轮询；执行结果将以自愈卡片回报。"
-
-    markdown_lines = [
-        head,
-        body,
-        f"**👤 提交人**: {operator or '飞书工程师'}",
-        f"**🕒 {'拦截' if rejected else '下发'}时间**: `{time_str}`",
-        "",
-        tail,
-    ]
-
-    return _receipt_card(
-        template=template,
-        title=title,
-        markdown_lines=markdown_lines,
-        note_text=note,
-    )
-
-
-def build_deferred_card(
-    task_id: str,
-    operator: Optional[str] = None,
-    timeout_seconds: int = 1800,
-    requested_at: Optional[str] = None,
-    original_message: Optional[str] = None,
+    event_type: EventType,
+    message: str,
     step: Optional[int] = None,
     epoch: Optional[int] = None,
+    metrics: Optional[Dict[str, Any]] = None,
+    agent_note: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Status card replacing the alert card after 「⏳ 等待安排」.
+    """One terminal notification for completed/failed (and a verified cancel ACK).
 
-    The click replaces the alert card in place, so it repeats the anomaly context --
-    the engineer is being asked to think about exactly that for the next while.
+    ``report(completed)`` and ``report(failed)`` each send exactly this card once, so
+    no follow-up report is needed. Cancellation reuses the failed outcome and must
+    never be rendered as "training recovered".
     """
-    time_str = requested_at or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    window = f"{timeout_seconds // 60} 分钟" if timeout_seconds >= 60 else f"{timeout_seconds} 秒"
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    is_completed = event_type == EventType.COMPLETED
+
+    header_title = (
+        f"🏁【训练任务已完成】任务: {task_id}"
+        if is_completed
+        else f"⛔【训练任务已失败/取消】任务: {task_id}"
+    )
+    template = "green" if is_completed else "red"
+    resolved_note = _resolve_agent_note(agent_note)
 
     markdown_lines = [
         f"**🎯 任务标识**: `{task_id}`",
-        f"**👤 操作人**: {operator or '飞书工程师'}",
-        f"**🕒 暂停时间**: `{time_str}`",
-        f"**⏭ 触发进度**: Epoch `{epoch if epoch is not None else '-'}` | Step `{step if step is not None else '-'}`",
+        f"**📈 结束进度**: Epoch `{epoch if epoch is not None else '-'}` | Step `{step if step is not None else '-'}`",
+        f"**📊 最终指标**: {_format_metrics(metrics)}",
+        f"**📝 结束说明**: \n> {message}",
     ]
-    if original_message:
+    if resolved_note:
         markdown_lines.extend([
-            "",
-            f"**📋 原告警说明**: *{original_message}*",
+            f"**🤖 Agent 点评**: \n> {resolved_note}",
         ])
     markdown_lines.extend([
         "",
-        "---",
-        "**⏸ 自动决策已暂停**，该任务保持等待，Agent 仍在长轮询。",
-        f"**👉 请在群里发**：`@机器人 #fix({task_id}) 你的处理方案`",
-        f"**⚠️ 兜底**：{window}内仍无方案，将自动按“自行解决”处理，避免任务永久卡死。",
+        f"**{'🟢' if is_completed else '🔴'} 终态**: {'训练已正常结束' if is_completed else '任务已结束，不再继续训练'}",
     ])
 
     elements: List[Dict[str, Any]] = [
@@ -535,7 +402,7 @@ def build_deferred_card(
             "elements": [
                 {
                     "tag": "plain_text",
-                    "content": f"TrainPilot 等待人工安排 • {time_str}",
+                    "content": f"TrainPilot 终态通知（仅此一条） • {now_str}",
                 }
             ],
         },
@@ -544,34 +411,48 @@ def build_deferred_card(
     return {
         "config": {"wide_screen_mode": True, "enable_forward": True},
         "header": {
-            "template": "orange",
-            "title": {
-                "tag": "plain_text",
-                "content": f"⏳【等待人工安排】任务: {task_id}",
-            },
+            "template": template,
+            "title": {"tag": "plain_text", "content": header_title},
         },
         "elements": elements,
     }
 
 
-def build_plan_cleared_card(
-    cleared_count: int,
-    scope_task_id: Optional[str] = None,
+def build_awaiting_user_card(
+    task_id: str,
     operator: Optional[str] = None,
-    cleared_at: Optional[str] = None,
+    requested_at: Optional[str] = None,
+    original_message: Optional[str] = None,
+    step: Optional[int] = None,
+    epoch: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Construct the receipt card for a clear command (sent even when nothing matched)."""
-    time_str = cleared_at or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    scope = f"任务 `{scope_task_id}`" if scope_task_id else "全局（所有未确认计划）"
+    """Status card replacing the alert card after 「⏳ 等待用户」.
+
+    The click replaces the alert card in place, so it repeats the anomaly context.
+    There is no fallback timer and no group-message ingestion: the engineer talks to
+    the agent directly, and the agent returns control when its next poll reports the
+    wait. The card must not claim the agent already observed the click.
+    """
+    time_str = requested_at or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     markdown_lines = [
-        f"**🎯 清除范围**: {scope}",
-        f"**🗑 已清除条数**: `{cleared_count}`",
+        f"**🎯 任务标识**: `{task_id}`",
         f"**👤 操作人**: {operator or '飞书工程师'}",
-        f"**🕒 操作时间**: `{time_str}`",
-        "",
-        "> 🧹 如仍需该计划，请重新 @机器人 发送。此处的清除只影响尚未被 Agent 确认的计划。",
+        f"**🕒 暂停时间**: `{time_str}`",
+        f"**⏭ 触发进度**: Epoch `{epoch if epoch is not None else '-'}` | Step `{step if step is not None else '-'}`",
     ]
+    if original_message:
+        markdown_lines.extend([
+            "",
+            f"**📋 原告警说明**: *{original_message}*",
+        ])
+    markdown_lines.extend([
+        "",
+        "---",
+        "**⏸ 自动决策已暂停，且没有自动兜底。**",
+        "**👉 请回到与 Agent 的直接对话提供处理方案；Agent 下次轮询将收到等待状态并交还控制权。**",
+        "**✅ 处理完成后，Agent 会以 ACK 回传唯一的修复汇总。**",
+    ])
 
     elements: List[Dict[str, Any]] = [
         {
@@ -586,7 +467,7 @@ def build_plan_cleared_card(
             "elements": [
                 {
                     "tag": "plain_text",
-                    "content": "TrainPilot 下一步计划 • 已清除的计划不会再出现在 report 响应中",
+                    "content": f"TrainPilot 等待直接沟通 • {time_str}",
                 }
             ],
         },
@@ -595,13 +476,11 @@ def build_plan_cleared_card(
     return {
         "config": {"wide_screen_mode": True, "enable_forward": True},
         "header": {
-            "template": "yellow",
+            "template": "orange",
             "title": {
                 "tag": "plain_text",
-                "content": "🧹【待办计划已清除】",
+                "content": f"⏳【等待与 Agent 直接沟通】任务: {task_id}",
             },
         },
         "elements": elements,
     }
-
-

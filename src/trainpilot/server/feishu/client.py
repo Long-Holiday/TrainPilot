@@ -6,12 +6,13 @@ from collections import deque
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone
 
-from trainpilot.common.states import WAIT_FOR_ARRANGEMENT
+from trainpilot.common.states import EventType, WAIT_FOR_ARRANGEMENT
 from trainpilot.server.config import ServerSettings, settings
 from trainpilot.server.feishu.cards import (
     build_alert_card,
-    build_deferred_card,
+    build_awaiting_user_card,
     build_milestone_card,
+    build_outcome_card,
     build_recovery_card,
     build_resolved_card,
 )
@@ -154,28 +155,52 @@ class FeishuCardClient:
             {"action": action, "operator": operator},
         )
 
-    def update_card_to_deferred(
+    def send_outcome(
+        self,
+        task_id: str,
+        event_type: EventType,
+        message: str,
+        step: Optional[int] = None,
+        epoch: Optional[int] = None,
+        metrics: Optional[Dict[str, Any]] = None,
+        agent_note: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Send the one terminal notification card for completed/failed/cancel."""
+        card_content = build_outcome_card(
+            task_id=task_id,
+            event_type=event_type,
+            message=message,
+            step=step,
+            epoch=epoch,
+            metrics=metrics,
+            agent_note=agent_note,
+        )
+        return self._send_card(
+            task_id=task_id,
+            card_dict=card_content,
+            card_type=event_type.value,
+        )
+
+    def update_card_to_awaiting_user(
         self,
         task_id: str,
         operator: str = "专家工程师",
-        timeout_seconds: int = 1800,
         requested_at: Optional[str] = None,
         original_message: Optional[str] = None,
         step: Optional[int] = None,
         epoch: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Replace the alert card with the 'waiting for arrangement' status card."""
-        deferred_card = build_deferred_card(
+        """Replace the alert card with the 'talk to the agent directly' status card."""
+        awaiting_card = build_awaiting_user_card(
             task_id=task_id,
             operator=operator,
-            timeout_seconds=timeout_seconds,
             requested_at=requested_at,
             original_message=original_message,
             step=step,
             epoch=epoch,
         )
         return self._patch_task_card(
-            task_id, deferred_card, "arrangement_update",
+            task_id, awaiting_card, "awaiting_user_update",
             {"action": WAIT_FOR_ARRANGEMENT, "operator": operator},
         )
 
@@ -292,67 +317,6 @@ class FeishuCardClient:
                 pass
 
         return entry
-
-    def send_card_to_chat(
-        self,
-        chat_id: str,
-        card_dict: Dict[str, Any],
-        card_type: str,
-        plan_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Send a card to the chat a message came from.
-
-        Deliberately separate from `_send_card`: that one targets the configured
-        alert receiver and maintains the task->message map, while receipts for
-        next-task plans must go back to the originating group and are not tied to
-        any task row.
-        """
-        target_chat = chat_id or self.settings.feishu_receiver_id or "mock_chat"
-        simulated_msg_id = f"mock_msg_{plan_id or card_type}_{len(self._sent_cards_history) + 1}"
-
-        entry = {
-            "type": card_type,
-            "plan_id": plan_id,
-            "chat_id": target_chat,
-            "message_id": simulated_msg_id,
-            "receiver_id": target_chat,
-            "receive_id_type": "chat_id",
-            "card": card_dict,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        self._sent_cards_history.append(entry)
-
-        if self._lark_client:
-            try:
-                from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
-
-                request = CreateMessageRequest.builder() \
-                    .receive_id_type("chat_id") \
-                    .request_body(CreateMessageRequestBody.builder()
-                                  .receive_id(target_chat)
-                                  .msg_type("interactive")
-                                  .content(json.dumps(card_dict, ensure_ascii=False))
-                                  .build()) \
-                    .build()
-
-                response = self._lark_client.im.v1.message.create(request)
-                if response.success() and response.data:
-                    real_msg_id = getattr(response.data, "message_id", None)
-                    if real_msg_id:
-                        entry["message_id"] = real_msg_id
-                    logger.info("Dispatched Feishu %s card to chat %s, msg_id=%s",
-                                card_type, target_chat, real_msg_id)
-                else:
-                    logger.error("Feishu API error sending %s card: code=%s, msg=%s",
-                                 card_type, response.code, response.msg)
-            except Exception as e:
-                logger.error("Exception during Feishu send_card_to_chat: %s", e)
-        else:
-            logger.info("[Mock Feishu] Dispatched %s card for chat %s: %s",
-                        card_type, target_chat, json.dumps(card_dict, ensure_ascii=False))
-
-        return entry
-
 
 # Singleton default client
 default_feishu_client = FeishuCardClient()

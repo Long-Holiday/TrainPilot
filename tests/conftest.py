@@ -7,8 +7,8 @@ Two things every suite depends on live here so that no test module has to repeat
   so an unredirected run would wipe the developer's local task history. The redirect must
   happen before ``trainpilot.server.mailbox`` is imported, because ``default_mailbox``
   builds its storage from settings at import time.
-- The shared mailbox (task state, events, next-task plans) and the API/webhook tokens are
-  reset around every test, so a local ``.env`` cannot leak credentials into the suite.
+- The shared mailbox (task state and events) and the API/webhook tokens are reset
+  around every test, so a local ``.env`` cannot leak credentials into the suite.
 """
 
 import atexit
@@ -45,18 +45,15 @@ settings.sqlite_path = TEST_SQLITE_PATH
 def isolate_global_state():
     """Reset the shared mailbox and detach auth from the local .env for every test."""
     from trainpilot.server.mailbox import default_mailbox
-    from trainpilot.server.plans import default_plans
 
     assert default_mailbox._storage.db_path == TEST_SQLITE_PATH, (
         "tests must never touch the repository database"
     )
 
-    default_mailbox.reset()  # also clears next_task_plans via SQLiteStorage.reset()
-    default_plans.reset()
+    default_mailbox.reset()
     saved_tokens = (settings.api_token, settings.feishu_verification_token)
     settings.api_token = None
     settings.feishu_verification_token = None
     yield
     settings.api_token, settings.feishu_verification_token = saved_tokens
     default_mailbox.reset()
-    default_plans.reset()
