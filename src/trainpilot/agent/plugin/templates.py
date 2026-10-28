@@ -1,9 +1,8 @@
 """The one copy of every word the GPU-side plugin ships.
 
-One file layout, one set of prose: the skill, the rules pointer and the slash commands.
+One set of prose for every agent layout: the skill, the rules pointer and the commands.
 Keeping the prose here means the published assets and the one-shot installer cannot drift
-apart -- the alternative (a checked-in copy per shape) is two copies that disagree the
-first time one is edited.
+apart when support for another agent is added.
 
 What is deliberately *not* here is the behaviour protocol. Per AGENTS.md the agent-facing
 contract lives in exactly one place, ``mcp_server._INSTRUCTIONS`` plus the tool
@@ -67,7 +66,7 @@ Python packages to work around a missing connection.
 
 @dataclass(frozen=True)
 class Command:
-    """A plugin slash command, in the markdown shape Antigravity accepts.
+    """A shared command prompt, rendered as commands or Codex command skills.
 
     Antigravity's plugin page documents skills, agents, rules, MCP config and hooks -- not
     a ``commands/`` directory. ``agy plugin install`` processes one anyway ("commands: N

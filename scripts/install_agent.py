@@ -78,7 +78,7 @@ def run(source: Path, argv) -> int:
     from trainpilot.agent.plugin import commands
 
     parser = argparse.ArgumentParser(
-        description="Install the Antigravity skill and remote MCP config only; no Python packages.",
+        description="Install an agent-native skill and remote MCP config only; no Python packages.",
     )
     parser.add_argument("--server-url", "-s")
     parser.add_argument("--api-token")

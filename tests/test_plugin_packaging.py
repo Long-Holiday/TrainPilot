@@ -2,7 +2,7 @@
 
 The GPU side installs no Python at all -- it gets a skill plus a remote MCP entry from a
 standard-library installer (``scripts/install_agent.py``) or straight from the published
-Antigravity plugin, and its agent's own MCP client talks to ``/mcp``. So every runtime
+native plugin, and its agent's own MCP client talks to ``/mcp``. So every runtime
 dependency belongs to the ``server`` half, and the base list must stay empty: a GPU node
 that pip-installs this package should pull nothing.
 

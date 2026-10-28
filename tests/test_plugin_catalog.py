@@ -1,4 +1,4 @@
-"""The plugin must speak Antigravity's spelling of "here is a remote MCP server".
+"""Native transport spellings and the shared live-protocol pointer.
 
 This is the whole point of the plugin, and the failure mode is silent: Antigravity given
 ``url`` or ``httpUrl`` (or a Claude-shaped plugin, which its CLI converts into a stdio entry
@@ -213,17 +213,24 @@ def test_the_target_names_the_documentation_it_was_verified_against():
     assert "serverUrl" in catalog.ANTIGRAVITY.transport
 
 
-@pytest.mark.parametrize("key", ["claude-code", "gemini-cli", "opencode", "codex", "generic", "cursor"])
+@pytest.mark.parametrize("key", ["gemini-cli", "opencode", "generic", "cursor"])
 def test_no_other_agent_is_supported(key):
-    """The plugin is Antigravity-only: a wrong vendor spelling is usually a silent failure
-    to connect, and there is no second vendor here whose spelling could be confused with
-    Antigravity's own."""
-    assert key not in {target.key for target in _targets()}
+    assert key not in catalog.TARGETS
 
 
-def _targets():
-    return [value for value in vars(catalog).values() if isinstance(value, catalog.AgentTarget)]
+def test_all_three_agents_are_catalogued():
+    assert set(catalog.TARGETS) == {"antigravity", "claude-code", "codex"}
+    for key, target in catalog.TARGETS.items():
+        assert target.key == key
+        assert target.docs_url.startswith("https://")
+        assert target.agent_cli
 
 
-def test_antigravity_is_the_only_catalogued_target():
-    assert _targets() == [catalog.ANTIGRAVITY]
+@pytest.mark.parametrize("agent", ["antigravity", "claude-code", "codex"])
+def test_each_agent_uses_the_same_live_protocol_skill(agent):
+    native = render.render_bundle(ctx(), catalog.TARGETS[agent])
+    assert file_map(native)["skills/trainpilot/SKILL.md"] == skill_body(bundle())
+    assert "trainpilot-cli" not in rendered(native)
+    for item in native.files:
+        if item.path.endswith(".json"):
+            json.loads(item.content)

@@ -1,8 +1,8 @@
 """Write a rendered bundle to disk, carefully.
 
-The bundle is TrainPilot's own: it is staged under ``~/.trainpilot/plugins/<name>`` and then
-handed to ``agy plugin install``, which copies it into Antigravity's plugin directory. So
-nothing here edits a file the user owns, and the rules are simple:
+The bundle is TrainPilot's own: it is staged under ``~/.trainpilot/plugins/`` and then
+handed to the selected agent's native plugin manager. Nothing here edits the agent's
+configuration directly, and the rules are simple:
 
 * the final content of every file is worked out before anything is written (``plan``), so a
   ``--dry-run`` can report the same thing a real run does;

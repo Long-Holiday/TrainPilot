@@ -1,0 +1,12 @@
+{
+  "name": "trainpilot",
+  "owner": {
+    "name": "TrainPilot"
+  },
+  "plugins": [
+    {
+      "name": "trainpilot",
+      "source": "./plugins/claude-code"
+    }
+  ]
+}

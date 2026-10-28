@@ -1,10 +1,10 @@
-"""Render the canonical plugin text into Antigravity's native layout.
+"""Render the canonical plugin text into each agent's native layout.
 
 Pure functions: a :class:`PluginContext` goes in, a :class:`Bundle` comes out, nothing
 touches the disk. ``install`` does the writing.
 
 A bundle is a directory of files whose paths are relative to a staging directory that is
-then handed to ``agy plugin install``, which owns where the plugin finally lives. The
+then handed to the agent's plugin manager, which owns where the plugin finally lives. The
 commands, the caveats and the vendor facts all come from :mod:`catalog`, so a fact is
 written down once and this module cannot disagree with the table.
 """
@@ -112,7 +112,7 @@ def _markdown_command(description: str, argument_hint: str, prompt: str) -> str:
 # --------------------------------------------------------------------------- renderer
 
 
-def render_bundle(ctx: PluginContext) -> Bundle:
+def _antigravity_files(ctx: PluginContext) -> List[File]:
     """Render the Antigravity plugin: manifest, remote MCP config, skill, rules, commands.
 
     ``serverUrl`` is mandatory -- Antigravity rejects ``url`` and ``httpUrl`` outright --
@@ -144,11 +144,79 @@ def render_bundle(ctx: PluginContext) -> Bundle:
                 _markdown_command(command.description, command.argument_hint, command.prompt),
             )
         )
-    notes = [catalog.ANTIGRAVITY.note] if catalog.ANTIGRAVITY.note else []
+    return files
+
+
+def marketplace_file(target: catalog.AgentTarget, name: str, source: str) -> File:
+    """A marketplace index; source is relative to the marketplace repository root."""
+    if target == catalog.CLAUDE_CODE:
+        path = ".claude-plugin/marketplace.json"
+        marketplace = {
+            "name": name,
+            "owner": {"name": "TrainPilot"},
+            "plugins": [{"name": templates.PLUGIN_NAME, "source": source}],
+        }
+    elif target == catalog.CODEX:
+        path = ".agents/plugins/marketplace.json"
+        marketplace = {
+            "name": name,
+            "interface": {"displayName": "TrainPilot"},
+            "plugins": [{
+                "name": templates.PLUGIN_NAME,
+                "source": {"source": "local", "path": source},
+                "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+            }],
+        }
+    else:
+        raise ValueError(f"{target.key} does not use a marketplace")
+    return File(path, _json(marketplace))
+
+
+def _native_files(ctx: PluginContext, target: catalog.AgentTarget) -> List[File]:
+    """Render native manifests, remote MCP configuration and commands or command skills."""
+    manifest = {"name": templates.PLUGIN_NAME, "version": "0.2.0", "description": _description()}
+    if target == catalog.CLAUDE_CODE:
+        manifest_path = ".claude-plugin/plugin.json"
+    elif target == catalog.CODEX:
+        manifest_path = ".codex-plugin/plugin.json"
+        manifest["skills"] = "./skills/"
+    else:
+        raise ValueError(f"Unsupported agent: {target.key}")
+    entry = {"type": "http", "url": ctx.mcp_url}
+    if ctx.headers:
+        entry["http_headers" if target == catalog.CODEX else "headers"] = ctx.headers
+    files = [
+        File(manifest_path, _json(manifest)),
+        File(".mcp.json", _json({"mcpServers": {templates.PLUGIN_NAME: entry}})),
+        File(f"skills/{templates.SKILL_NAME}/SKILL.md", _skill_md(ctx)),
+        marketplace_file(target, target.marketplace_name, "./"),
+    ]
+    for command in templates.COMMANDS:
+        if target == catalog.CLAUDE_CODE:
+            files.append(File(
+                f"commands/{command.name}.md",
+                _markdown_command(command.description, command.argument_hint, command.prompt),
+            ))
+        else:
+            name = f"trainpilot-{command.name}"
+            # Codex skills take the user's request as context, not Claude's $ARGUMENTS.
+            prompt = command.prompt.replace("$ARGUMENTS", "the arguments supplied by the user")
+            files.append(File(
+                f"skills/{name}/SKILL.md",
+                f"---\nname: {name}\ndescription: {json.dumps(command.description)}\n---\n\n{prompt}\n",
+            ))
+    return files
+
+
+def render_bundle(
+    ctx: PluginContext, target: catalog.AgentTarget = catalog.ANTIGRAVITY,
+) -> Bundle:
+    """Render the selected native plugin; preserve Antigravity as the default."""
+    files = _antigravity_files(ctx) if target == catalog.ANTIGRAVITY else _native_files(ctx, target)
     return Bundle(
         files=tuple(files),
-        register=catalog.ANTIGRAVITY.register,
-        unregister=catalog.ANTIGRAVITY.unregister,
+        register=target.register,
+        unregister=target.unregister,
         mcp_url=ctx.mcp_url,
-        notes=tuple(notes),
+        notes=(target.note,) if target.note else (),
     )

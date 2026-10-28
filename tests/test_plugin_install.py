@@ -1,4 +1,4 @@
-"""Installing must be survivable: it writes into Antigravity's plugin directory.
+"""Pin the original Antigravity install behavior inside a throwaway HOME.
 
 The plugin bundle is TrainPilot's own, but what ``agy plugin install`` does with it is not:
 it copies the staged directory into the agent's plugin tree. So every test here runs inside

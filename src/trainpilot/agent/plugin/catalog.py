@@ -1,15 +1,8 @@
-"""The GPU-side agent this plugin targets, as data.
+"""Vendor facts for the supported GPU-side agents.
 
-Everything here was read off Antigravity's own documentation (``docs_url``) or its CLI
-``--help``; nothing is inferred from another agent's format, because the field most often
-got wrong is the one that fails silently -- a wrong remote-server key gives you an agent
-that starts up fine and never sees the tools.
-
-Antigravity is the only target. Claude Code, Gemini CLI, OpenCode and Codex each spell a
-remote MCP server differently, but none of them is a supported GPU-side agent here, and
-Antigravity's own CLI converts a Claude-shaped plugin on install while *dropping* the
-remote URL (see ``note``). So the plugin is rendered and published in Antigravity's shape
-only, and there is no table to keep in step: one agent, one set of facts.
+Each target uses its own native plugin layout and remote MCP field names. In particular,
+Antigravity's CLI drops the remote URL when converting a Claude-shaped plugin, so it must
+continue to receive its own format.
 """
 
 from dataclasses import dataclass
@@ -18,19 +11,11 @@ from typing import Tuple
 
 @dataclass(frozen=True)
 class AgentTarget:
-    """The one supported GPU-side agent.
+    """Native plugin commands and documentation for one agent.
 
-    Attributes:
-        key: Short key for messages and log lines, e.g. ``antigravity``.
-        display_name: Human label for listings.
-        docs_url: Vendor page the paths and key spellings below were verified against.
-        transport: The vendor's own spelling for a remote Streamable HTTP server. Kept as
-            data because it is the field most often got wrong, and tests assert on it.
-        register: argv templates run after staging the bundle. ``{bundle}`` is replaced with
-            the staged directory.
-        unregister: argv templates that take the plugin back out, run by ``uninstall``.
-        agent_cli: Binary that must exist for ``register`` to run.
-        note: One line of caveat shown by ``plugin install``.
+    ``{bundle}`` in argv templates is replaced with the staged directory. Marketplace
+    names are distinct from the published repository marketplace to allow a configured
+    local install without changing the repository installation's source.
     """
 
     key: str
@@ -41,6 +26,7 @@ class AgentTarget:
     unregister: Tuple[Tuple[str, ...], ...]
     agent_cli: str
     note: str = ""
+    marketplace_name: str = ""
 
 
 ANTIGRAVITY = AgentTarget(
@@ -57,3 +43,40 @@ ANTIGRAVITY = AgentTarget(
         "so only this shape connects."
     ),
 )
+
+CLAUDE_CODE = AgentTarget(
+    key="claude-code",
+    display_name="Claude Code",
+    docs_url="https://code.claude.com/docs/en/plugins-reference",
+    transport="type=http + url + headers",
+    register=(
+        ("claude", "plugin", "marketplace", "add", "{bundle}"),
+        ("claude", "plugin", "install", "trainpilot@trainpilot-local-claude-code", "--scope", "user"),
+    ),
+    unregister=(
+        ("claude", "plugin", "uninstall", "trainpilot@trainpilot-local-claude-code", "--scope", "user"),
+        ("claude", "plugin", "marketplace", "remove", "trainpilot-local-claude-code"),
+    ),
+    agent_cli="claude",
+    marketplace_name="trainpilot-local-claude-code",
+)
+
+CODEX = AgentTarget(
+    key="codex",
+    display_name="Codex",
+    docs_url="https://developers.openai.com/plugins/build/plugins",
+    transport="type=http + url + http_headers",
+    register=(
+        ("codex", "plugin", "marketplace", "add", "{bundle}"),
+        ("codex", "plugin", "add", "trainpilot@trainpilot-local-codex"),
+    ),
+    unregister=(
+        ("codex", "plugin", "remove", "trainpilot@trainpilot-local-codex"),
+        ("codex", "plugin", "marketplace", "remove", "trainpilot-local-codex"),
+    ),
+    agent_cli="codex",
+    marketplace_name="trainpilot-local-codex",
+    note="Requires a Codex version with `codex plugin` support; restart after installation.",
+)
+
+TARGETS = {target.key: target for target in (ANTIGRAVITY, CLAUDE_CODE, CODEX)}

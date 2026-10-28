@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Regenerate the checked-in Antigravity plugin; standard library only.
+"""Regenerate all checked-in native plugins and marketplaces; standard library only.
 
-The plugin `agy plugin install <repository-url>` picks up is generated from the same
-renderer as the one-shot installer, so the two cannot drift. Nothing here is hand-edited:
-edit the renderer or the templates and run this again.
+Published assets use the same renderer as the one-shot installer. Edit the renderer or
+shared templates and run this script; do not hand-edit the generated files.
 """
 
 import sys

@@ -155,7 +155,7 @@ def build_milestone_card(
 ) -> Dict[str, Any]:
     """Construct an informative milestone card (read-only) without buttons.
 
-    ``agent_note`` 为外部 AI 智能体 (Antigravity CLI) 针对当前
+    ``agent_note`` 为外部 AI 智能体针对当前
     实际情况自主生成的 1-3 句点评 (如收敛趋势、指标解读、风险提示、下一步建议),
     渲染为独立的 ``🤖 Agent 智能点评`` 区块, 与原始 ``📝 阶段描述`` 分开展示。
     为向后兼容, 未提供时也会尝试从 ``extra`` 中解析

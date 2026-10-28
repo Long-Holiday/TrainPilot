@@ -2,8 +2,8 @@
 
 Two things are pinned here:
 
-* the checked-in Antigravity plugin is exactly what the canonical renderer produces, is
-  free of credentials, and is the *only* thing the repository publishes under ``plugins/``;
+* the checked-in native plugins and marketplace indexes match the canonical renderer,
+  are free of credentials, and publish only plugin assets under ``plugins/``;
 * ``scripts/install_agent.py`` works with the standard library only (``python -I -S``),
   extracts only its allowlisted sources from a downloaded archive, and still writes
   nothing outside the throwaway ``$HOME`` it is given.
@@ -105,9 +105,10 @@ def test_the_repository_publishes_plugin_assets_and_nothing_else():
     published = tree(ROOT / "plugins")
     assert published == {
         Path(relative).relative_to("plugins") for relative in release.published_files()
+        if relative.startswith("plugins/")
     }
-    assert not (ROOT / ".claude-plugin").exists(), "a Claude marketplace is no longer published"
-    assert not (ROOT / "plugins" / "claude-code").exists()
+    assert (ROOT / ".claude-plugin" / "marketplace.json").is_file()
+    assert (ROOT / ".agents" / "plugins" / "marketplace.json").is_file()
 
 
 def test_published_plugin_carries_no_credentials_and_a_literal_default_address():
@@ -121,6 +122,26 @@ def test_published_plugin_carries_no_credentials_and_a_literal_default_address()
     for content in files.values():
         assert "Bearer" not in content
         assert "${" not in content
+
+
+@pytest.mark.parametrize("agent", ["claude-code", "codex"])
+def test_published_native_marketplace_points_to_its_own_plugin(agent):
+    files = release.published_files()
+    directory = f"plugins/{agent}"
+    if agent == "claude-code":
+        index_path = ".claude-plugin/marketplace.json"
+        manifest_path = f"{directory}/.claude-plugin/plugin.json"
+        index = json.loads(files[index_path])
+        assert index["plugins"][0]["source"] == f"./{directory}"
+    else:
+        index_path = ".agents/plugins/marketplace.json"
+        manifest_path = f"{directory}/.codex-plugin/plugin.json"
+        index = json.loads(files[index_path])
+        assert index["plugins"][0]["source"] == {"source": "local", "path": f"./{directory}"}
+    assert index["name"] == "trainpilot"
+    assert json.loads(files[manifest_path])["name"] == "trainpilot"
+    entry = json.loads(files[f"{directory}/.mcp.json"])["mcpServers"]["trainpilot"]
+    assert entry == {"type": "http", "url": "http://127.0.0.1:28780/mcp"}
 
 
 def test_published_manifest_is_the_vendor_shape():
@@ -190,12 +211,13 @@ def test_the_generator_writes_only_the_published_files(throwaway_home):
     assert tree(work) == set(), "the generator must write nothing outside the repository"
 
 
-def test_installer_lists_the_supported_target(throwaway_home):
+def test_installer_lists_the_supported_targets(throwaway_home):
     home, work = throwaway_home
     result = run_installer(home, work, "list")
     assert result.returncode == 0, result.stderr
-    assert catalog.ANTIGRAVITY.display_name in result.stdout
-    assert catalog.ANTIGRAVITY.transport in result.stdout
+    for target in catalog.TARGETS.values():
+        assert target.display_name in result.stdout
+        assert target.transport in result.stdout
 
 
 def test_installer_stages_the_bundle_and_reports_a_missing_agy(throwaway_home):
@@ -216,9 +238,27 @@ def test_installer_render_writes_only_where_it_is_told(throwaway_home):
     expected = {
         Path(relative).relative_to("plugins/trainpilot")
         for relative in release.published_files()
+        if relative.startswith("plugins/trainpilot/")
     }
     assert tree(out) == expected
     assert tree(home) == set(), "render must not stage or install anything"
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude-code"])
+def test_standalone_native_render_needs_no_site_packages(throwaway_home, agent):
+    home, work = throwaway_home
+    out = work / agent
+    result = run_installer(
+        home, work, "render", "--agent", agent, "--out", str(out),
+        "--server-url", "https://gateway.example.com", "--api-token", "test-token",
+    )
+    assert result.returncode == 0, result.stderr
+    manifest_dir = ".codex-plugin" if agent == "codex" else ".claude-plugin"
+    assert (out / manifest_dir / "plugin.json").is_file()
+    entry = json.loads((out / ".mcp.json").read_text())["mcpServers"]["trainpilot"]
+    assert entry["url"] == "https://gateway.example.com/mcp"
+    assert "test-token" in json.dumps(entry)
+    assert tree(home) == set()
 
 
 def test_installer_uninstall_gives_the_tree_back(throwaway_home):

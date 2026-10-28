@@ -1,0 +1,6 @@
+{
+  "name": "trainpilot",
+  "version": "0.2.0",
+  "description": "Supervise a GPU training run through a TrainPilot control plane: report progress and anomalies, wait for the engineer's decision, and acknowledge the recovery.",
+  "skills": "./skills/"
+}

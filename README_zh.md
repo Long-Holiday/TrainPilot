@@ -11,7 +11,7 @@
 </p>
 
 面向**无公网 IP、无法接收外部 Webhook** 的内网 GPU 节点：GPU 侧的 AI Agent —— 目前支持
-Antigravity CLI —— 通过 MCP 上报训练进度与异常，TrainPilot 把异常变成飞书审批卡片，并把人的
+Codex、Claude Code 和 Antigravity CLI —— 通过 MCP 上报训练进度与异常，TrainPilot 把异常变成飞书审批卡片，并把人的
 一键决策实时回传给 Agent。GPU 侧一条命令即可安装，见
 [接入 GPU 侧 Agent](#接入-gpu-侧-agent)。
 
@@ -26,7 +26,7 @@ Antigravity CLI —— 通过 MCP 上报训练进度与异常，TrainPilot 把�
 flowchart TB
     subgraph GPU["内网 GPU 节点（仅出网）"]
         Job["训练作业"]
-        Agent["Antigravity CLI（agy）"]
+        Agent["Codex / Claude Code / Antigravity CLI"]
         Job -->|日志、退出状态| Agent
     end
 
@@ -109,13 +109,46 @@ uv run python examples/mock_training.py
 **服务端与 GPU 端分开安装。** Python 服务只运行在你的 MCP 服务器；GPU 端只安装 skill 与远程 MCP
 连接信息，不需要任何 Python 包、命令行工具或本地服务。运行时由 Agent 自带的 MCP 客户端直连服务器的 `/mcp`。
 
-**支持的 GPU 侧 Agent 只有 Antigravity CLI（`agy`）。**
+**同时支持 Codex、Claude Code 和 Antigravity CLI（`agy`）。** 每种 Agent 都使用自己的原生插件格式
+与远程 MCP 配置。轻量安装器通过 `--agent codex`、`--agent claude-code` 或
+`--agent antigravity` 选择目标；默认仍为 Antigravity，兼容原有命令。
 
-### Antigravity CLI：直接从 GitHub 安装原生插件
+### Claude Code：原生 marketplace 插件
 
 ```bash
-agy plugin install https://github.com/Long-Holiday/TrainPilot
+claude plugin marketplace add Long-Holiday/TrainPilot
+claude plugin install trainpilot@trainpilot --scope user
 ```
+
+已用 Claude Code 2.1.312 验证。Claude Code 加载 `plugins/claude-code/` 中的
+`.claude-plugin/plugin.json`、`.mcp.json`、
+`trainpilot` skill，以及 `/trainpilot:protocol`、`/trainpilot:status`、`/trainpilot:report`。
+发布版默认连接 `http://127.0.0.1:28780/mcp`，不含认证信息。自定义网关和 token 请用下方轻量安装器。
+
+### Codex：原生 marketplace 插件
+
+```bash
+codex plugin marketplace add Long-Holiday/TrainPilot
+codex plugin add trainpilot@trainpilot
+```
+
+已用 Codex 0.164.0 验证，需要支持 `codex plugin` 的版本。Codex 使用独立的 `.agents/plugins/marketplace.json`
+索引和 `plugins/codex/.codex-plugin/plugin.json`，通过 `.mcp.json` 连接 MCP，提供
+`trainpilot`、`trainpilot-protocol`、`trainpilot-status`、`trainpilot-report` 四个 skill。
+后三者复用 Claude Code 斜杠命令的提示词。发布版默认连接 `http://127.0.0.1:28780/mcp`，
+不含认证信息；自定义地址或 token 请用轻量安装器。安装后重启 Agent。
+
+### Antigravity CLI：指定原生插件目录安装
+
+已克隆仓库时，显式选择 Antigravity 自己的目录：
+
+```bash
+agy plugin install ./plugins/trainpilot
+```
+
+自定义网关使用 `python3 -I -S scripts/install_agent.py install --agent antigravity`
+并附上下方连接参数；未克隆仓库时使用轻量安装器。
+不要把整个仓库交给 `agy plugin install`：它会批量安装不同原生格式，同名插件可能相互覆盖配置。
 
 仓库里的 `plugins/trainpilot/` 就是一份原生 Antigravity 插件（manifest、远程 MCP 配置、skill、rules，
 外加 `protocol`/`status`/`report` 三个斜杠命令，agy 会挂在插件名下列出），
@@ -140,7 +173,7 @@ $EDITOR ~/.gemini/config/plugins/trainpilot/mcp_config.json
 `serverUrl` 是 Antigravity 认的键（它不接受 `url`、`httpUrl`）。只有服务端设置了
 `TRAINPILOT_API_TOKEN` 时才需要加 `headers`；改完重启 Agent。
 
-### 或者：一次性轻量安装器
+### 通用的一次性轻量安装器
 
 它会把真实的网关地址与 token 直接渲染进同一份插件，**只在安装时需要 Python ≥3.10 标准库**，
 不安装任何第三方包，不改训练环境。先下载脚本（建议查看后执行；可把 URL 中的 `main` 和 `--ref`
@@ -151,13 +184,24 @@ curl -fsSL https://raw.githubusercontent.com/Long-Holiday/TrainPilot/main/script
 ```
 
 ```bash
-python3 -I -S /tmp/trainpilot-install-agent.py --ref main install --server-url "https://你的MCP服务器" --api-token "与服务端一致的token" --task-id "训练任务名"
+python3 -I -S /tmp/trainpilot-install-agent.py --ref main install --agent codex --server-url "https://你的MCP服务器" --api-token "与服务端一致的token" --task-id "训练任务名"
+python3 -I -S /tmp/trainpilot-install-agent.py --ref main install --agent claude-code --server-url "https://你的MCP服务器" --api-token "与服务端一致的token" --task-id "训练任务名"
 ```
 
-已克隆仓库时可直接使用 `python3 -I -S scripts/install_agent.py install --server-url ...`，无需
-`uv sync`。脚本独立运行时仅临时下载并加载白名单中的配置安装源码，结束后清理；落盘的插件不依赖这些
-Python 文件。插件先落在 `~/.trainpilot/plugins/trainpilot`，再用 `agy plugin install` 注册；`agy`
-不在 PATH 上时只暂存文件并返回失败提示，不会谎报注册成功。
+已克隆仓库时可直接使用 `python3 -I -S scripts/install_agent.py install --agent codex --server-url ...`
+或 `--agent claude-code`，无需 `uv sync`；原有 Agent 使用 `--agent antigravity`。
+脚本独立运行时仅临时下载并加载白名单中的配置安装源码，结束后清理；落盘的插件不依赖这些 Python 文件。
+
+| Agent | 暂存目录 | 原生注册方式 |
+|:---|:---|:---|
+| Codex | `~/.trainpilot/plugins/codex/trainpilot` | `codex plugin marketplace add` + `codex plugin add` |
+| Claude Code | `~/.trainpilot/plugins/claude-code/trainpilot` | `claude plugin marketplace add` + `claude plugin install --scope user` |
+| Antigravity | `~/.trainpilot/plugins/trainpilot` | `agy plugin install` |
+
+对应 CLI 必须在 PATH 上。CLI 缺失或注册失败时，安装器保留暂存文件、返回失败，并给出重试命令。
+本地安装使用独立 marketplace 名 `trainpilot-local-codex`、`trainpilot-local-claude-code`。
+修改网关、token 或任务绑定后，重新运行同一条安装命令并重启 Agent 即可。
+Codex 的认证信息使用 `http_headers`，Claude Code 与 Antigravity 使用 `headers`。
 
 常用命令（以下以已经下载的轻量安装器为例）：
 
@@ -166,18 +210,19 @@ python3 -I -S /tmp/trainpilot-install-agent.py list
 ```
 
 ```bash
-python3 -I -S /tmp/trainpilot-install-agent.py render --out /tmp/trainpilot-plugin
+python3 -I -S /tmp/trainpilot-install-agent.py render --agent codex --out /tmp/trainpilot-plugin
 ```
 
 ```bash
-python3 -I -S /tmp/trainpilot-install-agent.py install --dry-run
+python3 -I -S /tmp/trainpilot-install-agent.py install --agent claude-code --dry-run
 ```
 
 ```bash
-python3 -I -S /tmp/trainpilot-install-agent.py uninstall
+python3 -I -S /tmp/trainpilot-install-agent.py uninstall --agent codex
 ```
 
-两种方式**只选一种**：同时装仓库插件和安装器渲染的那份，Agent 会拿到两个 TrainPilot MCP 连接。
+**每个 Agent 选择一种安装方式**：同时装仓库插件和安装器渲染的那份，该 Agent 会拿到两个 TrainPilot
+MCP 连接。不同 Agent 可以同时安装，暂存目录互相隔离。
 GPU 端到此为止：没有 Python 包、没有常驻进程、也没有需要与服务端同步版本的客户端库。
 
 ### 行为规则从哪来
@@ -187,8 +232,9 @@ skill 与 rules 只指向实时连接，**不复述规则，也不要求任何�
 初始化说明，需要修复或重新连接集成，而不是凭记忆执行。安装后重启 Agent，先确认 TrainPilot
 工具可用。
 
-插件是 TrainPilot 自己的，安装过程不改你的任何文件：安装器只写 `~/.trainpilot/plugins/trainpilot`，
-`agy plugin install` 自己管 `~/.gemini/config/plugins/trainpilot`，`uninstall` 会把两处都清掉。
+安装器只写 TrainPilot 自己的暂存目录，由对应 Agent 的 CLI 管理插件配置与缓存。
+`uninstall --agent ...` 先注销该 Agent 的本地插件与 marketplace，再删除其暂存目录；
+注销失败时保留文件以便重试。
 
 原生 MCP 调用省略 `task_id` 时，回退到**服务端**的 `TRAINPILOT_TASK_ID`，而非 GPU 端环境变量。
 建议每个训练 run 显式传入独立 task id；轻量安装器的 `--task-id` 会在 skill 中记录绑定提示。
@@ -288,12 +334,16 @@ docker run -d -p 28780:28780 -v $(pwd)/trainpilot.db:/app/trainpilot.db \
 src/trainpilot/
 ├── server/     # 控制面：MCP 工具、信箱、SQLite WAL、飞书卡片、REST
 ├── agent/      # GPU 侧集成
-│   └── plugin/ # 渲染 Antigravity 插件（仅标准库）
+│   └── plugin/ # 渲染 Antigravity、Claude Code、Codex 原生插件（仅标准库）
 └── common/     # Schemas、状态机、网关地址解析
 scripts/
 ├── install_agent.py   # 一次性 GPU 安装：skill + 远程 MCP 配置，仅标准库
 └── build_plugins.py   # 重新生成仓库里已提交的插件文件
-plugins/trainpilot/    # 生成的原生 Antigravity 插件：manifest、mcp_config.json、skill、rules、commands
+plugins/trainpilot/    # 生成的 Antigravity 原生插件
+plugins/claude-code/   # 生成的 Claude Code 原生插件
+plugins/codex/         # 生成的 Codex 原生插件
+.claude-plugin/        # 生成的 Claude Code marketplace
+.agents/plugins/       # 生成的 Codex marketplace
 examples/       # mock_training.py —— 无需 GPU 即可跑通完整 HITL 闭环
 ```
 
