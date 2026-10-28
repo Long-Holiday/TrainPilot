@@ -5,8 +5,8 @@ description = "Centralized HITL Control Gateway for GPU Distributed Training wit
 readme = "README.md"
 requires-python = ">=3.10"
 # This package is the control plane. The GPU side installs no Python at all: a GPU node
-# gets a skill plus a remote MCP entry (scripts/install_agent.py, standard library only,
-# or a published native plugin), and its agent's own MCP client talks to /mcp.
+# gets a published native plugin through its agent's CLI, and the agent's own MCP client
+# talks to /mcp.
 # Every runtime dependency therefore belongs to the server half below.
 dependencies = []
 

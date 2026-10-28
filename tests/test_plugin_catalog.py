@@ -27,7 +27,7 @@ MCP_CONFIG = "mcp_config.json"
 
 
 def ctx(token=TOKEN) -> render.PluginContext:
-    return render.PluginContext(gateway_url=GATEWAY, api_token=token, task_id="train-task-default")
+    return render.PluginContext(gateway_url=GATEWAY, api_token=token)
 
 
 def bundle(**kwargs) -> render.Bundle:
@@ -119,16 +119,10 @@ def test_no_shipped_text_names_a_trainpilot_command():
     assert "uv tool install" not in text
 
 
-def test_an_installed_task_id_becomes_a_binding_hint():
-    """The binding is an install-time hint; the rules themselves stay on the server."""
-    bound = skill_body(bundle())
-    assert "Installed task binding" in bound
-    assert "train-task-default" in bound
-
-    unbound = render.render_bundle(
-        render.PluginContext(GATEWAY, TOKEN, task_id="")
-    )
-    assert "Installed task binding" not in skill_body(unbound)
+def test_skill_does_not_ship_an_installer_task_binding():
+    body = skill_body(bundle())
+    assert "Installed task binding" not in body
+    assert "train-task-default" not in body
 
 
 def test_skill_does_not_restate_the_server_protocol():
@@ -199,13 +193,6 @@ def test_bundle_artifacts_are_parseable():
     for path, content in file_map(bundle()).items():
         if path.endswith(".json"):
             json.loads(content)
-
-
-def test_the_bundle_is_registerable_by_the_agents_own_cli():
-    target = catalog.ANTIGRAVITY
-    assert target.register, "there is no way to register the plugin"
-    assert target.agent_cli, "the plugin is registered through no CLI"
-    assert any("{bundle}" in part for argv in target.register for part in argv)
 
 
 def test_the_target_names_the_documentation_it_was_verified_against():

@@ -1,8 +1,8 @@
 """The one copy of every word the GPU-side plugin ships.
 
 One set of prose for every agent layout: the skill, the rules pointer and the commands.
-Keeping the prose here means the published assets and the one-shot installer cannot drift
-apart when support for another agent is added.
+Keeping the prose here means the published native plugins cannot drift apart when support
+for another agent is added.
 
 What is deliberately *not* here is the behaviour protocol. Per AGENTS.md the agent-facing
 contract lives in exactly one place, ``mcp_server._INSTRUCTIONS`` plus the tool

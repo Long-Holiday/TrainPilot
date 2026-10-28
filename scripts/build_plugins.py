@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Regenerate all checked-in native plugins and marketplaces; standard library only.
 
-Published assets use the same renderer as the one-shot installer. Edit the renderer or
-shared templates and run this script; do not hand-edit the generated files.
+Published assets use the canonical renderer. Edit the renderer or shared templates and
+run this script; do not hand-edit the generated files.
 """
 
 import sys

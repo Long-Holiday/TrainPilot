@@ -1,7 +1,7 @@
 """GPU-side native plugins for Antigravity, Claude Code and Codex.
 
 The installed assets use each agent's own MCP client. This package contains only the
-standard-library catalog, shared prose, renderer and installer; no GPU-side Python client.
+standard-library catalog, shared prose and renderer; no installer or GPU-side Python client.
 """
 
 from trainpilot.agent.plugin.catalog import ANTIGRAVITY, CLAUDE_CODE, CODEX, TARGETS, AgentTarget

@@ -17,8 +17,8 @@ _SCHEMA_EXPORTS = (
 
 
 def __getattr__(name):
-    # Schemas need pydantic, and the GPU-side installer must import this package with a
-    # bare python3 (no site-packages), so they resolve on first use instead.
+    # Schemas need pydantic, but the plugin generator runs without site-packages,
+    # so they resolve on first use instead.
     if name in _SCHEMA_EXPORTS:
         from trainpilot.common import schemas
 
